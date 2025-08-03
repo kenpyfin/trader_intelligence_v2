@@ -1,3 +1,8 @@
+import sys
+import os
+# Add the project root to the Python path to allow for absolute imports from anywhere.
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
 import pandas as pd
 import numpy as np
 from datetime import date, timedelta
