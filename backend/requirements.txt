@@ -17,3 +17,5 @@ statsmodels
 scipy
 beautifulsoup4
 tqdm
+matplotlib
+seaborn
