@@ -7,7 +7,6 @@ import csv
 import time
 import timeit
 import pytz
-import talib as ta
 import numpy as np
 from pandas import *
 import xlrd
