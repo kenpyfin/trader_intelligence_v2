@@ -14,6 +14,9 @@ RUN pip install --no-cache-dir --upgrade -r /app/requirements.txt
 # Copy the rest of the backend application's code into the container at /app
 COPY . /app
 
+# Add the project root to the python path to allow imports from src and other root directories.
+ENV PYTHONPATH=/app
+
 # The command to run the application using uvicorn.
 # It will listen on the port specified by the BACKEND_PORT environment variable from .env
 # The --reload flag is added for development convenience.
