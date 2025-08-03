@@ -32,6 +32,22 @@ The proposed architecture is a modern, containerized web application with a deco
                                    +-------------+         +-------------+         +-------------+
 ```
 
+### 1.1. Deployment Strategy: Why Docker?
+
+Using **Docker** and **Docker Compose**, as established in the project's example files, is the ideal deployment strategy for this application. It is not just a viable option but a best practice for modern web development.
+
+-   **Consistency:** Docker containers package the application and its dependencies together, ensuring that the software runs the same way in development, testing, and production environments. This eliminates the common "it works on my machine" problem.
+-   **Isolation:** The frontend (Node.js/React) and backend (Python/FastAPI) services run in separate, isolated containers. This prevents dependency conflicts and allows them to be developed, updated, and scaled independently.
+-   **Portability & Scalability:** A containerized application can run on any system that supports Docker, from a developer's laptop to a cloud provider (AWS, GCP, Azure). While `docker-compose` is excellent for single-host development, the same Docker images can be deployed to powerful orchestration platforms like Kubernetes for automated scaling and high availability.
+-   **Simplified Setup:** For new developers, the setup process is reduced to installing Docker and running a single command (`docker-compose up`). There is no need to manually install and configure Python, Node.js, databases, or web servers.
+
+#### Alternatives Considered
+
+-   **Platform-as-a-Service (PaaS) (e.g., Heroku, Render):** PaaS solutions are easier to start with but offer less control and can become more expensive at scale. Many modern PaaS providers now deploy applications from Dockerfiles, making Docker a foundational skill even in that context.
+-   **Bare-Metal/VM Deployment:** Manually installing and managing all software components on a server is complex, error-prone, and difficult to reproduce consistently. This approach does not scale well and is not recommended for a multi-service application.
+
+For these reasons, this plan will proceed with the established container-based strategy.
+
 ## 2. Refactoring `option_trade.py`
 
 The existing Streamlit application (`option_trade.py`) contains the core business logic. For a scalable application, this logic must be decoupled from the UI.
