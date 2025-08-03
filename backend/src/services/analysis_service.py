@@ -9,8 +9,8 @@ import re
 # and is incompatible with the 'uvloop' used by uvicorn.
 
 
-from my_libs_py3.my_data import PriceDataFetcher
-from my_libs_py3.fmp import FMPClient
+from src.my_libs_py3.my_data import PriceDataFetcher
+from src.my_libs_py3.fmp import FMPClient
 import plotly.graph_objects as go
 
 
