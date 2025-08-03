@@ -9,3 +9,11 @@ python-dotenv
 requests
 # pymongo might be needed by my_lib.py for synchronous DB access
 pymongo
+
+# Dependencies from my_lib.py
+pytz
+xlrd
+statsmodels
+scipy
+beautifulsoup4
+tqdm
