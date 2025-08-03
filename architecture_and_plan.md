@@ -65,16 +65,16 @@ The existing Streamlit application (`option_trade.py`) contains the core busines
 
 This plan breaks down the project into iterative phases, delivering value quickly and building upon a solid foundation.
 
-### Phase 1: Foundation & Core Logic Migration (MVP Backend)
+### Phase 1: Foundation & Core Logic Migration (MVP Backend) - In Progress
 *   **Goal:** Validate the end-to-end architecture with core functionality.
 *   **Tasks:**
-    1.  Set up the repository with the `frontend` and `backend` directories.
-    2.  Implement the basic FastAPI backend service based on the `backend/Dockerfile`.
-    3.  Migrate the core analysis and pricing models from `option_trade.py` into a backend `analytics` module.
-    4.  Integrate `PriceDataFetcher` into the backend to fetch data from FMP/Finviz.
-    5.  Create a single API endpoint (e.g., `/api/analyze/{ticker}`) that runs the analysis and returns the result as JSON.
-    6.  Set up a minimal React frontend that can call this endpoint and display the raw JSON output.
-    7.  Use Docker Compose to run all services locally.
+    1.  ✅ Set up the repository with the `frontend` and `backend` directories.
+    2.  ✅ Implement the basic FastAPI backend service based on the `backend/Dockerfile`.
+    3.  ✅ Migrate the core analysis and pricing models from `option_trade.py` into a backend `analytics` module.
+    4.  ✅ Integrate `PriceDataFetcher` into the backend to fetch data from FMP/Finviz.
+    5.  ✅ Create a single API endpoint (`POST /api/analyze/stock`) that runs the analysis and returns the result as JSON.
+    6.  ✅ Set up a minimal React frontend that can call this endpoint and display the raw JSON output.
+    7.  ✅ Use Docker Compose to run all services locally.
 
 ### Phase 2: User Interface & Position Tracking
 *   **Goal:** Build a user-friendly interface for analysis and portfolio tracking.

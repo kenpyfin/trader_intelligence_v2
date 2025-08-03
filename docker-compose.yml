@@ -1,0 +1,31 @@
+# This file orchestrates the frontend and backend services for the trading platform.
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    # The backend container shares the host's network.
+    # It will be accessible on localhost at the port specified in the .env file.
+    network_mode: "host"
+    volumes:
+      # Mount the source code for hot-reloading during development
+      - ./backend/src:/app/src
+      - ./backend/my_libs_py3:/app/my_libs_py3
+    env_file:
+      - .env
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      # Expose the frontend's port to the host machine.
+      - "${FRONTEND_PORT}:${FRONTEND_PORT}"
+    environment:
+      # Pass environment variables to be used by nginx.conf
+      - FRONTEND_PORT=${FRONTEND_PORT}
+      - BACKEND_PORT=${BACKEND_PORT}
+    depends_on:
+      - backend
