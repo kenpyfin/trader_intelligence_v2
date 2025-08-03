@@ -23,4 +23,4 @@ RUN apk add --no-cache gettext
 
 # When the container starts, substitute environment variables in the template
 # and output the final config to the correct location. Then start Nginx.
-CMD ["/bin/sh", "-c", "envsubst < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"]
+CMD ["/bin/sh", "-c", "envsubst '$FRONTEND_PORT $BACKEND_PORT' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"]
