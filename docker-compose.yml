@@ -27,5 +27,9 @@ services:
       # Pass environment variables to be used by nginx.conf
       - FRONTEND_PORT=${FRONTEND_PORT}
       - BACKEND_PORT=${BACKEND_PORT}
+    extra_hosts:
+      # This allows the frontend container to resolve 'host.docker.internal'
+      # to the host machine's IP address, enabling it to reach the backend service.
+      - "host.docker.internal:host-gateway"
     depends_on:
       - backend
