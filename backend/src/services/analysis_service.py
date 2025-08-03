@@ -5,13 +5,8 @@ from datetime import date, timedelta
 import json
 import re
 
-# Patch for ib_insync compatibility in an async environment
-try:
-    asyncio.get_event_loop()
-except RuntimeError:
-    asyncio.set_event_loop(asyncio.new_event_loop())
-import ib_insync.util
-ib_insync.util.patchAsyncio()
+# IB-insync asyncio patching is not required in a FastAPI/uvicorn environment
+# and is incompatible with the 'uvloop' used by uvicorn.
 
 
 from my_libs_py3.my_data import PriceDataFetcher
