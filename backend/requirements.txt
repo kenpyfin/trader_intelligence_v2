@@ -19,3 +19,9 @@ beautifulsoup4
 tqdm
 matplotlib
 seaborn
+
+# Other dependencies discovered from screening files
+backtrader
+lxml
+nest_asyncio
+plotly
