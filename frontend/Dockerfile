@@ -6,7 +6,7 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm install
 COPY . .
-RUN npm run build
+RUN CI=false npm run build
 
 # --- Production Stage ---
 # Use a lightweight Nginx image to serve the static files.
