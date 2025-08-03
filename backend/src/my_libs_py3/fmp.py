@@ -5,26 +5,18 @@ import requests as r
 from datetime import datetime, timedelta
 import time
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 class FMPClient:
     def __init__(self):
-        self.api_key = self.readgateway(9).rstrip()
+        self.api_key = os.getenv("FMP_API_KEY")
+        if not self.api_key:
+            raise ValueError("FMP_API_KEY environment variable not set. Please add it to your .env file.")
         self.url_root_v3 = 'https://financialmodelingprep.com/api/v3/'
         self.url_root_v4 = 'https://financialmodelingprep.com/api/v4/'
-
-    def readgateway(self, line):
-        home_dir = self.get_home_dir()
-        with open(home_dir + "My_Trader/record-Copy1.txt") as file:
-            for i in range(line):
-                abc = file.readline()
-        return abc
-
-    def get_home_dir(self):
-        if os.path.exists('/opt/airflow'):
-            return "/opt/airflow/notebook/"
-        else:
-            return "/home/ken/big_storage/airflowProd/airflow_notebook/"
 
     def fetch_url_with_rate_limit(self, url):
         response = requests.get(url)
