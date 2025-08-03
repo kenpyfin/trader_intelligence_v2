@@ -1,13 +1,8 @@
-import sys
-import os
-# Add the project root to the Python path to allow for absolute imports from anywhere.
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
-
 import pandas as pd
 import numpy as np
 from datetime import date, timedelta
-from my_libs_py3.my_data import PriceDataFetcher
-from my_libs_py3.fmp import FMPClient
+from src.my_libs_py3.my_data import PriceDataFetcher
+from src.my_libs_py3.fmp import FMPClient
 
 # This file is a migration of the analysis logic from option_trade.py.
 # All Streamlit-specific code (st.*) has been removed.
