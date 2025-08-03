@@ -30,7 +30,6 @@ function App() {
   return (
     <div style={{ padding: '20px', fontFamily: 'sans-serif' }}>
       <h1>Trader Intelligence</h1>
-      <p>Phase 1: Core Logic Migration & API Validation</p>
       
       <form onSubmit={handleAnalyze}>
         <div>
