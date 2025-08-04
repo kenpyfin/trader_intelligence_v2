@@ -577,86 +577,84 @@ def update_fundamentals(robinhood,my_list = False, test_mode=False,skip_can=True
         print ("cantrade done!\n")
 
 
-#     start = timeit.default_timer()
-#     if  type(my_list) ==bool:
-#         tradeable = pd.read_csv(directory +"cantrade.csv")
-#         tradeable = tradeable.drop("Unnamed: 0",axis = 1)
-#     else:       
-#         tradeable = pd.DataFrame(my_list,columns=["Ticker"])
+    start = timeit.default_timer()
+    if not isinstance(my_list, bool):
+        tradeable = pd.DataFrame(my_list, columns=["Ticker"])
+    else:
+        tradeable = pd.read_csv(directory + "cantrade.csv")
+        if "Unnamed: 0" in tradeable.columns:
+            tradeable = tradeable.drop("Unnamed: 0", axis=1)
 
-# #        tradeable = tradeable.rename(columns={"0":"Ticker"})
+    # Initialize columns
+    fund_cols = ['Industry', 'Sector', 'Market_cap', 'Earnings_date', "PEG", "Profit_Margin", 
+                 "Avg_Volume", "Inst_Own", "Beta", "Current_Ratio", "PB", "Debt_to_Equity", 
+                 "LDebt_to_Equity", "Sales", "ROE"]
+    for col in fund_cols:
+        tradeable[col] = np.NaN
 
-#     tradeable['Industry']=np.NaN
-#     tradeable['Sector']=np.NaN
-#     tradeable['Market_cap']=np.NaN
-#     tradeable['Earnings_date']=np.NaN
-#     tradeable["PEG"]=np.NaN
-#     tradeable["Avg_Volume"]=np.NaN
-#     tradeable["Current_Ratio"]=np.NaN
-#     tradeable["Inst_Own"]=np.NaN
-#     tradeable["Beta"]=np.NaN
-#     tradeable["Profit_Margin"] = np.NaN
-#     tradeable["Beta"] = np.NaN
-#     tradeable["PB"] = np.NaN
-#     tradeable["Debt_to_Equity"] = np.NaN
-#     tradeable["LDebt_to_Equity"] = np.NaN
-#     tradeable["Sales"] = np.NaN
-#     tradeable["ROE"] = np.NaN
-# #
-# #Avg_Volume = get_text("Avg Volume")
-# #        Current_Ratio = get_text("Current Ratio")
-# #        Inst_Own = get_text("Inst Own")
-# #        Beta = get_text("Beta")
-#     mongod.conn.cursor.execute("drop table all_symbol.cantrade")
-#     for i in range(len(tradeable.index)):
-#         try:
-#             tradeable.loc[tradeable.iloc[i].name,'Industry'],\
-#             tradeable.loc[tradeable.iloc[i].name,'Sector'],\
-#             tradeable.loc[tradeable.iloc[i].name,'Market_cap'],\
-#             tradeable.loc[tradeable.iloc[i].name,'Earnings_date'],\
-#             tradeable.loc[tradeable.iloc[i].name,"PEG"],\
-#             tradeable.loc[tradeable.iloc[i].name,"Profit_Margin"],\
-#             tradeable.loc[tradeable.iloc[i].name,"Avg_Volume"],\
-#             tradeable.loc[tradeable.iloc[i].name,"Inst_Own"],\
-#             tradeable.loc[tradeable.iloc[i].name,"Beta"],\
-#             tradeable.loc[tradeable.iloc[i].name,"Current_Ratio"],\
-#             tradeable.loc[tradeable.iloc[i].name,"PB"],\
-#             tradeable.loc[tradeable.iloc[i].name,"Debt_to_Equity"],\
-#             tradeable.loc[tradeable.iloc[i].name,"LDebt_to_Equity"],\
-#             tradeable.loc[tradeable.iloc[i].name,"Sales"],\
-#             tradeable.loc[tradeable.iloc[i].name,"ROE"]\
-#             =finviz.all_in_one(tradeable['Ticker'].iloc[i])
+    def _parse_finviz_value(value_str):
+        if not isinstance(value_str, str) or value_str == '-':
+            return np.nan
+        value_str = value_str.strip()
+        try:
+            if value_str.endswith('%'):
+                return float(value_str.rstrip('%')) / 100.0
+            elif value_str.endswith('B'):
+                return float(value_str.rstrip('B')) * 1e9
+            elif value_str.endswith('M'):
+                return float(value_str.rstrip('M')) * 1e6
+            elif value_str.endswith('K'):
+                return float(value_str.rstrip('K')) * 1e3
+            return float(value_str)
+        except (ValueError, TypeError):
+            return value_str
+
+    for i in range(len(tradeable.index)):
+        try:
+            ticker = tradeable['Ticker'].iloc[i]
+            stock_finviz = Stock(ticker, verbose=0)
+            fund = stock_finviz.ticker_fundament()
             
-# #             tradeable_json = json.loads(tradeable.iloc[i].to_json())
-# #             mongod.db["cantrade"].update_one({"Ticker":tradeable_json["Ticker"]},{"$set":tradeable_json},upsert=True)
+            idx = tradeable.index[i]
+            tradeable.loc[idx, 'Industry'] = fund.get('Industry')
+            tradeable.loc[idx, 'Sector'] = fund.get('Sector')
+            tradeable.loc[idx, 'Market_cap'] = _parse_finviz_value(fund.get('Market Cap'))
+            tradeable.loc[idx, 'Earnings_date'] = fund.get('Earnings')
+            tradeable.loc[idx, "PEG"] = _parse_finviz_value(fund.get('PEG'))
+            tradeable.loc[idx, "Profit_Margin"] = _parse_finviz_value(fund.get('Profit Margin'))
+            tradeable.loc[idx, "Avg_Volume"] = _parse_finviz_value(fund.get('Avg Volume'))
+            tradeable.loc[idx, "Inst_Own"] = _parse_finviz_value(fund.get('Inst Own'))
+            tradeable.loc[idx, "Beta"] = _parse_finviz_value(fund.get('Beta'))
+            tradeable.loc[idx, "Current_Ratio"] = _parse_finviz_value(fund.get('Current Ratio'))
+            tradeable.loc[idx, "PB"] = _parse_finviz_value(fund.get('P/B'))
+            tradeable.loc[idx, "Debt_to_Equity"] = _parse_finviz_value(fund.get('Debt/Eq'))
+            tradeable.loc[idx, "LDebt_to_Equity"] = _parse_finviz_value(fund.get('LT Debt/Eq'))
+            tradeable.loc[idx, "Sales"] = _parse_finviz_value(fund.get('Sales'))
+            tradeable.loc[idx, "ROE"] = _parse_finviz_value(fund.get('ROE'))
             
-#             print ("get done! ", tradeable['Ticker'].iloc[i])
-#             time.sleep(1)
-#             if i % 8 == 0 and i != 0:
-#                 mongod.frame_to_mongo(tradeable,"cantrade",drop_mode = "drop", index_col = "Ticker")
-#                 time.sleep(20)
-#         except Exception as e:
-# #             if test_mode:
-# #                 raise
-#             print ("get error ", tradeable['Ticker'].iloc[i])
-#             print (e)
-#             error.append([tradeable['Ticker'].iloc[i],'get_S_I_M_E'])
+            print ("get done! ", ticker)
+            time.sleep(0.5) # Be respectful to Finviz servers
+            
+        except Exception as e:
+            if test_mode:
+                raise
+            print ("get error ", tradeable['Ticker'].iloc[i])
+            print (e)
+            error.append([tradeable['Ticker'].iloc[i],'get_S_I_M_E'])
 
-#     error = pd.DataFrame(error)
-# #     mongod.conn.cursor.execute("drop table all_symbol.cantrade")
-# #     mongod.to_sql(tradeable,"all_symbol","cantrade")
-# #     mongod.frame_to_mongo(tradeable,"cantrade",drop_mode = "drop", index_col = "Ticker")
-#     if  type(my_list) == "bool":
-#         tradeable.to_csv(directory + "from_error_my_universe_industry_sector_marketcap_earnings.csv")
-#         error.to_csv(directory + "from_error.csv")
-#     else:
-#         tradeable.to_csv(directory + "my_universe_industry_sector_marketcap_earnings.csv")
-#         error.to_csv(directory + "error.csv")
+    error_df = pd.DataFrame(error, columns=['Ticker', 'Error_Step'])
+    
+    # Save results to CSV
+    if not isinstance(my_list, bool):
+        tradeable.to_csv(directory + "my_universe_industry_sector_marketcap_earnings.csv", index=False)
+        error_df.to_csv(directory + "error.csv", index=False)
+    else:
+        tradeable.to_csv(directory + "from_error_my_universe_industry_sector_marketcap_earnings.csv", index=False)
+        error_df.to_csv(directory + "from_error.csv", index=False)
 
-#     stop = timeit.default_timer()
-
-#     runtime = stop - start
-#     print ( runtime)
+    stop = timeit.default_timer()
+    runtime = stop - start
+    print(f"Runtime: {runtime:.2f} seconds")
 
 #################################################################
 
