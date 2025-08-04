@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from datetime import date, timedelta
-from finvizfinance.futures import Futures
+from finvizfinance.group.overview import Overview as Futures
 
 from src.my_libs_py3.fmp import FMPClient
 from src.my_libs_py3.my_data import PriceDataFetcher
