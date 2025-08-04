@@ -263,7 +263,20 @@ def analyze_candlestick_patterns(df):
     if df is None or not all(col in df.columns for col in required_cols) or len(df) < 51:
         return {"error": "Not enough data for candlestick analysis."}
     # ... candlestick analysis logic would go here ...
-    return {"patterns": [], "context": {}, "plot_df": df}
+    
+    # Convert the DataFrame to a JSON-serializable format for the API response.
+    # The 'split' orientation is clean and easy for a frontend to parse.
+    plot_data_dict = df.tail(250).to_dict('split')
+
+    # Timestamps in the index are not serializable, so convert them to strings.
+    if 'index' in plot_data_dict:
+        try:
+            plot_data_dict['index'] = [ts.strftime('%Y-%m-%d') for ts in plot_data_dict['index']]
+        except (AttributeError, TypeError):
+             # Fallback for non-datetime indexes
+            plot_data_dict['index'] = [str(i) for i in plot_data_dict['index']]
+
+    return {"patterns": [], "context": {}, "plot_data": plot_data_dict}
 
 def generate_holistic_conclusion(synthesis_data):
     sentiments = {'bullish': 0, 'bearish': 0, 'neutral': 0}
