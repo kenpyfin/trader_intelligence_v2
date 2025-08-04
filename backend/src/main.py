@@ -16,7 +16,7 @@ def read_root():
     """A simple endpoint to check if the API is running."""
     return {"message": "Welcome to the Trader Intelligence API"}
 
-@app.post("/api/analyze/stock")
+@app.post("/analyze/stock")
 async def analyze_stock(request: AnalysisRequest):
     """
     Runs a full stock and option analysis based on the provided ticker and expiration date.
