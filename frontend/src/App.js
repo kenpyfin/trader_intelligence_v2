@@ -1,5 +1,106 @@
 import React, { useState } from 'react';
 import axios from 'axios';
+import Plot from 'react-plotly.js';
+
+// --- Helper Components for Display ---
+
+const AnalysisCard = ({ title, children }) => (
+  <div style={{ border: '1px solid #ddd', borderRadius: '8px', padding: '16px', marginBottom: '16px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>
+    <h3 style={{ marginTop: 0, borderBottom: '2px solid #eee', paddingBottom: '8px' }}>{title}</h3>
+    {children}
+  </div>
+);
+
+const CandlestickChart = ({ plotData, ticker }) => {
+  if (!plotData || !plotData.data) {
+    return <p>Chart data is not available.</p>;
+  }
+
+  const { index: dates, columns, data } = plotData;
+  const findCol = (name) => columns.indexOf(name);
+
+  // Map data arrays to named properties for Plotly
+  const trace = {
+    x: dates,
+    close: data.map(row => row[findCol('Close')]),
+    high: data.map(row => row[findCol('High')]),
+    low: data.map(row => row[findCol('Low')]),
+    open: data.map(row => row[findCol('Open')]),
+    type: 'candlestick',
+    name: ticker,
+  };
+  
+  const layout = {
+    title: `${ticker} Price Chart`,
+    xaxis: { rangeslider: { visible: false } },
+    yaxis: { title: 'Price' },
+    margin: { t: 40, b: 40, l: 50, r: 20 },
+    height: 400,
+  };
+
+  return <Plot data={[trace]} layout={layout} style={{ width: '100%' }} />;
+};
+
+const ResultsDisplay = ({ data }) => {
+  const biasColor = data.final_bias.includes('Bullish') ? 'green' : data.final_bias.includes('Bearish') ? 'red' : 'orange';
+
+  return (
+    <div style={{ marginTop: '20px' }}>
+      <h2>Analysis for {data.ticker.toUpperCase()}</h2>
+      <p>Current Price: <strong>${data.S_current.toFixed(2)}</strong></p>
+      
+      <AnalysisCard title="Holistic Conclusion">
+        <h4 style={{ color: biasColor }}>Final Bias: {data.final_bias}</h4>
+        <div dangerouslySetInnerHTML={{ __html: data.final_conclusion_html }} />
+      </AnalysisCard>
+      
+      <AnalysisCard title="1. Price Trend & Candlestick Analysis">
+        {data.candlestick_analysis.plot_data ? 
+          <CandlestickChart plotData={data.candlestick_analysis.plot_data} ticker={data.ticker} /> :
+          <p>{data.candlestick_analysis.error || "No chart data."}</p>
+        }
+        <p><strong>Primary Trend:</strong> {data.candlestick_analysis?.context?.primary_trend}</p>
+        <p><strong>Secondary Trend:</strong> {data.candlestick_analysis?.context?.secondary_trend}</p>
+      </AnalysisCard>
+
+      <AnalysisCard title="2. Sentiment Analysis (Volume & OI)">
+        <p><strong>Put/Call Ratio (Volume):</strong> {data.volume_oi_analysis?.pc_ratio?.toFixed(2) || 'N/A'}</p>
+        {data.volume_oi_analysis?.oi_put_wall && <p><strong>Put Wall (Support):</strong> ${data.volume_oi_analysis.oi_put_wall.Strike.toFixed(2)}</p>}
+        {data.volume_oi_analysis?.oi_call_wall && <p><strong>Call Wall (Resistance):</strong> ${data.volume_oi_analysis.oi_call_wall.Strike.toFixed(2)}</p>}
+      </AnalysisCard>
+
+      <AnalysisCard title="3. Volatility & Movement Analysis">
+        <p><strong>Market-Implied Move:</strong> {data.movement_analysis?.expected_move_pct?.toFixed(2) || 'N/A'}%</p>
+      </AnalysisCard>
+      
+      <AnalysisCard title="4. Quantitative Valuation (Undervalued Options)">
+        {data.results_df && data.results_df.length > 0 ? (
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr style={{ background: '#f4f4f4' }}>
+                <th style={{ padding: '8px', border: '1px solid #ddd' }}>Strike</th>
+                <th style={{ padding: '8px', border: '1px solid #ddd' }}>Type</th>
+                <th style={{ padding: '8px', border: '1px solid #ddd' }}>Market Price</th>
+                <th style={{ padding: '8px', border: '1px solid #ddd' }}>Model Price</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.results_df.map((opt, i) => (
+                <tr key={i}>
+                  <td style={{ padding: '8px', border: '1px solid #ddd' }}>${opt.Strike.toFixed(2)}</td>
+                  <td style={{ padding: '8px', border: '1px solid #ddd' }}>{opt.Type}</td>
+                  <td style={{ padding: '8px', border: '1px solid #ddd' }}>${opt['Market Price'].toFixed(2)}</td>
+                  <td style={{ padding: '8px', border: '1px solid #ddd' }}>${opt['Model Price'].toFixed(2)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : <p>No significantly undervalued options were found.</p>}
+      </AnalysisCard>
+    </div>
+  );
+};
+
 
 function App() {
   const [ticker, setTicker] = useState('SPY');
@@ -13,7 +114,6 @@ function App() {
     setLoading(true);
     setError('');
     setAnalysisResult(null);
-
     try {
       const response = await axios.post('/api/analyze/stock', {
         ticker: ticker,
@@ -28,33 +128,26 @@ function App() {
   };
 
   return (
-    <div style={{ padding: '20px', fontFamily: 'sans-serif' }}>
+    <div style={{ padding: '20px', fontFamily: 'sans-serif', maxWidth: '900px', margin: 'auto' }}>
       <h1>Trader Intelligence</h1>
       
-      <form onSubmit={handleAnalyze}>
+      <form onSubmit={handleAnalyze} style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
         <div>
-          <label>Ticker:</label>
+          <label>Ticker: </label>
           <input type="text" value={ticker} onChange={(e) => setTicker(e.target.value)} required />
         </div>
-        <div style={{ marginTop: '10px' }}>
-          <label>Expiration Date:</label>
+        <div>
+          <label>Expiration Date: </label>
           <input type="date" value={expirationDate} onChange={(e) => setExpirationDate(e.target.value)} required />
         </div>
-        <button type="submit" disabled={loading} style={{ marginTop: '10px' }}>
+        <button type="submit" disabled={loading} style={{ padding: '5px 10px' }}>
           {loading ? 'Analyzing...' : 'Analyze Stock'}
         </button>
       </form>
 
-      {error && <p style={{ color: 'red' }}>Error: {error}</p>}
-
-      {analysisResult && (
-        <div style={{ marginTop: '20px' }}>
-          <h2>Analysis Results</h2>
-          <pre style={{ background: '#f4f4f4', padding: '10px', borderRadius: '5px', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
-            {JSON.stringify(analysisResult, null, 2)}
-          </pre>
-        </div>
-      )}
+      {error && <p style={{ color: 'red', border: '1px solid red', padding: '10px', borderRadius: '5px' }}><strong>Error:</strong> {error}</p>}
+      {loading && <p>Loading analysis...</p>}
+      {analysisResult && <ResultsDisplay data={analysisResult} />}
     </div>
   );
 }
