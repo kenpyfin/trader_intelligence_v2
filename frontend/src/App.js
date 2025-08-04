@@ -44,12 +44,28 @@ const CandlestickChart = ({ plotData, ticker }) => {
 const ResultsDisplay = ({ data }) => {
   const biasColor = data.final_bias.includes('Bullish') ? 'green' : data.final_bias.includes('Bearish') ? 'red' : 'orange';
 
+  const renderUOA = (uoaList, type) => {
+    if (!uoaList || uoaList.length === 0) return null;
+    return (
+      <div style={{marginTop: '10px'}}>
+        <strong>Unusual {type} Activity:</strong>
+        <ul style={{ margin: '5px 0', paddingLeft: '20px' }}>
+          {uoaList.map((item, i) => (
+            <li key={i}>
+              {item.Type || type} @ ${item.Strike.toFixed(2)} (Vol: {item.Volume}, OI: {item['Open Int.']})
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  };
+
   return (
     <div style={{ marginTop: '20px' }}>
       <h2>Analysis for {data.ticker.toUpperCase()}</h2>
       <p>Current Price: <strong>${data.S_current.toFixed(2)}</strong></p>
       
-      <AnalysisCard title="Holistic Conclusion">
+      <AnalysisCard title="Holistic Conclusion & Strategy">
         <h4 style={{ color: biasColor }}>Final Bias: {data.final_bias}</h4>
         <div dangerouslySetInnerHTML={{ __html: data.final_conclusion_html }} />
       </AnalysisCard>
@@ -65,12 +81,16 @@ const ResultsDisplay = ({ data }) => {
 
       <AnalysisCard title="2. Sentiment Analysis (Volume & OI)">
         <p><strong>Put/Call Ratio (Volume):</strong> {data.volume_oi_analysis?.pc_ratio?.toFixed(2) || 'N/A'}</p>
-        {data.volume_oi_analysis?.oi_put_wall && <p><strong>Put Wall (Support):</strong> ${data.volume_oi_analysis.oi_put_wall.Strike.toFixed(2)}</p>}
-        {data.volume_oi_analysis?.oi_call_wall && <p><strong>Call Wall (Resistance):</strong> ${data.volume_oi_analysis.oi_call_wall.Strike.toFixed(2)}</p>}
+        {data.volume_oi_analysis?.oi_put_wall && <p><strong>Put Wall (Support):</strong> ${data.volume_oi_analysis.oi_put_wall.Strike.toFixed(2)} (OI: {data.volume_oi_analysis.oi_put_wall['Open Int.']})</p>}
+        {data.volume_oi_analysis?.oi_call_wall && <p><strong>Call Wall (Resistance):</strong> ${data.volume_oi_analysis.oi_call_wall.Strike.toFixed(2)} (OI: {data.volume_oi_analysis.oi_call_wall['Open Int.']})</p>}
+        {renderUOA(data.volume_oi_analysis?.uoa_calls, 'Call')}
+        {renderUOA(data.volume_oi_analysis?.uoa_puts, 'Put')}
       </AnalysisCard>
 
       <AnalysisCard title="3. Volatility & Movement Analysis">
         <p><strong>Market-Implied Move:</strong> {data.movement_analysis?.expected_move_pct?.toFixed(2) || 'N/A'}%</p>
+        {data.movement_analysis?.vol_compression_text && <p><strong>Volatility Compression:</strong> {data.movement_analysis.vol_compression_text}</p>}
+        {data.movement_analysis?.earnings_note && <p><strong>Catalyst Event:</strong> {data.movement_analysis.earnings_note}</p>}
       </AnalysisCard>
       
       <AnalysisCard title="4. Quantitative Valuation (Undervalued Options)">

@@ -226,19 +226,74 @@ def parse_earnings_date(earnings_str, today=date.today()):
     except (ValueError, AttributeError): return None
 
 def analyze_high_movement_expectation(S_current, option_chain_df, historical_prices_df, earnings_date=None, expiration_date=None):
+    """Analyzes factors suggesting high movement expectation."""
     analysis = {}
+
+    # 1. Calculate Expected Move from ATM straddle
     if option_chain_df is None or option_chain_df.empty:
-        analysis['expected_move_note'] = "Option chain data not available."
+        analysis['expected_move_note'] = "Option chain data not available to calculate expected move."
     else:
-        strikes = option_chain_df['Strike'].unique()
-        if len(strikes) > 0:
-            atm_strike = strikes[np.argmin(np.abs(strikes - S_current))]
-            atm_call_price = _get_market_price_from_finviz_df(option_chain_df, atm_strike, 'C')
-            atm_put_price = _get_market_price_from_finviz_df(option_chain_df, atm_strike, 'P')
-            if atm_call_price is not None and atm_put_price is not None:
-                atm_straddle_price = atm_call_price + atm_put_price
-                analysis['expected_move_pct'] = (atm_straddle_price / S_current) * 100 if S_current > 0 else 0
-    # ... more analysis logic would go here ...
+        # Ensure Strike is numeric before processing
+        if 'Strike' in option_chain_df.columns:
+            option_chain_df['Strike'] = pd.to_numeric(option_chain_df['Strike'], errors='coerce')
+            strikes = option_chain_df['Strike'].dropna().unique()
+            if len(strikes) > 0:
+                atm_strike_idx = np.argmin(np.abs(strikes - S_current))
+                atm_strike = strikes[atm_strike_idx]
+                
+                atm_call_price = _get_market_price_from_finviz_df(option_chain_df, atm_strike, 'C')
+                atm_put_price = _get_market_price_from_finviz_df(option_chain_df, atm_strike, 'P')
+                
+                if atm_call_price is not None and atm_put_price is not None:
+                    atm_straddle_price = atm_call_price + atm_put_price
+                    expected_move_pct = (atm_straddle_price / S_current) * 100 if S_current > 0 else 0
+                    analysis['expected_move_pct'] = expected_move_pct
+                    analysis['atm_straddle_price'] = atm_straddle_price
+                    analysis['atm_strike'] = atm_strike
+                else:
+                    analysis['expected_move_note'] = f"Could not calculate expected move (market prices unavailable for ATM strike ${atm_strike:.2f})."
+            else:
+                analysis['expected_move_note'] = "No valid strikes found in option chain data."
+        else:
+            analysis['expected_move_note'] = "Strike column missing from option data."
+
+
+    # 2. Volatility compression check (coiling spring)
+    if historical_prices_df is not None and not historical_prices_df.empty and 'Close' in historical_prices_df.columns:
+        closing_prices = historical_prices_df['Close'].tolist()
+        if len(closing_prices) >= 51:
+            hv_10d = calculate_historical_volatility(closing_prices, lookback_days=10)
+            hv_50d = calculate_historical_volatility(closing_prices, lookback_days=50)
+            analysis['hv_10d'] = hv_10d
+            analysis['hv_50d'] = hv_50d
+            if hv_10d < hv_50d * 0.8: # Threshold for compression
+                is_coiling_before_earnings = False
+                if earnings_date:
+                    days_to_earnings = (earnings_date - date.today()).days
+                    if 0 < days_to_earnings <= 21:
+                        is_coiling_before_earnings = True
+                        analysis['vol_compression_text'] = f"Volatility compression detected ahead of earnings in {days_to_earnings} days. This 'coiling' often precedes a significant price move."
+                
+                if not is_coiling_before_earnings:
+                    analysis['vol_compression_text'] = "Possible volatility compression detected: 10-day HV is significantly lower than 50-day HV, suggesting a 'coiling' pattern."
+            else:
+                 analysis['vol_compression_text'] = "No significant volatility compression detected."
+        else:
+            analysis['vol_compression_text'] = "Not enough data for volatility compression analysis (need 51+ days)."
+    else:
+        analysis['vol_compression_text'] = "Historical price data not available for volatility compression analysis."
+
+    # 3. Earnings date analysis
+    if earnings_date and expiration_date:
+        if date.today() < earnings_date <= expiration_date:
+            analysis['earnings_within_expiry'] = True
+            days_to_earnings = (earnings_date - date.today()).days
+            analysis['earnings_note'] = f"Major Catalyst Event: Upcoming earnings on {earnings_date.strftime('%Y-%m-%d')} ({days_to_earnings} days), which is before expiration."
+        else:
+            analysis['earnings_within_expiry'] = False
+            if earnings_date > date.today():
+                analysis['earnings_note'] = f"Next earnings date ({earnings_date.strftime('%Y-%m-%d')}) is after the option's expiration."
+
     return analysis
 
 
@@ -353,26 +408,25 @@ def analyze_candlestick_patterns(df):
 
 def generate_holistic_conclusion(synthesis_data):
     """
-    Synthesizes all analysis sections into a holistic conclusion and a directional bias.
+    Synthesizes all analysis sections into a holistic conclusion, a directional bias,
+    and a professional strategy recommendation.
     """
     sentiments = {'bullish': 0, 'bearish': 0, 'neutral': 0}
-    components = []
-    bullish_drivers = []
-    bearish_drivers = []
+    components, bullish_drivers, bearish_drivers = [], [], []
 
     def process_component(name, data):
-        if not data or 'summary' not in data: return
+        if not data or not data.get('summary'): return
         components.append(f"<li><b>{name}:</b> {data['summary']}</li>")
         sentiment = data.get('sentiment')
         if sentiment in ['bullish', 'bearish', 'neutral']:
             sentiments[sentiment] += data.get('weight', 1)
-            if sentiment == 'bullish': bullish_drivers.append(name.lower())
-            elif sentiment == 'bearish': bearish_drivers.append(name.lower())
+            if sentiment == 'bullish': bullish_drivers.append(name.lower().replace('_', ' '))
+            elif sentiment == 'bearish': bearish_drivers.append(name.lower().replace('_', ' '))
 
     analysis_map = {
         'trend': "Trend", 'candlestick': "Candlesticks", 'parity': "Put-Call Parity",
-        'volume_oi': "Volume/OI", 'undervalued': "Valuation Model",
-        'earnings': "Upcoming Events", 'movement': "Price Action & Volatility"
+        'volume_oi': "Volume/OI", 'undervalued': "Valuation", 'iv_hv': "Volatility",
+        'earnings': "Catalysts", 'movement': "Price Action"
     }
     for key, name in analysis_map.items():
         if key in synthesis_data:
@@ -380,24 +434,54 @@ def generate_holistic_conclusion(synthesis_data):
 
     bull_score, bear_score = sentiments['bullish'], sentiments['bearish']
     final_bias = "Neutral"
-    if bull_score > bear_score + 1: final_bias = "Bullish"
-    elif bear_score > bull_score + 1: final_bias = "Bearish"
+    if bull_score > bear_score + 1.5: final_bias = "Bullish"
+    elif bear_score > bull_score + 1.5: final_bias = "Bearish"
     elif bull_score > bear_score: final_bias = "Slightly Bullish"
     elif bear_score > bull_score: final_bias = "Slightly Bearish"
     
     conclusion_html = "<h5>Summary of Findings:</h5><ul>" + "".join(components) + "</ul>"
-    conclusion_html += "<h5>Holistic Conclusion:</h5>"
     
+    # --- Holistic Conclusion Paragraph ---
+    conclusion_html += "<h5>Holistic Conclusion:</h5>"
+    contradiction = (bull_score > 0 and bear_score > 0)
     bias_paragraph = f"<p>The overall directional bias is <b>{final_bias}</b>. "
-    # (Full paragraph generation logic from option_trade.py would go here)
     if "Bullish" in final_bias:
-        bias_paragraph += "This is primarily supported by positive signals."
+        drivers = f"<b>{', '.join(bullish_drivers)}</b>"
+        bias_paragraph += f"This is primarily supported by positive signals from the {drivers} analysis. "
+        if contradiction:
+            bias_paragraph += f"However, caution is warranted due to conflicting bearish indicators from <b>{', '.join(bearish_drivers)}</b>."
     elif "Bearish" in final_bias:
-        bias_paragraph += "This is driven by negative signals."
+        drivers = f"<b>{', '.join(bearish_drivers)}</b>"
+        bias_paragraph += f"This is driven by negative signals from the {drivers} analysis. "
+        if contradiction:
+            bias_paragraph += f"However, the presence of bullish signals from <b>{', '.join(bullish_drivers)}</b> suggests potential for a reversal."
     else:
-        bias_paragraph += "The analysis reveals a mix of signals, leading to uncertainty."
+        bias_paragraph += "The analysis reveals a mix of bullish and bearish signals, leading to significant uncertainty. " if contradiction else "There are no strong directional signals from the core indicators. "
     conclusion_html += bias_paragraph + "</p>"
 
+    # --- Professional Strategy Recommendation ---
+    iv_sentiment = synthesis_data.get('iv_hv', {}).get('sentiment')
+    strategy_rec = "<h5>Recommended Strategy:</h5>"
+    
+    if final_bias == "Neutral":
+        if iv_sentiment == 'high_vol':
+            strategy_rec += "<p><b>Sell Premium (High IV) - Iron Condor.</b> The analysis is neutral and implied volatility is high. An Iron Condor profits if the stock price remains within a defined range, benefiting from time decay and a potential decrease in IV. This is a defined-risk, high-probability trade.</p>"
+        elif iv_sentiment == 'low_vol':
+            strategy_rec += "<p><b>Buy Premium (Low IV) - Long Straddle.</b> The analysis is neutral but a large move is possible, especially if a catalyst is near. A Long Straddle profits from a significant price move in either direction and benefits from the currently cheap option premiums.</p>"
+        else:
+            strategy_rec += "<p><b>Wait for a clearer signal.</b> The directional bias is neutral and IV is not at an extreme. It may be prudent to wait for a better entry point or a clearer market sentiment before committing capital.</p>"
+    elif "Bullish" in final_bias:
+        if iv_sentiment == 'high_vol':
+            strategy_rec += "<p><b>Defined-Risk Bullish (High IV) - Bull Put Spread.</b> With a bullish bias and high IV, selling a credit spread is advantageous. A Bull Put Spread profits if the stock moves up, sideways, or even slightly down. It benefits from time decay and high premiums, while defining your maximum risk.</p>"
+        else:
+            strategy_rec += "<p><b>Defined-Risk Bullish (Low/Mid IV) - Bull Call Spread.</b> With a bullish bias and cheaper premiums, a debit spread is attractive. A Bull Call Spread profits from a rise in the stock price with a lower cost and less time decay sensitivity than buying a call outright. Your risk and reward are both capped.</p>"
+    elif "Bearish" in final_bias:
+        if iv_sentiment == 'high_vol':
+            strategy_rec += "<p><b>Defined-Risk Bearish (High IV) - Bear Call Spread.</b> With a bearish bias and high IV, a credit spread is a strong choice. A Bear Call Spread profits if the stock moves down, sideways, or slightly up. It benefits from rich option premiums and time decay.</p>"
+        else:
+            strategy_rec += "<p><b>Defined-Risk Bearish (Low/Mid IV) - Bear Put Spread.</b> With a bearish bias and low IV, a debit spread is a good way to express a directional view. A Bear Put Spread profits from a fall in the stock price while having a lower cost and defined risk compared to buying a put.</p>"
+    
+    conclusion_html += strategy_rec
     return conclusion_html, final_bias
 
 def _sanitize_for_json(item):
@@ -467,11 +551,11 @@ def run_full_analysis(ticker: str, expiration_date: date, r_current: float = 0.0
     undervalued_results = []
     parity_data = []
     
-    selected_strikes = strikes[(strikes > S_current * 0.8) & (strikes < S_current * 1.2)] # Analyze strikes within 20% of current price
+    selected_strikes = strikes[(strikes > S_current * 0.8) & (strikes < S_current * 1.2)]
     for K in selected_strikes:
         call_market_price = _get_market_price_from_finviz_df(option_chain_df, K, 'C')
         put_market_price = _get_market_price_from_finviz_df(option_chain_df, K, 'P')
-        if call_market_price and put_market_price:
+        if call_market_price and put_market_price and days_to_exp > 0:
             parity_diff = (call_market_price - put_market_price) - (S_current - K * np.exp(-r_current * (days_to_exp/365.0)))
             parity_data.append({"Strike": K, "Parity Difference": parity_diff})
 
@@ -483,17 +567,43 @@ def run_full_analysis(ticker: str, expiration_date: date, r_current: float = 0.0
     
     # --- Holistic Synthesis ---
     synthesis_data = {}
-    if candlestick_analysis and "context" in candlestick_analysis:
-        synthesis_data['trend'] = {'sentiment': 'bullish' if candlestick_analysis['context']['primary_trend'] == 'Uptrend' else 'bearish', 'summary': f"Primary trend is {candlestick_analysis['context']['primary_trend']}."}
+    if candlestick_analysis and "context" in candlestick_analysis and not candlestick_analysis.get("error"):
+        context = candlestick_analysis["context"]
+        synthesis_data['trend'] = {'sentiment': 'bullish' if context['primary_trend'] == "Uptrend" else 'bearish', 'weight': 1.5, 'summary': f"The primary trend is **{context['primary_trend']}** (vs 200d MA) and the secondary trend is **{context['secondary_trend']}** (vs 50d MA)."}
+        if candlestick_analysis.get("patterns"):
+            synthesis_data['candlestick'] = {'summary': "Recent candlestick patterns identified."} # Simplified for brevity
     if parity_data:
-        avg_parity_diff = np.mean([p['Parity Difference'] for p in parity_data])
-        synthesis_data['parity'] = {'sentiment': 'bullish' if avg_parity_diff > 0 else 'bearish', 'summary': f"Put-call parity suggests calls are relatively {'expensive' if avg_parity_diff > 0 else 'cheap'}."}
-    if volume_oi_analysis:
-        synthesis_data['volume_oi'] = {'summary': f"P/C Ratio: {volume_oi_analysis.get('pc_ratio', 'N/A'):.2f}"}
+        avg_parity_diff_pct = np.mean([p['Parity Difference'] for p in parity_data]) / S_current * 100
+        parity_sentiment = 'neutral'
+        if avg_parity_diff_pct > 0.15: parity_sentiment = 'bullish'
+        elif avg_parity_diff_pct < -0.15: parity_sentiment = 'bearish'
+        synthesis_data['parity'] = {'sentiment': parity_sentiment, 'summary': f"Put-Call Parity shows calls are relatively {'expensive' if parity_sentiment == 'bullish' else 'cheap' if parity_sentiment == 'bearish' else 'fairly priced'} (avg deviation: {avg_parity_diff_pct:+.2f}%)."}
+    if volume_oi_analysis and not volume_oi_analysis.get("error"):
+        bull_signals, bear_signals = len(volume_oi_analysis.get('uoa_calls', [])), len(volume_oi_analysis.get('uoa_puts', []))
+        pc_ratio = volume_oi_analysis.get('pc_ratio')
+        vol_sentiment = 'neutral'
+        if pc_ratio is not None:
+            if pc_ratio > 1.0: bear_signals += 1
+            if pc_ratio < 0.7: bull_signals += 1
+        if bull_signals > bear_signals: vol_sentiment = 'bullish'
+        elif bear_signals > bull_signals: vol_sentiment = 'bearish'
+        synthesis_data['volume_oi'] = {'sentiment': vol_sentiment, 'summary': f"Volume analysis shows a P/C ratio of {pc_ratio:.2f} and {bull_signals} bullish vs {bear_signals} bearish UOA signals."}
     if undervalued_results:
-        synthesis_data['undervalued'] = {'sentiment': 'bullish' if 'Call' in [r['Type'] for r in undervalued_results] else 'neutral', 'summary': f"Model found {len(undervalued_results)} undervalued options."}
+        synthesis_data['undervalued'] = {'sentiment': 'bullish' if any(r['Type'] == 'Call' for r in undervalued_results) else 'bearish', 'summary': f"Valuation model identified **{len(undervalued_results)} potentially undervalued options**."}
+    
+    spot_iv = key_vols_iv[0][1] if key_vols_iv else None
+    iv_high = spot_iv and hv_current and spot_iv > hv_current * 1.2
+    iv_low = spot_iv and hv_current and spot_iv < hv_current * 0.8
+    iv_summary = "IV is in line with HV."
+    if iv_high: iv_summary = "IV is **high** relative to HV, suggesting option premiums are expensive and favoring premium-selling (credit) strategies."
+    elif iv_low: iv_summary = "IV is **low** relative to HV, suggesting option premiums are cheap and favoring premium-buying (debit) strategies."
+    synthesis_data['iv_hv'] = {'sentiment': 'high_vol' if iv_high else 'low_vol' if iv_low else 'neutral_vol', 'summary': iv_summary}
+    
     if movement_analysis:
-         synthesis_data['movement'] = {'summary': f"Market implies a {movement_analysis.get('expected_move_pct', 0):.2f}% move."}
+        if movement_analysis.get('expected_move_pct'):
+            synthesis_data['movement'] = {'summary': f"The options market is pricing in a **{movement_analysis['expected_move_pct']:.2f}%** move by expiration."}
+        if movement_analysis.get('earnings_note'):
+            synthesis_data['earnings'] = {'sentiment': 'event', 'summary': movement_analysis['earnings_note']}
 
     final_conclusion_html, final_bias = generate_holistic_conclusion(synthesis_data)
 
