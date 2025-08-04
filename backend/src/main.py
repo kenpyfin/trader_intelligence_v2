@@ -2,8 +2,9 @@ from fastapi import FastAPI, HTTPException
 import traceback
 from datetime import date
 
-from .models.analysis_models import AnalysisRequest
+from .models.analysis_models import AnalysisRequest, RiskFreeRateRequest
 from .services.analysis_service import run_full_analysis
+from .services.macro_service import get_macro_futures_data, calculate_market_implied_risk_free_rate
 
 app = FastAPI(
     title="Trader Intelligence API",
@@ -16,6 +17,31 @@ def read_root():
     """A simple endpoint to check if the API is running."""
     return {"message": "Welcome to the Trader Intelligence API"}
 
+@app.get("/api/macro-data")
+def get_macro_data():
+    """Endpoint to fetch macro economic data (futures)."""
+    try:
+        data = get_macro_futures_data()
+        if "error" in data:
+            raise HTTPException(status_code=500, detail=data["error"])
+        return data
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
+
+@app.post("/api/calculate-risk-free-rate")
+async def get_risk_free_rate(request: RiskFreeRateRequest):
+    """Calculates the market-implied risk-free rate from a basket of ETFs."""
+    try:
+        rate, logs = calculate_market_implied_risk_free_rate(
+            tickers=request.tickers,
+            expiration_date=request.expiration_date
+        )
+        return {"risk_free_rate": rate, "logs": logs}
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
+
 @app.post("/analyze/stock")
 async def analyze_stock(request: AnalysisRequest):
     """
@@ -26,7 +52,8 @@ async def analyze_stock(request: AnalysisRequest):
         # FastAPI runs synchronous functions in a thread pool, preventing blocking.
         analysis_result = run_full_analysis(
             ticker=request.ticker.upper(),
-            expiration_date=request.expiration_date
+            expiration_date=request.expiration_date,
+            r_current=request.risk_free_rate
         )
         
         if analysis_result.get("status") == "error":

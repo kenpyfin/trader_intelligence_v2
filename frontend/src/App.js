@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import Plot from 'react-plotly.js';
 
@@ -39,6 +39,118 @@ const CandlestickChart = ({ plotData, ticker }) => {
   };
 
   return <Plot data={[trace]} layout={layout} style={{ width: '100%' }} />;
+};
+
+const MacroInsights = ({ onRateCalculated }) => {
+  const [futures, setFutures] = useState(null);
+  const [loading, setLoading] = useState(true);
+  
+  const [rfTickers, setRfTickers] = useState('SPY, QQQ, IWM');
+  const [rfExpDate, setRfExpDate] = useState(new Date(new Date().setDate(new Date().getDate() + 30)).toISOString().split('T')[0]);
+  const [calculating, setCalculating] = useState(false);
+  const [calcResult, setCalcResult] = useState(null);
+  const [calcLogs, setCalcLogs] = useState([]);
+
+  useEffect(() => {
+    const fetchMacroData = async () => {
+      try {
+        const response = await axios.get('/api/macro-data');
+        setFutures(response.data);
+      } catch (error) {
+        console.error("Failed to fetch macro data:", error);
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchMacroData();
+  }, []);
+
+  const handleCalculateRate = async (e) => {
+    e.preventDefault();
+    setCalculating(true);
+    setCalcResult(null);
+    setCalcLogs([]);
+    try {
+      const response = await axios.post('/api/calculate-risk-free-rate', {
+        tickers: rfTickers.split(',').map(t => t.trim().toUpperCase()),
+        expiration_date: rfExpDate,
+      });
+      setCalcResult(response.data.risk_free_rate);
+      setCalcLogs(response.data.logs);
+      if (response.data.risk_free_rate) {
+        onRateCalculated(response.data.risk_free_rate);
+      }
+    } catch (error) {
+      console.error("Failed to calculate risk-free rate:", error);
+      setCalcLogs(['Calculation failed. See browser console for details.']);
+    } finally {
+      setCalculating(false);
+    }
+  };
+
+  const renderFuturesTable = () => {
+    if (loading) return <p>Loading futures data...</p>;
+    if (!futures || futures.error) return <p>Could not load futures data.</p>;
+
+    return (
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.9em' }}>
+        <thead>
+          <tr style={{ background: '#f4f4f4' }}>
+            {Object.keys(futures[Object.keys(futures)[0]]).map(header => <th key={header} style={{ padding: '8px', border: '1px solid #ddd' }}>{header}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {Object.entries(futures).map(([ticker, data]) => (
+            <tr key={ticker}>
+              {Object.entries(data).map(([key, value]) => (
+                <td key={key} style={{ padding: '8px', border: '1px solid #ddd', color: key === 'Change' && (value.startsWith('+') ? 'green' : 'red') }}>
+                  {value}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    );
+  };
+
+  return (
+    <AnalysisCard title="Macro Economy Insights">
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
+        <div>
+          <h4>Market Futures (Finviz)</h4>
+          {renderFuturesTable()}
+        </div>
+        <div>
+          <h4>Implied Risk-Free Rate Calculator</h4>
+          <form onSubmit={handleCalculateRate}>
+            <div style={{ marginBottom: '10px' }}>
+              <label>Tickers (comma-separated):</label><br/>
+              <input type="text" value={rfTickers} onChange={e => setRfTickers(e.target.value)} style={{ width: '95%' }}/>
+            </div>
+            <div style={{ marginBottom: '10px' }}>
+              <label>Expiration Date:</label><br/>
+              <input type="date" value={rfExpDate} onChange={e => setRfExpDate(e.target.value)} />
+            </div>
+            <button type="submit" disabled={calculating}>
+              {calculating ? 'Calculating...' : 'Calculate Implied Rate'}
+            </button>
+          </form>
+          {calcResult !== null && (
+            <div style={{ marginTop: '10px', background: '#e8f5e9', padding: '10px', borderRadius: '5px' }}>
+              <strong>Calculated Rate: <span style={{color: 'green'}}>{(calcResult * 100).toFixed(3)}%</span></strong>
+            </div>
+          )}
+          {calcLogs.length > 0 && (
+            <div style={{ marginTop: '10px', maxHeight: '150px', overflowY: 'auto', background: '#f4f4f4', padding: '5px', fontSize: '0.8em', border: '1px solid #ddd' }}>
+              <strong>Calculation Log:</strong>
+              {calcLogs.map((log, i) => <p key={i} style={{margin: '2px 0'}}>{log}</p>)}
+            </div>
+          )}
+        </div>
+      </div>
+    </AnalysisCard>
+  );
 };
 
 const ResultsDisplay = ({ data }) => {
@@ -140,6 +252,7 @@ const ResultsDisplay = ({ data }) => {
 function App() {
   const [ticker, setTicker] = useState('SPY');
   const [expirationDate, setExpirationDate] = useState(new Date(new Date().setDate(new Date().getDate() + 30)).toISOString().split('T')[0]);
+  const [riskFreeRate, setRiskFreeRate] = useState(0.045);
   const [analysisResult, setAnalysisResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -153,6 +266,7 @@ function App() {
       const response = await axios.post('/api/analyze/stock', {
         ticker: ticker,
         expiration_date: expirationDate,
+        risk_free_rate: riskFreeRate,
       });
       setAnalysisResult(response.data);
     } catch (err) {
@@ -163,26 +277,34 @@ function App() {
   };
 
   return (
-    <div style={{ padding: '20px', fontFamily: 'sans-serif', maxWidth: '900px', margin: 'auto' }}>
+    <div style={{ padding: '20px', fontFamily: 'sans-serif', maxWidth: '1200px', margin: 'auto' }}>
       <h1>Trader Intelligence</h1>
-      
-      <form onSubmit={handleAnalyze} style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
-        <div>
-          <label>Ticker: </label>
-          <input type="text" value={ticker} onChange={(e) => setTicker(e.target.value)} required />
-        </div>
-        <div>
-          <label>Expiration Date: </label>
-          <input type="date" value={expirationDate} onChange={(e) => setExpirationDate(e.target.value)} required />
-        </div>
-        <button type="submit" disabled={loading} style={{ padding: '5px 10px' }}>
-          {loading ? 'Analyzing...' : 'Analyze Stock'}
-        </button>
-      </form>
 
-      {error && <p style={{ color: 'red', border: '1px solid red', padding: '10px', borderRadius: '5px' }}><strong>Error:</strong> {error}</p>}
-      {loading && <p>Loading analysis...</p>}
-      {analysisResult && <ResultsDisplay data={analysisResult} />}
+      <MacroInsights onRateCalculated={setRiskFreeRate} />
+      
+      <AnalysisCard title="Stock and Option Analysis">
+        <form onSubmit={handleAnalyze} style={{ display: 'flex', gap: '15px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '20px' }}>
+          <div>
+            <label>Ticker: </label>
+            <input type="text" value={ticker} onChange={(e) => setTicker(e.target.value)} required />
+          </div>
+          <div>
+            <label>Expiration Date: </label>
+            <input type="date" value={expirationDate} onChange={(e) => setExpirationDate(e.target.value)} required />
+          </div>
+          <div>
+            <label>Risk-Free Rate: </label>
+            <input type="number" step="0.001" value={riskFreeRate} onChange={(e) => setRiskFreeRate(parseFloat(e.target.value))} required style={{width: '80px'}}/>
+          </div>
+          <button type="submit" disabled={loading} style={{ padding: '5px 15px', cursor: 'pointer' }}>
+            {loading ? 'Analyzing...' : 'Run Analysis'}
+          </button>
+        </form>
+
+        {error && <p style={{ color: 'red', border: '1px solid red', padding: '10px', borderRadius: '5px' }}><strong>Error:</strong> {error}</p>}
+        {loading && <p>Loading analysis...</p>}
+        {analysisResult && <ResultsDisplay data={analysisResult} />}
+      </AnalysisCard>
     </div>
   );
 }
