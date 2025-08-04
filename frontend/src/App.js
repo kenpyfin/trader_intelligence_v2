@@ -77,6 +77,21 @@ const ResultsDisplay = ({ data }) => {
         }
         <p><strong>Primary Trend:</strong> {data.candlestick_analysis?.context?.primary_trend}</p>
         <p><strong>Secondary Trend:</strong> {data.candlestick_analysis?.context?.secondary_trend}</p>
+        
+        {data.candlestick_analysis?.patterns && data.candlestick_analysis.patterns.length > 0 ? (
+          <div style={{marginTop: '15px'}}>
+            <strong>Recent Patterns Identified:</strong>
+            <ul style={{ margin: '5px 0', paddingLeft: '20px' }}>
+              {data.candlestick_analysis.patterns.map((p, i) => (
+                <li key={i}>
+                  <strong>{p.name}</strong> (Strength: {p.strength}) - {p.interpretation}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : (
+          <p style={{marginTop: '15px'}}><strong>Patterns:</strong> No significant candlestick patterns identified in the last few periods.</p>
+        )}
       </AnalysisCard>
 
       <AnalysisCard title="2. Sentiment Analysis (Volume & OI)">

@@ -370,35 +370,62 @@ def analyze_candlestick_patterns(df):
     """
     required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
     if df is None or not all(col in df.columns for col in required_cols) or len(df) < 51:
-        return {"error": "Not enough data for candlestick analysis.", "context": {}, "plot_data": None}
+        return {"error": "Not enough historical data for contextual candlestick analysis (need at least 51 periods).", "context": {}}
 
     df = df.copy()
     for col in required_cols:
         df[col] = pd.to_numeric(df[col], errors='coerce')
     df.dropna(subset=required_cols, inplace=True)
-    if len(df) < 200:
-        return {"error": "Not enough valid historical data for full analysis.", "context": {}, "plot_data": None}
+    if len(df) < 51:
+        return {"error": "Not enough valid data points after cleaning.", "context": {}}
 
-    df['SMA20'] = df['Close'].rolling(window=20).mean()
+    # --- Calculate Indicators for Context ---
     df['SMA50'] = df['Close'].rolling(window=50).mean()
-    df['SMA100'] = df['Close'].rolling(window=100).mean()
     df['SMA200'] = df['Close'].rolling(window=200).mean()
-    df['AvgVol10'] = df['Volume'].rolling(window=10).mean()
+    df['AvgVol10'] = df['Volume'].rolling(window=10).mean().shift(1) # Shift to get prior 10 day avg vol
 
+    # --- Establish Market Context ---
     last_row = df.iloc[-1]
-    primary_trend = "Uptrend" if last_row['Close'] > last_row['SMA200'] else "Downtrend"
     secondary_trend = "Uptrend" if last_row['Close'] > last_row['SMA50'] else "Downtrend"
-    market_context = {
-        "primary_trend": primary_trend,
-        "secondary_trend": secondary_trend,
-        "price_vs_sma50": "Above" if secondary_trend == "Uptrend" else "Below",
-        "price_vs_sma200": "Above" if primary_trend == "Uptrend" else "Below",
-        "sma50_vs_sma200": "Golden Cross Active" if last_row['SMA50'] > last_row['SMA200'] else "Death Cross Active"
-    }
+    primary_trend = "Uptrend" if last_row['Close'] > last_row['SMA200'] else "Downtrend"
+    market_context = {"primary_trend": primary_trend, "secondary_trend": secondary_trend}
 
-    # (Full pattern recognition logic from option_trade.py would be here)
-    # This is a simplified placeholder for brevity in this response.
+    # --- Pattern Recognition Setup ---
+    max_lookback = min(4, len(df))
+    get_iloc = lambda col, i: df[col].iloc[-1-i]
+    O, H, L, C, V, AvgVol10 = ({i: get_iloc(col, i) for i in range(max_lookback)} for col in ['Open', 'High', 'Low', 'Close', 'Volume', 'AvgVol10'])
+
+    def Body(x): return abs(O.get(x, 0) - C.get(x, 0))
+    def UpperShadow(x): return H.get(x, 0) - max(O.get(x, 0), C.get(x, 0))
+    def LowerShadow(x): return min(O.get(x, 0), C.get(x, 0)) - L.get(x, 0)
+    
     found_patterns = []
+    is_downtrend = secondary_trend == "Downtrend" or (C.get(0, 0) < C.get(1, 0) and C.get(1, 0) < C.get(2, 0))
+    is_uptrend = secondary_trend == "Uptrend" or (C.get(0, 0) > C.get(1, 0) and C.get(1, 0) > C.get(2, 0))
+
+    def build_interpretation(base_interp, vol_idx, name):
+        is_high_vol = V.get(vol_idx, 0) > AvgVol10.get(vol_idx, 0) * 1.2
+        vol_msg = "on high volume, strengthening the signal." if is_high_vol else "on average volume."
+        strength = "Strong" if is_high_vol and "Engulfing" in name else ("Moderate" if is_high_vol else "Weak")
+        return f"{base_interp} It appeared {vol_msg}", strength
+
+    # --- Bullish Reversal Patterns ---
+    if is_downtrend:
+        if LowerShadow(0) > (2 * Body(0)) and UpperShadow(0) < (0.1 * (H[0] - L[0])):
+            interp, strength = build_interpretation("Sellers were rejected after a decline.", 0, "Hammer")
+            found_patterns.append({"name": "Hammer (Bullish Reversal)", "interpretation": interp, "strength": strength})
+        if Body(0) > 0 and C.get(1, C[0]) < O.get(1, C[0]) and C[0] > O[1] and O[0] < C[1]:
+            interp, strength = build_interpretation("A powerful momentum shift where buyers overwhelmed sellers.", 0, "Bullish Engulfing")
+            found_patterns.append({"name": "Bullish Engulfing", "interpretation": interp, "strength": strength})
+
+    # --- Bearish Reversal Patterns ---
+    if is_uptrend:
+        if UpperShadow(0) > (2 * Body(0)) and LowerShadow(0) < (0.1 * (H[0] - L[0])):
+            interp, strength = build_interpretation("Buyers were rejected after a rally.", 0, "Shooting Star")
+            found_patterns.append({"name": "Shooting Star (Bearish Reversal)", "interpretation": interp, "strength": strength})
+        if Body(0) > 0 and C.get(1, C[0]) > O.get(1, C[0]) and C[0] < O[1] and O[0] > C[1]:
+            interp, strength = build_interpretation("A powerful momentum shift where sellers overwhelmed buyers.", 0, "Bearish Engulfing")
+            found_patterns.append({"name": "Bearish Engulfing", "interpretation": interp, "strength": strength})
 
     plot_data_dict = df.tail(250).to_dict('split')
     if 'index' in plot_data_dict and hasattr(plot_data_dict['index'][0], 'strftime'):
@@ -570,8 +597,17 @@ def run_full_analysis(ticker: str, expiration_date: date, r_current: float = 0.0
     if candlestick_analysis and "context" in candlestick_analysis and not candlestick_analysis.get("error"):
         context = candlestick_analysis["context"]
         synthesis_data['trend'] = {'sentiment': 'bullish' if context['primary_trend'] == "Uptrend" else 'bearish', 'weight': 1.5, 'summary': f"The primary trend is **{context['primary_trend']}** (vs 200d MA) and the secondary trend is **{context['secondary_trend']}** (vs 50d MA)."}
-        if candlestick_analysis.get("patterns"):
-            synthesis_data['candlestick'] = {'summary': "Recent candlestick patterns identified."} # Simplified for brevity
+        patterns = candlestick_analysis.get("patterns", [])
+        if patterns:
+            bullish_patterns = [p for p in patterns if "Bullish" in p['name']]
+            bearish_patterns = [p for p in patterns if "Bearish" in p['name']]
+            candlestick_sentiment = 'neutral'
+            if bullish_patterns and not bearish_patterns: candlestick_sentiment = 'bullish'
+            elif bearish_patterns and not bullish_patterns: candlestick_sentiment = 'bearish'
+            strongest_pattern = sorted(patterns, key=lambda p: {"Strong": 0, "Moderate": 1, "Weak": 2}.get(p.get('strength', 'Weak'), 99))[0]
+            synthesis_data['candlestick'] = {'sentiment': candlestick_sentiment, 'summary': f"A **'{strongest_pattern['name']}'** pattern was identified with **{strongest_pattern['strength']}** strength."}
+        else:
+            synthesis_data['candlestick'] = {'sentiment': 'neutral', 'summary': "No significant candlestick patterns were found in recent periods."}
     if parity_data:
         avg_parity_diff_pct = np.mean([p['Parity Difference'] for p in parity_data]) / S_current * 100
         parity_sentiment = 'neutral'
