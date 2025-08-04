@@ -1,8 +1,6 @@
 import pandas as pd
 import numpy as np
 from datetime import date, timedelta
-from finvizfinance.group.overview import Overview as Futures
-
 from src.my_libs_py3.fmp import FMPClient
 from src.my_libs_py3.my_data import PriceDataFetcher
 from .analysis_service import _get_market_price_from_finviz_df
@@ -10,8 +8,16 @@ from .analysis_service import _get_market_price_from_finviz_df
 def get_macro_futures_data():
     """Fetches key macro futures data from Finviz."""
     try:
-        futures = Futures()
-        futures_data = futures.get_futures()
+        price_fetcher = PriceDataFetcher()
+        futures_df = price_fetcher.get_futures_data_finviz()
+        
+        if futures_df.empty:
+            return {"error": "Failed to fetch futures data from Finviz or no data returned."}
+        
+        # Set 'Ticker' as index and convert to dictionary of records
+        futures_df.set_index('Ticker', inplace=True)
+        futures_data = futures_df.to_dict('index')
+
         # Select key indicators for a macro overview
         key_indices = ['ES', 'NQ', 'RTY', 'YM', 'GC', 'SI', 'CL', 'NG', 'ZB', 'ZN', 'BTC']
         filtered_data = {k: v for k, v in futures_data.items() if k in key_indices}

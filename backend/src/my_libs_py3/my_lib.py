@@ -31,7 +31,6 @@ from tqdm import tqdm
 import urllib.request, urllib.error, urllib.parse
 # import multiprocessing
 from ib_insync import IB, util as ibutil
-from finvizfinance.stock import Stock
 
 
 pd.set_option("display.max_columns",80)
@@ -488,24 +487,11 @@ def remove_salt(x):
 #################################################################
 
 def update_fundamentals(robinhood,my_list = False, test_mode=False,skip_can=True):
+    from .my_data import PriceDataFetcher
     # need to feed a logined robinhood instance
     error=[]
     mongod = mongo("all_symbol")
     if not skip_can:
-        
-#         ## Option 1: use FMP list
-#         if type(my_list) ==bool:
-#             if test_mode:
-#                 universe = robinhood.get_universe()[1:10]
-#             else:
-#                 universe = robinhood.get_universe()
-#         else:
-#             universe = my_list
-#         stock = list()
- 
-#         tradeable = universe[universe.price > 10]
-#         tradeable.loc[:,"Ticker"] = tradeable["symbol"]
-        
         
         ## Option 2: use Finviz list
         if type(my_list) ==bool:
@@ -524,56 +510,16 @@ def update_fundamentals(robinhood,my_list = False, test_mode=False,skip_can=True
         tradeable.loc[:,"Symbol"] = tradeable["Ticker"]
         tradeable["Refresh_Date"] = datetime.now().strftime("%Y-%m-%d")
         mongod.conn.to_sql(tradeable,"all_symbol","cantrade",if_exists="append")
-################# getting list directly from FMP ###########################
-################  
-#         tradeable_list = []
-#         i = 0
-#         trial = 0 
-#         while i < len(universe.index):
-#         #for i in range(len(universe.index)):
-#             try:
-#                 if robinhood.istradeable(str(universe.iloc[i])).values[0]:
-#                     trade_price= get_price_data([str(universe.iloc[i])],method = "day").iloc[-1]["Close"]
-#                     if trade_price > 5.00:
-#                         new_get = {"Ticker":str(universe.iloc[i]),"Symbol":str(universe.iloc[i]), "Price":trade_price,"Refresh_Date":datetime.now().strftime("%Y-%m-%d")}
-#                         tradeable_list.append(new_get)
-#                         mongod.conn.to_sql(pd.DataFrame(new_get,index = [i]),"all_symbol","cantrade",if_exists="append")
-                    
-# #                         mongod.db["cantrade"].update_one({"Ticker":str(universe.iloc[i])},{"$set":{"Symbol":str(universe.iloc[i]), "Price":trade_price,"Refresh_Date":datetime.now().strftime("%Y-%m-%d")}},upsert=True)
-#                     print ("Got cantrade: " + universe.iloc[i])
-#                 i+=1
-#                 trial = 0
-# #                 time.sleep(1)
-#             except Exception as e:
-#                 print (str(e) + ". Timeout error, waiting\n" +str(universe.iloc[i]) )
-#                 time.sleep(2)
-#                 if trial >0:
-#                     i+=1
-#                     trial = 0
-#                 trial += 1
 
-
-#         tradeable = pd.DataFrame(tradeable_list)
-        
-#         mongod.frame_to_mongo(tradeable,"cantrade",drop_mode = "upsert", index_col = "Ticker")
         ## My own list
         mylist = pd.read_csv(directory+"mylist.csv")
         mylist["Refresh_Date"] = datetime.now().strftime("%Y-%m-%d")
         mylist.loc[:,"Ticker"] = mylist["Symbol"]
         mongod.conn.to_sql(pd.DataFrame(mylist),"all_symbol","cantrade",if_exists="append")
         tradeable = tradeable.append(mylist)
-#         ## ETF List
-#         mylist = pd.read_csv(directory+"ETFList.csv")
-#         mylist["Refresh_Date"] = datetime.now().strftime("%Y-%m-%d")
-#         mylist.loc[:,"Ticker"] = mylist["Symbol"]
-#         mongod.conn.to_sql(pd.DataFrame(mylist),"all_symbol","cantrade",if_exists="append")
-#         tradeable = tradeable.append(mylist)
-        #get stock volumn
-        
+
         tradeable.to_csv(directory+'cantrade.csv')
         
-
-#         mongod.frame_to_mongo(tradeable,"cantrade",drop_mode = "drop", index_col = "Ticker")
         print ("cantrade done!\n")
 
 
@@ -592,45 +538,32 @@ def update_fundamentals(robinhood,my_list = False, test_mode=False,skip_can=True
     for col in fund_cols:
         tradeable[col] = np.NaN
 
-    def _parse_finviz_value(value_str):
-        if not isinstance(value_str, str) or value_str == '-':
-            return np.nan
-        value_str = value_str.strip()
-        try:
-            if value_str.endswith('%'):
-                return float(value_str.rstrip('%')) / 100.0
-            elif value_str.endswith('B'):
-                return float(value_str.rstrip('B')) * 1e9
-            elif value_str.endswith('M'):
-                return float(value_str.rstrip('M')) * 1e6
-            elif value_str.endswith('K'):
-                return float(value_str.rstrip('K')) * 1e3
-            return float(value_str)
-        except (ValueError, TypeError):
-            return value_str
+    price_fetcher = PriceDataFetcher()
 
     for i in range(len(tradeable.index)):
         try:
             ticker = tradeable['Ticker'].iloc[i]
-            stock_finviz = Stock(ticker, verbose=0)
-            fund = stock_finviz.ticker_fundament()
+            fund = price_fetcher.get_stock_details_finviz(ticker)
             
+            if not fund:
+                raise Exception(f"No fundamental data returned for {ticker}")
+
             idx = tradeable.index[i]
             tradeable.loc[idx, 'Industry'] = fund.get('Industry')
             tradeable.loc[idx, 'Sector'] = fund.get('Sector')
-            tradeable.loc[idx, 'Market_cap'] = _parse_finviz_value(fund.get('Market Cap'))
-            tradeable.loc[idx, 'Earnings_date'] = fund.get('Earnings')
-            tradeable.loc[idx, "PEG"] = _parse_finviz_value(fund.get('PEG'))
-            tradeable.loc[idx, "Profit_Margin"] = _parse_finviz_value(fund.get('Profit Margin'))
-            tradeable.loc[idx, "Avg_Volume"] = _parse_finviz_value(fund.get('Avg Volume'))
-            tradeable.loc[idx, "Inst_Own"] = _parse_finviz_value(fund.get('Inst Own'))
-            tradeable.loc[idx, "Beta"] = _parse_finviz_value(fund.get('Beta'))
-            tradeable.loc[idx, "Current_Ratio"] = _parse_finviz_value(fund.get('Current Ratio'))
-            tradeable.loc[idx, "PB"] = _parse_finviz_value(fund.get('P/B'))
-            tradeable.loc[idx, "Debt_to_Equity"] = _parse_finviz_value(fund.get('Debt/Eq'))
-            tradeable.loc[idx, "LDebt_to_Equity"] = _parse_finviz_value(fund.get('LT Debt/Eq'))
-            tradeable.loc[idx, "Sales"] = _parse_finviz_value(fund.get('Sales'))
-            tradeable.loc[idx, "ROE"] = _parse_finviz_value(fund.get('ROE'))
+            tradeable.loc[idx, 'Market_cap'] = fund.get('Market_cap')
+            tradeable.loc[idx, 'Earnings_date'] = fund.get('Earnings_date')
+            tradeable.loc[idx, "PEG"] = fund.get('PEG')
+            tradeable.loc[idx, "Profit_Margin"] = fund.get('Profit_Margin')
+            tradeable.loc[idx, "Avg_Volume"] = fund.get('Avg_Volume')
+            tradeable.loc[idx, "Inst_Own"] = fund.get('Inst_Own')
+            tradeable.loc[idx, "Beta"] = fund.get('Beta')
+            tradeable.loc[idx, "Current_Ratio"] = fund.get('Current_Ratio')
+            tradeable.loc[idx, "PB"] = fund.get('PB')
+            tradeable.loc[idx, "Debt_to_Equity"] = fund.get('Debt_to_Equity')
+            tradeable.loc[idx, "LDebt_to_Equity"] = fund.get('LDebt_to_Equity')
+            tradeable.loc[idx, "Sales"] = fund.get('Sales')
+            tradeable.loc[idx, "ROE"] = fund.get('ROE')
             
             print ("get done! ", ticker)
             time.sleep(0.5) # Be respectful to Finviz servers

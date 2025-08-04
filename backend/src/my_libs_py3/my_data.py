@@ -28,6 +28,23 @@ class PriceDataFetcher:
         self.fall_back = fall_back
         self.finviz_key = self._read_finviz_key() # Initialize finviz key
 
+    def _parse_finviz_value(self, value_str):
+        if not isinstance(value_str, str) or value_str == '-':
+            return np.nan
+        value_str = value_str.strip()
+        try:
+            if value_str.endswith('%'):
+                return float(value_str.rstrip('%')) / 100.0
+            elif value_str.endswith('B'):
+                return float(value_str.rstrip('B')) * 1e9
+            elif value_str.endswith('M'):
+                return float(value_str.rstrip('M')) * 1e6
+            elif value_str.endswith('K'):
+                return float(value_str.rstrip('K')) * 1e3
+            return float(value_str)
+        except (ValueError, TypeError):
+            return value_str
+
     def _read_finviz_key(self):
         """Reads the Finviz authentication key first from Airflow Variables,
         then from a .env file or environment variables."""
@@ -404,7 +421,7 @@ class PriceDataFetcher:
             max_retries (int): Maximum number of retries for the API request.
 
         Returns:
-            dict: A dictionary with 'dividend_yield' (float) and 'earnings_date' (str), or an empty dict if error.
+            dict: A dictionary with fundamental stock data, or an empty dict if error.
         """
         if not self.finviz_key:
             logging.error("Finviz authentication key is not set. Cannot fetch stock details.")
@@ -438,31 +455,25 @@ class PriceDataFetcher:
                 results = {}
                 stock_data = df.iloc[0] # Assuming first row has the data
 
-                # 1. Dividend Yield
-                dividend_yield_col_names = ["Dividend Yield", "Dividend"]
-                actual_div_yield_col = next((col for col in dividend_yield_col_names if col in df.columns), None)
-                
-                div_yield_float = 0.0 # Default to 0.0
-                if actual_div_yield_col:
-                    dividend_yield_str = stock_data[actual_div_yield_col]
-                    if pd.notna(dividend_yield_str) and isinstance(dividend_yield_str, str) and dividend_yield_str.strip() != '-':
-                        if dividend_yield_str.endswith('%'):
-                            try:
-                                div_yield_float = float(dividend_yield_str.strip('%')) / 100.0
-                            except ValueError:
-                                logging.error(f"Finviz API: Could not parse dividend yield string '{dividend_yield_str}' for {tic}.")
-                results['dividend_yield'] = div_yield_float
+                # Map desired keys to potential column names in Finviz export
+                key_map = {
+                    'Industry': 'Industry', 'Sector': 'Sector', 'Market_cap': 'Market Cap',
+                    'Earnings_date': 'Earnings Date', 'PEG': 'PEG', 'Profit_Margin': 'Profit Margin',
+                    'Avg_Volume': 'Avg Volume', 'Inst_Own': 'Inst Own', 'Beta': 'Beta',
+                    'Current_Ratio': 'Current Ratio', 'PB': 'P/B', 'Debt_to_Equity': 'Debt/Eq',
+                    'LDebt_to_Equity': 'LT Debt/Eq', 'Sales': 'Sales', 'ROE': 'ROE',
+                    'dividend_yield': 'Dividend Yield'
+                }
 
-                # 2. Earnings Date
-                earnings_date_col = "Earnings Date" # Based on typical Finviz CSV exports
-                earnings_date_str = None
-                if earnings_date_col in df.columns:
-                    earnings_date_val = stock_data[earnings_date_col]
-                    if pd.notna(earnings_date_val) and isinstance(earnings_date_val, str) and earnings_date_val.strip() != '-':
-                        earnings_date_str = earnings_date_val.strip()
-                results['earnings_date'] = earnings_date_str
+                for result_key, finviz_col in key_map.items():
+                    if finviz_col in stock_data:
+                        raw_value = stock_data[finviz_col]
+                        # Use the helper method to parse the value
+                        results[result_key] = self._parse_finviz_value(raw_value)
+                    else:
+                        results[result_key] = np.nan
 
-                logging.info(f"Successfully fetched details for {tic}: Div Yield={results['dividend_yield']:.4f}, Earnings='{results['earnings_date']}'")
+                logging.info(f"Successfully fetched details for {tic}")
                 return results
 
             except requests.exceptions.RequestException as e_req:
@@ -489,3 +500,61 @@ class PriceDataFetcher:
                  return {}
         
         return {} # Fallback if all retries fail
+
+    def get_futures_data_finviz(self, max_retries=2):
+        """
+        Fetches futures market data from Finviz Elite API.
+
+        Args:
+            max_retries (int): Maximum number of retries for the API request.
+
+        Returns:
+            pandas.DataFrame: A DataFrame with futures data, or an empty DataFrame on error.
+        """
+        if not self.finviz_key:
+            logging.error("Finviz authentication key is not set. Cannot fetch futures data.")
+            return pd.DataFrame()
+
+        # v=210 is the view for futures data
+        base_url = "https://elite.finviz.com/export.ashx"
+        url = f"{base_url}?v=210&auth={self.finviz_key}"
+        
+        retry_delay = 10
+        attempt = 0
+        
+        while attempt <= max_retries:
+            try:
+                response = requests.get(url)
+                response.raise_for_status()
+
+                if "Invalid authentication" in response.text:
+                    raise ValueError("Finviz API: Invalid authentication key.")
+                if "No data" in response.text or response.text.strip() == "":
+                    logging.warning("Finviz API: No futures data found.")
+                    return pd.DataFrame()
+
+                df = pd.read_csv(io.StringIO(response.text))
+                logging.info("Successfully fetched futures data from Finviz.")
+                return df
+
+            except requests.exceptions.RequestException as e:
+                attempt += 1
+                current_response_text = response.text if 'response' in locals() and response is not None else "No response object"
+                if response is not None and response.status_code == 429 and attempt <= max_retries:
+                    logging.warning(f"Finviz API rate limit hit for futures. Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                elif attempt > max_retries:
+                    logging.error(f"Failed to fetch futures data from Finviz after {max_retries} attempts. Error: {e}. Last response: {current_response_text[:200]}")
+                    return pd.DataFrame()
+                else:
+                    logging.warning(f"Retry {attempt}/{max_retries} for futures due to error: {e}. Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+            
+            except ValueError as e:
+                logging.error(f"Data processing error for futures: {e}")
+                return pd.DataFrame()
+            except Exception as e:
+                 logging.error(f"An unexpected error occurred while processing Finviz futures data: {e}")
+                 return pd.DataFrame()
+        
+        return pd.DataFrame()
