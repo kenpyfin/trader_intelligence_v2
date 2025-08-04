@@ -6,7 +6,6 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm install
 COPY . .
-RUN npm install --prefix frontend react-plotly.js plotly.js
 RUN CI=false npm run build
 
 
