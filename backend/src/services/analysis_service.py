@@ -241,22 +241,6 @@ def analyze_high_movement_expectation(S_current, option_chain_df, historical_pri
     # ... more analysis logic would go here ...
     return analysis
 
-def analyze_volume_and_oi_signals(df, S_current):
-    if df is None or df.empty: return {"error": "Option chain data is not available."}
-    analysis = {"pc_ratio": None, "uoa_calls": [], "uoa_puts": [], "notes": []}
-    required_cols = ['Volume', 'Open Int.', 'Type', 'Strike']
-    if not all(col in df.columns for col in required_cols): return analysis
-    df['Volume'] = pd.to_numeric(df['Volume'], errors='coerce').fillna(0)
-    df['Open Int.'] = pd.to_numeric(df['Open Int.'], errors='coerce').fillna(0)
-    df['Strike'] = pd.to_numeric(df['Strike'], errors='coerce')
-    df.dropna(subset=['Strike', 'Type'], inplace=True)
-    calls = df[df['Type'].str.lower() == 'call']
-    puts = df[df['Type'].str.lower() == 'put']
-    if calls.empty and puts.empty: return analysis
-    total_call_volume = calls['Volume'].sum()
-    if total_call_volume > 0: analysis['pc_ratio'] = puts['Volume'].sum() / total_call_volume
-    # ... more analysis logic would go here ...
-    return analysis
 
 def analyze_volume_and_oi_signals(df, S_current):
     """
@@ -299,12 +283,14 @@ def analyze_volume_and_oi_signals(df, S_current):
     otm_calls = calls[calls['Strike'] > S_current]
     otm_puts = puts[puts['Strike'] < S_current]
     
-    uoa_candidates_c = otm_calls[(otm_calls['Volume'] > otm_calls['Open Int.']) & (otm_calls['Volume'] > 500)]
+    # Use .copy() to avoid SettingWithCopyWarning when adding a new column
+    uoa_candidates_c = otm_calls[(otm_calls['Volume'] > otm_calls['Open Int.']) & (otm_calls['Volume'] > 500)].copy()
     if not uoa_candidates_c.empty:
         uoa_candidates_c['vol_oi_ratio'] = uoa_candidates_c['Volume'] / (uoa_candidates_c['Open Int.'] + 1)
         analysis['uoa_calls'] = uoa_candidates_c.sort_values('vol_oi_ratio', ascending=False).head(3).to_dict('records')
 
-    uoa_candidates_p = otm_puts[(otm_puts['Volume'] > otm_puts['Open Int.']) & (otm_puts['Volume'] > 500)]
+    # Use .copy() to avoid SettingWithCopyWarning
+    uoa_candidates_p = otm_puts[(otm_puts['Volume'] > otm_puts['Open Int.']) & (otm_puts['Volume'] > 500)].copy()
     if not uoa_candidates_p.empty:
         uoa_candidates_p['vol_oi_ratio'] = uoa_candidates_p['Volume'] / (uoa_candidates_p['Open Int.'] + 1)
         analysis['uoa_puts'] = uoa_candidates_p.sort_values('vol_oi_ratio', ascending=False).head(3).to_dict('records')
@@ -416,15 +402,25 @@ def generate_holistic_conclusion(synthesis_data):
 
 def _sanitize_for_json(item):
     """
-    Recursively walk a data structure and convert non-JSON-compliant floats
-    (NaN, Infinity, -Infinity) to None.
+    Recursively walk a data structure and convert non-JSON-compliant types
+    (NaN, Infinity, numpy integers/floats) to standard Python types.
     """
     if isinstance(item, dict):
         return {k: _sanitize_for_json(v) for k, v in item.items()}
     elif isinstance(item, list):
         return [_sanitize_for_json(elem) for elem in item]
-    elif isinstance(item, (float, np.floating)) and (np.isnan(item) or np.isinf(item)):
-        return None  # Convert to null, which is valid in JSON
+    # This must come before float check
+    elif isinstance(item, np.integer):
+        return int(item)
+    elif isinstance(item, np.floating):
+        if np.isnan(item) or np.isinf(item):
+            return None
+        return float(item)
+    elif isinstance(item, np.ndarray):
+        return item.tolist()
+    # Standard float check for NaN/inf
+    elif isinstance(item, float) and (np.isnan(item) or np.isinf(item)):
+        return None
     return item
 
 def run_full_analysis(ticker: str, expiration_date: date, r_current: float = 0.045):
