@@ -283,6 +283,19 @@ def generate_holistic_conclusion(synthesis_data):
     # ... conclusion generation logic would go here ...
     return "Conclusion text.", "Neutral"
 
+def _sanitize_for_json(item):
+    """
+    Recursively walk a data structure and convert non-JSON-compliant floats
+    (NaN, Infinity, -Infinity) to None.
+    """
+    if isinstance(item, dict):
+        return {k: _sanitize_for_json(v) for k, v in item.items()}
+    elif isinstance(item, list):
+        return [_sanitize_for_json(elem) for elem in item]
+    elif isinstance(item, (float, np.floating)) and (np.isnan(item) or np.isinf(item)):
+        return None  # Convert to null, which is valid in JSON
+    return item
+
 def run_full_analysis(ticker: str, expiration_date: date, r_current: float = 0.045):
     """
     Performs all calculations for the option screener.
@@ -354,10 +367,12 @@ def run_full_analysis(ticker: str, expiration_date: date, r_current: float = 0.0
 
     results_df = pd.DataFrame(results).sort_values("Undervalued By (%)", ascending=False) if results else pd.DataFrame()
 
-    return {
+    response_data = {
         "status": "success", "ticker": ticker, "S_current": S_current, "expiration_date": expiration_date.isoformat(),
         "iv_logs": iv_logs, "iv_available": iv_available, "synthesis_data": synthesis_data,
         "final_conclusion_html": final_conclusion_html, "final_bias": final_bias, "iv_high": False, "iv_low": False, # Simplified
         "strikes": strikes.tolist(), "candlestick_analysis": candlestick_analysis, "volume_oi_analysis": volume_oi_analysis,
         "movement_analysis_results": movement_analysis_results, "results_df": results_df.to_dict('records'),
     }
+
+    return _sanitize_for_json(response_data)
