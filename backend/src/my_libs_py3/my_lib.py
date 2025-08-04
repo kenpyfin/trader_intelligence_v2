@@ -75,7 +75,7 @@ root_directory = home_dir + "/My_Trader/"
 #Read trading parameter
 ############################################
 
-trading_param = read_json(directory+"trading_param.json")
+# trading_param = read_json(directory+"trading_param.json")
 
 
 ## Timezone
