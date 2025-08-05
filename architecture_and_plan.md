@@ -76,15 +76,8 @@ This plan breaks down the project into iterative phases, delivering value quickl
     6.  ✅ Set up a minimal React frontend that can call this endpoint and display the raw JSON output.
     7.  ✅ Use Docker Compose to run all services locally.
 
-### Phase 2: User Interface & Position Tracking
-*   **Goal:** Build a user-friendly interface for analysis and portfolio tracking.
-*   **Tasks:**
-    1.  Develop React components to render the analysis results in a polished, readable format (tables, charts, alerts), similar to the Streamlit UI.
-    2.  Implement UI forms for adding/editing tracked positions (single options and strategies).
-    3.  Create backend endpoints and database logic to save, retrieve, and delete portfolio positions in MongoDB.
-    4.  Display the user's tracked positions on the main dashboard.
 
-### Phase 3: Broker Integration & Live Trading
+### Phase 2: Broker Integration & Live Trading
 *   **Goal:** Enable trade execution from the application.
 *   **Tasks:**
     1.  Integrate the `IBTrader` class into the backend `broker` service. Ensure robust connection and error handling.
@@ -92,7 +85,7 @@ This plan breaks down the project into iterative phases, delivering value quickl
     3.  Build the UI components for placing trades based on the analysis and strategy suggestions.
     4.  Implement a mechanism to query and display live order statuses.
 
-### Phase 4: Scalability and Advanced Features
+### Phase 3: Scalability and Advanced Features
 *   **Goal:** Enhance performance, reliability, and feature set.
 *   **Tasks:**
     1.  Introduce a dedicated caching layer (e.g., Redis) for expensive API calls and frequently accessed data to reduce latency and cost.
