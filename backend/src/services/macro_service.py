@@ -102,13 +102,10 @@ async def calculate_market_implied_risk_free_rate(tickers: list):
         target_expiration_date = date.today() + timedelta(days=dte)
         log_messages.append(f"--- Processing Target DTE: ~{dte} days ---")
         
-        # Create a list of concurrent tasks for all tickers for the current DTE
-        tasks = [_get_rates_for_ticker(ticker, target_expiration_date, price_fetcher, fmp) for ticker in tickers]
-        # Run tasks concurrently
-        results = await asyncio.gather(*tasks)
-
         rates_for_this_dte = []
-        for rate, logs in results:
+        # Process tickers sequentially for the current DTE to avoid potential rate-limiting.
+        for ticker in tickers:
+            rate, logs = await _get_rates_for_ticker(ticker, target_expiration_date, price_fetcher, fmp)
             log_messages.extend(logs)
             if rate is not None:
                 rates_for_this_dte.append(rate)
