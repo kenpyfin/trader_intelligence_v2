@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException
 import traceback
+import asyncio
 from datetime import date, timedelta
 
 from .models.analysis_models import AnalysisRequest, RiskFreeRateRequest
@@ -45,30 +46,36 @@ async def get_risk_free_rate(request: RiskFreeRateRequest):
 @app.post("/analyze/stock")
 async def analyze_stock(request: AnalysisRequest):
     """
-    Runs a full stock and option analysis for multiple, standard expiration dates (DTEs).
+    Runs a full stock and option analysis concurrently for multiple, standard expiration dates (DTEs).
     This endpoint serves as the core of Key Feature 1.
     """
     try:
-        all_results = []
         # Define a standard set of DTEs to analyze for a comprehensive view.
-        # This covers short-term, medium-term, and quarterly cycles.
         standard_dtes_to_analyze = [30, 45, 60, 90]
-        # Loop through each standard Day to Expiration (DTE)
+        
+        # Create a list of concurrent tasks.
+        # asyncio.to_thread runs the synchronous function in a separate thread,
+        # allowing I/O-bound operations (like network requests) to run in parallel.
+        tasks = []
         for dte in standard_dtes_to_analyze:
             expiration_date = date.today() + timedelta(days=dte)
-            
-            # FastAPI runs synchronous functions in a thread pool, preventing blocking.
-            analysis_result = run_full_analysis(
+            task = asyncio.to_thread(
+                run_full_analysis,
                 ticker=request.ticker.upper(),
                 expiration_date=expiration_date,
                 r_current=request.risk_free_rate
             )
-            
+            tasks.append((dte, task))
+
+        # Run all analysis tasks concurrently and wait for them to complete
+        results_from_tasks = await asyncio.gather(*(task for _, task in tasks))
+        
+        all_results = []
+        for (dte, _), analysis_result in zip(tasks, results_from_tasks):
             # We only add successful analyses to the final result list.
             # Errors for a single DTE (e.g., no options available) are logged by the service
             # but don't stop the entire request.
             if analysis_result.get("status") == "success":
-                # Add the DTE to the result for easy reference on the frontend
                 analysis_result['dte'] = dte
                 all_results.append(analysis_result)
 
