@@ -45,13 +45,16 @@ async def get_risk_free_rate(request: RiskFreeRateRequest):
 @app.post("/analyze/stock")
 async def analyze_stock(request: AnalysisRequest):
     """
-    Runs a full stock and option analysis for multiple expiration dates (DTEs).
+    Runs a full stock and option analysis for multiple, standard expiration dates (DTEs).
     This endpoint serves as the core of Key Feature 1.
     """
     try:
         all_results = []
-        # Loop through each requested Day to Expiration (DTE)
-        for dte in request.dtes:
+        # Define a standard set of DTEs to analyze for a comprehensive view.
+        # This covers short-term, medium-term, and quarterly cycles.
+        standard_dtes_to_analyze = [30, 45, 60, 90]
+        # Loop through each standard Day to Expiration (DTE)
+        for dte in standard_dtes_to_analyze:
             expiration_date = date.today() + timedelta(days=dte)
             
             # FastAPI runs synchronous functions in a thread pool, preventing blocking.
