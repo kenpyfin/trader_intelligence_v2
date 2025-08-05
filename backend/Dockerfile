@@ -7,6 +7,24 @@ WORKDIR /app
 # Copy the requirements file into the container at /app
 COPY ./requirements.txt /app/requirements.txt
 
+# Install system dependencies for TA-Lib, build it from source,
+# and then clean up to keep the image small.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    build-essential \
+    wget \
+    unzip && \
+    wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz -O ta-lib-0.4.0-src.tar.gz && \
+    tar -xzf ta-lib-0.4.0-src.tar.gz && \
+    cd ta-lib/ && \
+    ./configure --prefix=/usr && \
+    make && \
+    make install && \
+    cd .. && \
+    rm -rf ta-lib ta-lib-0.4.0-src.tar.gz && \
+    apt-get purge -y --auto-remove build-essential wget unzip && \
+    rm -rf /var/lib/apt/lists/*
+
 # Install any needed packages specified in requirements.txt
 # Using --no-cache-dir reduces the image size.
 RUN pip install --no-cache-dir --upgrade -r /app/requirements.txt
