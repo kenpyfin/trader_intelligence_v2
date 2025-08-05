@@ -19,6 +19,5 @@ ENV PYTHONPATH=/app
 
 # The command to run the application using uvicorn.
 # It will listen on the port specified by the BACKEND_PORT environment variable from .env
-# The --reload flag is added for development convenience.
 # We use the shell form of CMD to allow environment variable substitution.
-CMD uvicorn src.main:app --host 0.0.0.0 --port ${BACKEND_PORT:-8511} --reload
+CMD uvicorn src.main:app --host 0.0.0.0 --port ${BACKEND_PORT:-8511}
