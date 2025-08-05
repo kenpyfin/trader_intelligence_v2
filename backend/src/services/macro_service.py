@@ -33,7 +33,9 @@ async def _get_rates_for_ticker(ticker, target_expiration_date, price_fetcher, f
     # --- Find nearest option chain for the target DTE ---
     option_chain_df = None
     actual_expiration_date = None
-    for i in range(8): # Search up to 7 days forward
+    # Search up to 20 days forward to have a higher chance of finding the monthly expiry,
+    # which may be further away than the standard 7-day search window.
+    for i in range(21): # Search up to 20 days forward
         search_date = target_expiration_date + timedelta(days=i)
         search_date_str = search_date.strftime('%Y-%m-%d')
         temp_df = price_fetcher.get_option_data_finviz(ticker, 'o', search_date_str)
