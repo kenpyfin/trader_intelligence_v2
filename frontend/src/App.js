@@ -173,6 +173,58 @@ const MacroInsights = ({ onRateCalculated }) => {
   );
 };
 
+const StrategyOrder = ({ strategy, ticker, expirationDate }) => {
+    const [isOrdering, setIsOrdering] = useState(false);
+    const [orderStatus, setOrderStatus] = useState(null);
+
+    const handleExecute = async () => {
+        setIsOrdering(true);
+        setOrderStatus(null);
+        try {
+            const payload = {
+                ticker: ticker,
+                expiration_date: expirationDate, // "YYYY-MM-DD"
+                legs: strategy.legs,
+                is_credit_spread: strategy.is_credit_spread,
+                size: 1, // Default to 1 for now
+            };
+            const response = await axios.post('/api/orders/strategy', payload);
+            setOrderStatus(response.data);
+        } catch (err) {
+            setOrderStatus({ status: 'error', message: err.response?.data?.detail || 'Order failed.' });
+        } finally {
+            setIsOrdering(false);
+        }
+    };
+
+    if (!strategy || !strategy.name || strategy.name === 'None' || strategy.legs.length === 0) {
+        return null;
+    }
+
+    const legDescriptions = strategy.legs.map((leg, i) => (
+      <li key={i}>{leg.action} {leg.strike.toFixed(2)} {leg.right}</li>
+    ));
+
+    return (
+        <AnalysisCard title="Execute Recommended Strategy">
+            <p><strong>Strategy:</strong> {strategy.name}</p>
+            <ul style={{ margin: '5px 0', paddingLeft: '20px' }}>
+                {legDescriptions}
+            </ul>
+            {/* TODO: Add quantity input here */}
+            <button onClick={handleExecute} disabled={isOrdering} style={{ padding: '5px 15px', cursor: 'pointer' }}>
+                {isOrdering ? 'Placing Order...' : `Execute ${strategy.name}`}
+            </button>
+            {orderStatus && (
+                <div style={{ marginTop: '10px', padding: '10px', borderRadius: '5px', background: orderStatus.status === 'error' ? '#ffdddd' : '#e8f5e9' }}>
+                    <p><strong>Status:</strong> {orderStatus.message}</p>
+                    {orderStatus.status === 'success' && <p>Order Status from Broker: {orderStatus.order_status}</p>}
+                </div>
+            )}
+        </AnalysisCard>
+    );
+};
+
 const AnalysisDetails = ({ data }) => {
   const biasColor = data.final_bias.includes('Bullish') ? 'green' : data.final_bias.includes('Bearish') ? 'red' : 'orange';
 
@@ -201,6 +253,8 @@ const AnalysisDetails = ({ data }) => {
         <h4 style={{ color: biasColor }}>Final Bias: {data.final_bias}</h4>
         <div dangerouslySetInnerHTML={{ __html: data.final_conclusion_html }} />
       </AnalysisCard>
+      
+      <StrategyOrder strategy={data.recommended_strategy} ticker={data.ticker} expirationDate={data.expiration_date} />
       
       <AnalysisCard title="1. Price Trend & Candlestick Analysis">
         {data.candlestick_analysis.plot_data ? 

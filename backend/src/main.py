@@ -4,8 +4,11 @@ import asyncio
 from datetime import date, timedelta
 
 from .models.analysis_models import AnalysisRequest, RiskFreeRateRequest
+from .models.order_models import StrategyOrderRequest
 from .services.analysis_service import run_full_analysis
 from .services.macro_service import get_macro_futures_data, calculate_market_implied_risk_free_rate
+from .services import broker_service
+
 
 app = FastAPI(
     title="Trader Intelligence API",
@@ -42,6 +45,22 @@ async def get_risk_free_rate(request: RiskFreeRateRequest):
     except Exception as e:
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
+
+@app.post("/orders/strategy")
+async def create_strategy_order(request: StrategyOrderRequest):
+    """
+    Places a multi-leg strategy order via the connected broker.
+    This corresponds to Key Feature 3 in the PDR.
+    """
+    try:
+        result = await broker_service.place_strategy_order(request)
+        if result["status"] == "error":
+            raise HTTPException(status_code=500, detail=result["message"])
+        return result
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
+
 
 @app.post("/analyze/stock")
 async def analyze_stock(request: AnalysisRequest):
