@@ -24,4 +24,3 @@ backtrader
 lxml
 nest_asyncio
 plotly
-TA-Lib

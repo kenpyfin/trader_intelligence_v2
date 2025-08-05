@@ -3,7 +3,6 @@ from .send_email import *
 from .fmp import *
 from .TD_Order import IBTrader
 from .my_data import PriceDataFetcher
-import talib as ta
 
 #
 #def hedge(self,hedge_int = "UVXY"):
@@ -502,17 +501,6 @@ def self_pair_trade(i, j, cash=2000, back_day=365, if_signal = False, window=20,
     price2["volatility"] = price2.log_ret.rolling(window).std()
 
     price_table["z_score"] = (price_table["relative"] - price_table["relative_mv"]) / price_table.relative.std()
-
-    # up, mid , low = ta.BBANDS(price1.Close*price_table.hedge_ratio)
-    try:
-        up, mid, low = ta.BBANDS(price_table["z_score"])
-        bb = pd.DataFrame({"up": up, "mid": mid, "low": low})
-        price_table = price_table.join(bb)
-    except Exception as e:
-        if "inputs are all NaN" in str(e):
-            pass
-        else:
-            raise Exception(e)
 
 
     price_table = price_table.fillna(method="bfill")
