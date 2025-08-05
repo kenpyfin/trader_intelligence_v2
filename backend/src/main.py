@@ -34,7 +34,7 @@ async def get_risk_free_rate(request: RiskFreeRateRequest):
     """Calculates the market-implied risk-free rate from a basket of ETFs."""
     try:
         # The service now calculates the rate across multiple standard expiries automatically.
-        rate, logs = calculate_market_implied_risk_free_rate(
+        rate, logs = await calculate_market_implied_risk_free_rate(
             tickers=request.tickers
         )
         return {"risk_free_rate": rate, "logs": logs}
