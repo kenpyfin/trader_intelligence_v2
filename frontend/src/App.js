@@ -2,6 +2,32 @@ import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import Plot from 'react-plotly.js';
 
+// A custom hook to keep state in localStorage
+function useStickyState(defaultValue, key) {
+  const [value, setValue] = useState(() => {
+    const stickyValue = window.localStorage.getItem(key);
+    if (stickyValue !== null) {
+      try {
+        return JSON.parse(stickyValue);
+      } catch (error) {
+        console.error(`Error reading localStorage key “${key}”:`, error);
+        return defaultValue;
+      }
+    }
+    return defaultValue;
+  });
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(key, JSON.stringify(value));
+    } catch (error) {
+      console.error(`Error setting localStorage key “${key}”:`, error);
+    }
+  }, [key, value]);
+
+  return [value, setValue];
+}
+
 // --- Helper Components for Display ---
 
 const AnalysisCard = ({ title, children }) => (
@@ -45,7 +71,7 @@ const MacroInsights = ({ onRateCalculated }) => {
   const [futures, setFutures] = useState(null);
   const [loading, setLoading] = useState(true);
   
-  const [rfTickers, setRfTickers] = useState('SPY, QQQ, IWM');
+  const [rfTickers, setRfTickers] = useStickyState('SPY, QQQ, IWM', 'rfTickers');
   const [calculating, setCalculating] = useState(false);
   const [calcResult, setCalcResult] = useState(null);
   const [calcLogs, setCalcLogs] = useState([]);
@@ -282,9 +308,9 @@ const ResultsDisplay = ({ analysisResults }) => {
 
 
 function App() {
-  const [ticker, setTicker] = useState('SPY');
-  const [riskFreeRate, setRiskFreeRate] = useState(0.045);
-  const [analysisResult, setAnalysisResult] = useState(null);
+  const [ticker, setTicker] = useStickyState('SPY', 'ticker');
+  const [riskFreeRate, setRiskFreeRate] = useStickyState(0.045, 'riskFreeRate');
+  const [analysisResult, setAnalysisResult] = useStickyState(null, 'analysisResult');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
