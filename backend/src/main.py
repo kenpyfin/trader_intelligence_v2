@@ -17,7 +17,7 @@ def read_root():
     """A simple endpoint to check if the API is running."""
     return {"message": "Welcome to the Trader Intelligence API"}
 
-@app.get("/api/macro-data")
+@app.get("/macro-data")
 def get_macro_data():
     """Endpoint to fetch macro economic data (futures)."""
     try:
@@ -29,7 +29,7 @@ def get_macro_data():
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
 
-@app.post("/api/calculate-risk-free-rate")
+@app.post("/calculate-risk-free-rate")
 async def get_risk_free_rate(request: RiskFreeRateRequest):
     """Calculates the market-implied risk-free rate from a basket of ETFs."""
     try:
