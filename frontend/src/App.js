@@ -153,7 +153,7 @@ const MacroInsights = ({ onRateCalculated }) => {
   );
 };
 
-const ResultsDisplay = ({ data }) => {
+const AnalysisDetails = ({ data }) => {
   const biasColor = data.final_bias.includes('Bullish') ? 'green' : data.final_bias.includes('Bearish') ? 'red' : 'orange';
 
   const renderUOA = (uoaList, type) => {
@@ -173,7 +173,7 @@ const ResultsDisplay = ({ data }) => {
   };
 
   return (
-    <div style={{ marginTop: '20px' }}>
+    <div>
       <h2>Analysis for {data.ticker.toUpperCase()}</h2>
       <p>Current Price: <strong>${data.S_current.toFixed(2)}</strong></p>
       
@@ -248,10 +248,47 @@ const ResultsDisplay = ({ data }) => {
   );
 };
 
+const ResultsDisplay = ({ analysisResults }) => {
+  const [activeTab, setActiveTab] = useState(0);
+
+  if (!analysisResults || analysisResults.length === 0) {
+    return <p>No analysis results to display.</p>;
+  }
+
+  // Sort results by DTE for consistent tab order
+  const sortedResults = [...analysisResults].sort((a, b) => a.dte - b.dte);
+
+  return (
+    <div style={{ marginTop: '20px' }}>
+      <div style={{ display: 'flex', borderBottom: '1px solid #ccc', marginBottom: '10px' }}>
+        {sortedResults.map((result, index) => (
+          <button
+            key={index}
+            onClick={() => setActiveTab(index)}
+            style={{
+              padding: '10px 15px',
+              border: 'none',
+              cursor: 'pointer',
+              background: activeTab === index ? '#fff' : '#f4f4f4',
+              borderBottom: activeTab === index ? '3px solid #007bff' : '3px solid transparent',
+              fontWeight: activeTab === index ? 'bold' : 'normal',
+            }}
+          >
+            {result.dte} DTE ({new Date(result.expiration_date).toLocaleDateString()})
+          </button>
+        ))}
+      </div>
+      <div>
+        {/* Render the details for the active tab using the sorted results */}
+        <AnalysisDetails data={sortedResults[activeTab]} />
+      </div>
+    </div>
+  );
+};
+
 
 function App() {
   const [ticker, setTicker] = useState('SPY');
-  const [expirationDate, setExpirationDate] = useState(new Date(new Date().setDate(new Date().getDate() + 30)).toISOString().split('T')[0]);
   const [riskFreeRate, setRiskFreeRate] = useState(0.045);
   const [analysisResult, setAnalysisResult] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -265,7 +302,6 @@ function App() {
     try {
       const response = await axios.post('/api/analyze/stock', {
         ticker: ticker,
-        expiration_date: expirationDate,
         risk_free_rate: riskFreeRate,
       });
       setAnalysisResult(response.data);
@@ -289,10 +325,6 @@ function App() {
             <input type="text" value={ticker} onChange={(e) => setTicker(e.target.value)} required />
           </div>
           <div>
-            <label>Expiration Date: </label>
-            <input type="date" value={expirationDate} onChange={(e) => setExpirationDate(e.target.value)} required />
-          </div>
-          <div>
             <label>Risk-Free Rate: </label>
             <input type="number" step="0.001" value={riskFreeRate} onChange={(e) => setRiskFreeRate(parseFloat(e.target.value))} required style={{width: '80px'}}/>
           </div>
@@ -303,7 +335,7 @@ function App() {
 
         {error && <p style={{ color: 'red', border: '1px solid red', padding: '10px', borderRadius: '5px' }}><strong>Error:</strong> {error}</p>}
         {loading && <p>Loading analysis...</p>}
-        {analysisResult && <ResultsDisplay data={analysisResult} />}
+        {analysisResult && <ResultsDisplay analysisResults={analysisResult} />}
       </AnalysisCard>
     </div>
   );
