@@ -563,11 +563,22 @@ def run_full_analysis(ticker: str, expiration_date: date, r_current: float = 0.0
         return {"status": "error", "message": f"Could not fetch current price for {ticker}."}
     S_current = rt_quote.price.iloc[0]
 
-    expiration_date_str = expiration_date.strftime('%Y-%m-%d')
-    option_chain_df = price_fetcher.get_option_data_finviz(ticker, 'o', expiration_date_str)
-    if option_chain_df is None or option_chain_df.empty:
-        return {"status": "error", "message": f"Could not fetch option chain for {ticker} on {expiration_date_str}."}
+    # --- Fetch Option Chain with fallback to nearest date ---
+    option_chain_df = None
+    # Search for an available option chain up to 7 days from the target expiration date.
+    # This makes the analysis more robust if the target DTE falls on a non-trading day.
+    for i in range(8): # Search from D-0 to D+7
+        search_date = expiration_date + timedelta(days=i)
+        search_date_str = search_date.strftime('%Y-%m-%d')
+        option_chain_df = price_fetcher.get_option_data_finviz(ticker, 'o', search_date_str)
+        if option_chain_df is not None and not option_chain_df.empty:
+            if i > 0: # If we found a date other than the target, update expiration_date
+                expiration_date = search_date
+            break # Found a valid chain, exit the loop
     
+    if option_chain_df is None or option_chain_df.empty:
+        return {"status": "error", "message": f"Could not fetch any option chain for {ticker} near {expiration_date.strftime('%Y-%m-%d')}."}
+
     option_chain_df['Strike'] = pd.to_numeric(option_chain_df['Strike'], errors='coerce')
     option_chain_df.dropna(subset=['Strike'], inplace=True)
     option_chain_df.sort_values('Strike', inplace=True)
