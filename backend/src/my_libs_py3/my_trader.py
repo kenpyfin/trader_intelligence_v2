@@ -3,7 +3,7 @@ from .send_email import *
 from .fmp import *
 from .TD_Order import IBTrader
 from .my_data import PriceDataFetcher
-# import talib as ta
+import talib as ta
 
 #
 #def hedge(self,hedge_int = "UVXY"):

@@ -231,67 +231,6 @@ def annualised_sharpe(returns, N=252):
 
 
 
-def moving_cross_backtest(ticker, period):
-    
-    #---------------------------------------------------------------
-    period = period.lower()
-    if period == "day":
-        stock = da.DataReader(ticker,"yahoo","2017-01-01",datetime.now())
-        try:
-            
-            reversion_test = mean_reversion(ticker,"day")
-            short_ma = np.linspace(10,10+5*reversion_test[2],20,dtype=int)
-            long_ma = np.linspace(60,60+5*reversion_test[2],20,dtype=int)
-            results_cum_ret = np.zeros((len(short_ma),len(long_ma)))
-            results_sharpe = np.zeros((len(short_ma),len(long_ma)))
-        except:
-            
-            short_ma = np.linspace(10,10+5*20,20,dtype=int)
-            long_ma = np.linspace(60,60+20,20,dtype=int)
-            results_cum_ret = np.zeros((len(short_ma),len(long_ma)))
-            results_sharpe = np.zeros((len(short_ma),len(long_ma)))
-            raise "except used, probably cannot convert"
-            exit()
-        
-        for i, shortma in enumerate(short_ma):
-            for j, longma in enumerate(long_ma):
-                results = moving_cross_backtest_day(stock,shortma,longma)
-                results_cum_ret[i,j] = results[0]
-                results_sharpe[i,j] = results[1]
-        #plt.figure(figsize=(8,8))
-        plt.pcolor(short_ma,long_ma,results_cum_ret)
-        plt.colorbar()
-        plt.show()
-
-    elif period =="minute":
-        try:
-            
-            reversion_test = mean_reversion(ticker,"minute")
-            short_ma = np.linspace(10,10+5*reversion_test[2],20,dtype=int)
-            long_ma = np.linspace(60,60+5*reversion_test[2],20,dtype=int)
-            results_cum_ret = np.zeros((len(short_ma),len(long_ma)))
-            results_sharpe = np.zeros((len(short_ma),len(long_ma)))
-        except:
-            
-            short_ma = np.linspace(10,10+5*20,20,dtype=int)
-            long_ma = np.linspace(60,60+5*20,20,dtype=int)
-            results_cum_ret = np.zeros((len(short_ma),len(long_ma)))
-            results_sharpe = np.zeros((len(short_ma),len(long_ma)))
-            raise "except used, probably cannot convert"
-            exit()
-        short_ma = np.linspace(10,10+5*reversion_test[2],20,dtype=int)
-        long_ma = np.linspace(60,60+5*reversion_test[2],20,dtype=int)
-        results_cum_ret = np.zeros((len(short_ma),len(long_ma)))
-        results_sharpe = np.zeros((len(short_ma),len(long_ma)))
-        for i, shortma in enumerate(short_ma):
-            for j, longma in enumerate(long_ma):
-                results = moving_cross_backtest_10minute(stock,shortma,longma)
-                results_cum_ret[i,j] = results[0]
-                results_sharpe[i,j] = results[1]
-        #plt.figure(figsize=(8,8))
-        plt.pcolor(short_ma,long_ma,results_cum_ret)
-        plt.colorbar()
-        plt.show()
 
 def plot_ticker(ticker,method,fast_win=10,slow_win=25,past_days=90):
     #stock = da.DataReader(ticker,"yahoo","2017-01-01",datetime.now())
