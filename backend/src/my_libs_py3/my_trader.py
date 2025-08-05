@@ -1,5 +1,4 @@
 from .my_lib import *
-from .option import *
 from .send_email import *
 from .fmp import *
 from .TD_Order import IBTrader
@@ -215,18 +214,18 @@ def var_normal(ticker, method = "intraday", sv= 0.05, timeperiod=50):
     return abs(mean + std*scipy.special.ndtri(sv))*price.Close.iloc[-1]
 
 
-def hedge(ticker,robinhood,method = "self_minute",hedge_int = "VIXY",target_beta =0.0):
+def hedge(ticker,method = "self_minute",hedge_int = "VIXY",target_beta =0.0):
     trader = IBTrader()
-    hedge_int_beta =beta([hedge_int],interval ="minute",robinhood=robinhood)["betas"].iloc[0][0]
+    hedge_int_beta =beta([hedge_int],interval ="minute")["betas"].iloc[0][0]
     hedge_int_price = trader.realtimequote(hedge_int)
-    position_beta = beta([ticker],interval ="minute",robinhood=robinhood)["betas"].iloc[0][0]
+    position_beta = beta([ticker],interval ="minute")["betas"].iloc[0][0]
     position_value = trader.realtimequote(ticker)
     shares = np.ceil(position_value*(target_beta-position_beta)/hedge_int_beta/hedge_int_price)
     return ("To headge %s beta to "%ticker + str(target_beta) + " please trade " + str(shares) + " share of " +str(hedge_int) + "<br>" + "Total Beta is {:1.4f}".format(position_beta))\
             ,shares
 
 
-def beta(ticker_list,bench = "SPY", interval="day", robinhood = None, past_days = 90 ):    
+def beta(ticker_list,bench = "SPY", interval="day", past_days = 90 ):    
     # will return a dataframe
     price_getter = PriceDataFetcher()
     betas = []

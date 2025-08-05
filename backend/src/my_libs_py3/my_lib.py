@@ -486,9 +486,8 @@ def remove_salt(x):
 
 #################################################################
 
-def update_fundamentals(robinhood,my_list = False, test_mode=False,skip_can=True):
+def update_fundamentals(my_list = False, test_mode=False,skip_can=True):
     from .my_data import PriceDataFetcher
-    # need to feed a logined robinhood instance
     error=[]
     mongod = mongo("all_symbol")
     if not skip_can:
