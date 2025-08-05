@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 import traceback
-from datetime import date
+from datetime import date, timedelta
 
 from .models.analysis_models import AnalysisRequest, RiskFreeRateRequest
 from .services.analysis_service import run_full_analysis
@@ -45,22 +45,35 @@ async def get_risk_free_rate(request: RiskFreeRateRequest):
 @app.post("/analyze/stock")
 async def analyze_stock(request: AnalysisRequest):
     """
-    Runs a full stock and option analysis based on the provided ticker and expiration date.
+    Runs a full stock and option analysis for multiple expiration dates (DTEs).
     This endpoint serves as the core of Key Feature 1.
     """
     try:
-        # FastAPI runs synchronous functions in a thread pool, preventing blocking.
-        analysis_result = run_full_analysis(
-            ticker=request.ticker.upper(),
-            expiration_date=request.expiration_date,
-            r_current=request.risk_free_rate
-        )
-        
-        if analysis_result.get("status") == "error":
-            # Return a 400 Bad Request for user-side errors (e.g., bad ticker)
-            raise HTTPException(status_code=400, detail=analysis_result.get("message", "Analysis failed due to invalid input."))
-        
-        return analysis_result
+        all_results = []
+        # Loop through each requested Day to Expiration (DTE)
+        for dte in request.dtes:
+            expiration_date = date.today() + timedelta(days=dte)
+            
+            # FastAPI runs synchronous functions in a thread pool, preventing blocking.
+            analysis_result = run_full_analysis(
+                ticker=request.ticker.upper(),
+                expiration_date=expiration_date,
+                r_current=request.risk_free_rate
+            )
+            
+            # We only add successful analyses to the final result list.
+            # Errors for a single DTE (e.g., no options available) are logged by the service
+            # but don't stop the entire request.
+            if analysis_result.get("status") == "success":
+                # Add the DTE to the result for easy reference on the frontend
+                analysis_result['dte'] = dte
+                all_results.append(analysis_result)
+
+        if not all_results:
+             raise HTTPException(status_code=400, detail="Analysis failed for all requested expiration dates. This could be due to no options being available for those dates.")
+
+        # The frontend will now receive an array of analysis results.
+        return all_results
 
     except Exception as e:
         # Print the full error to the console for debugging
