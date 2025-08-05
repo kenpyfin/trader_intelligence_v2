@@ -8,4 +8,3 @@ class AnalysisRequest(BaseModel):
 
 class RiskFreeRateRequest(BaseModel):
     tickers: List[str]
-    expiration_date: date

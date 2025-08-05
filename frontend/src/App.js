@@ -46,7 +46,6 @@ const MacroInsights = ({ onRateCalculated }) => {
   const [loading, setLoading] = useState(true);
   
   const [rfTickers, setRfTickers] = useState('SPY, QQQ, IWM');
-  const [rfExpDate, setRfExpDate] = useState(new Date(new Date().setDate(new Date().getDate() + 30)).toISOString().split('T')[0]);
   const [calculating, setCalculating] = useState(false);
   const [calcResult, setCalcResult] = useState(null);
   const [calcLogs, setCalcLogs] = useState([]);
@@ -73,7 +72,6 @@ const MacroInsights = ({ onRateCalculated }) => {
     try {
       const response = await axios.post('/api/calculate-risk-free-rate', {
         tickers: rfTickers.split(',').map(t => t.trim().toUpperCase()),
-        expiration_date: rfExpDate,
       });
       setCalcResult(response.data.risk_free_rate);
       setCalcLogs(response.data.logs);
@@ -127,10 +125,6 @@ const MacroInsights = ({ onRateCalculated }) => {
             <div style={{ marginBottom: '10px' }}>
               <label>Tickers (comma-separated):</label><br/>
               <input type="text" value={rfTickers} onChange={e => setRfTickers(e.target.value)} style={{ width: '95%' }}/>
-            </div>
-            <div style={{ marginBottom: '10px' }}>
-              <label>Expiration Date:</label><br/>
-              <input type="date" value={rfExpDate} onChange={e => setRfExpDate(e.target.value)} />
             </div>
             <button type="submit" disabled={calculating}>
               {calculating ? 'Calculating...' : 'Calculate Implied Rate'}
