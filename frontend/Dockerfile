@@ -22,6 +22,6 @@ COPY nginx.conf /etc/nginx/templates/default.conf.template
 # Install gettext for envsubst
 RUN apk add --no-cache gettext
 
-# When the container starts, substitute environment variables in the template
-# and output the final config to the correct location. Then start Nginx.
-CMD ["/bin/sh", "-c", "envsubst '$FRONTEND_PORT $BACKEND_PORT' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"]
+# When the container starts, increase the timeout, substitute environment variables
+# in the template, and output the final config. Then start Nginx.
+CMD ["/bin/sh", "-c", "sed -i 's/300s/600s/g' /etc/nginx/templates/default.conf.template && envsubst '$FRONTEND_PORT $BACKEND_PORT' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"]

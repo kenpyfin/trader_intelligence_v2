@@ -97,7 +97,7 @@ async def calculate_market_implied_risk_free_rate(tickers: list):
     price_fetcher = PriceDataFetcher()
     log_messages = [f"Starting multi-expiry risk-free rate calculation..."]
     
-    standard_dtes = [30, 60, 90, 180]
+    standard_dtes = [30, 60, 90]
     final_rates_from_curve = []
 
     for dte in standard_dtes:
