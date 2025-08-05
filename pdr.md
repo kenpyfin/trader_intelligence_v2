@@ -30,5 +30,11 @@ Here're some of the analysis points:
     • Combines the results of all the above analyses to generate a single, holistic conclusion 
       and a final directional bias (e.g., Bullish, Bearish, Neutral).    
 2. Display Macro Economy Insights
-3. Order Placement 
-This feature offers the user a quick way to execute the recommendation from the stock and option analysis.
+The application provides key macroeconomic indicators to help users understand the broader market context.
+    • **Interest Rate Futures:** Fetches and displays data for near-term interest rate futures to gauge market expectations for central bank policy.
+    • **Market-Implied Risk-Free Rate:** Calculates a real-time, market-implied risk-free rate by analyzing put-call parity relationships in highly liquid, broad-market ETFs (e.g., SPY, QQQ). This provides a more dynamic discount rate for valuation models than static treasury yields.
+3. Order Placement
+This feature offers a seamless way to act on the application's insights by integrating directly with a brokerage account.
+    • **One-Click Execution:** Presents a simple "Execute" button for the specific strategy recommended by the analysis engine.
+    • **Complex Order Construction:** Automatically constructs and sends complex, multi-leg option orders (e.g., vertical spreads, iron condors, straddles) to the broker.
+    • **Immediate Feedback:** Provides the user with immediate feedback on whether the order was successfully submitted to the broker.
