@@ -51,7 +51,7 @@ async def analyze_stock(request: AnalysisRequest):
     """
     try:
         # Define a standard set of DTEs to analyze for a comprehensive view.
-        standard_dtes_to_analyze = [30, 45, 60, 90]
+        standard_dtes_to_analyze = [15, 30, 60]
         
         # Create a list of concurrent tasks.
         # asyncio.to_thread runs the synchronous function in a separate thread,
