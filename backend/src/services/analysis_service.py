@@ -156,12 +156,29 @@ def _get_market_price_from_finviz_df(df, strike, option_type_char, current_stock
     option_row_df = df[(df['Strike'] == strike) & (df['Type'].str.lower() == type_to_match)]
     if option_row_df.empty: return None
     option_row = option_row_df.iloc[0]
-    bid, ask = pd.to_numeric(option_row.get('Bid'), errors='coerce'), pd.to_numeric(option_row.get('Ask'), errors='coerce')
-    if pd.notna(bid) and pd.notna(ask) and ask > 0 and bid > 0 and (ask - bid) / ask < 0.5: return (bid + ask) / 2.0
-    last_trade = pd.to_numeric(option_row.get('Last Trade'), errors='coerce')
-    if pd.notna(last_trade) and last_trade > 0: return last_trade
-    last_close = pd.to_numeric(option_row.get('Last Close'), errors='coerce')
-    if pd.notna(last_close) and last_close > 0: return last_close
+    
+    # --- Robust Liquidity Check ---
+    # To get a reliable price, we need to ensure the option is liquid.
+    # We check for a valid bid/ask, minimum volume, minimum open interest, and a tight spread.
+    bid = pd.to_numeric(option_row.get('Bid'), errors='coerce')
+    ask = pd.to_numeric(option_row.get('Ask'), errors='coerce')
+    volume = pd.to_numeric(option_row.get('Volume'), errors='coerce')
+    open_int = pd.to_numeric(option_row.get('Open Int.'), errors='coerce')
+
+    is_liquid = (
+        pd.notna(bid) and pd.notna(ask) and
+        bid > 0.01 and ask > 0.01 and  # Price must be meaningful.
+        pd.notna(volume) and volume >= 10 and # Minimum volume to be considered active.
+        pd.notna(open_int) and open_int >= 100 and # Minimum open interest for established market.
+        (ask - bid) / ask < 0.25  # Bid-ask spread must be less than 25% of ask price.
+    )
+
+    if is_liquid:
+        # Use the midpoint of the bid-ask spread for the most current, reliable price.
+        return (bid + ask) / 2.0
+    
+    # If the option is not liquid, we return None as fallbacks like 'Last Trade' or 'Last Close'
+    # can be stale and misleading for an implied rate calculation.
     return None
 
 def _get_atm_iv_from_finviz_df(df, current_stock_price):
