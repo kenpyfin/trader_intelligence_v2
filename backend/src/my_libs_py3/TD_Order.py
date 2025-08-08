@@ -1,7 +1,7 @@
 import atexit
 from ib_insync import IB, Stock, Forex, MarketOrder, LimitOrder, Index, Option, Bag, ComboLeg
 from ib_insync import util as ibutil
-import sys, random
+import sys, random, traceback
 import pandas as pd
 import time
 from datetime import datetime
@@ -137,6 +137,8 @@ class IBTrader:
         """
         try:
             self.connect() # Assuming this is fast if already connected.
+            print(f"DEBUG: Placing strategy order for {symbol} with size {size}")
+            print(f"DEBUG: Legs data: {legs_data}")
             
             # Create a Bag contract for the combo
             contract = Bag()
@@ -155,7 +157,9 @@ class IBTrader:
                     exchange, 
                     tradingClass=symbol
                 )
-                await self.client.qualifyContracts(leg_contract)
+                print(f"DEBUG: Qualifying leg: {leg_contract}")
+                await self.client.qualifyContractsAsync(leg_contract)
+                print(f"DEBUG: Leg qualified: {leg_contract.localSymbol}, conId: {leg_contract.conId}")
                 
                 # Create a ComboLeg for the Bag contract
                 combo_leg = ComboLeg()
@@ -166,7 +170,9 @@ class IBTrader:
                 combo_legs.append(combo_leg)
                 
             contract.comboLegs = combo_legs
-            await self.client.qualifyContracts(contract)
+            print("DEBUG: Qualifying combo contract...")
+            await self.client.qualifyContractsAsync(contract)
+            print("DEBUG: Combo contract qualified.")
 
             # Create the order for the whole strategy
             strategy_action = 'BUY' if size > 0 else 'SELL'
@@ -179,10 +185,15 @@ class IBTrader:
             else:
                 raise ValueError("Invalid order type or missing limit price for LMT order.")
 
-            trade = await self.client.placeOrder(contract, order)
+            print(f"DEBUG: Placing order: {order}")
+            trade = await self.client.placeOrderAsync(contract, order)
+            print(f"DEBUG: Order placed successfully. Trade: {trade}")
     
             return trade
         except Exception as e:
+            print("--- ORDER PLACEMENT FAILED ---")
+            traceback.print_exc()
+            print("-----------------------------")
             raise Exception(f"Error placing strategy order for {symbol}: {str(e)}")
 
     def wait_for_order_fill(self, trade, timeout=TIMEOUT):
