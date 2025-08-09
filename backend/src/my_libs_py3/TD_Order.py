@@ -26,10 +26,10 @@ class IBTrader:
     def connect(self):
         if not self.client.isConnected():
             try:
-                self.client.connect(self.ip_add, self.port, clientId=random.randint(0, 1000))
+                self.client.connect(self.ip_add, self.port, clientId=0)
             except Exception as e:
                 time.sleep(60)
-                self.client.connect(self.ip_add, self.port, clientId=random.randint(0, 1000) + 1)
+                self.client.connect(self.ip_add, self.port, clientId=0)
 
     def disconnect(self):
         if self.client.isConnected():
