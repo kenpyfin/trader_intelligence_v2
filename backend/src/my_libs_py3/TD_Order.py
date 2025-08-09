@@ -81,7 +81,7 @@ class IBTrader:
             order = MarketOrder('BUY' if size >= 0 else "SELL", abs(size))
             contract = Forex(symbol)
             await self.client.qualifyContractsAsync(contract)
-            trade = await self.client.placeOrderAsync(contract, order)
+            trade = self.client.placeOrder(contract, order)
             return trade
         except Exception as e:
             raise Exception(e)
@@ -92,7 +92,7 @@ class IBTrader:
             order = MarketOrder('BUY' if size >= 0 else "SELL", abs(size))
             contract = Stock(symbol, "SMART", "USD")
             await self.client.qualifyContractsAsync(contract)
-            trade = await self.client.placeOrderAsync(contract, order)
+            trade = self.client.placeOrder(contract, order)
             return trade
         except Exception as e:
             raise Exception(e)
@@ -104,7 +104,7 @@ class IBTrader:
             order = LimitOrder(action, abs(size), limit_price)
             contract = Stock(symbol, "SMART", "USD")
             await self.client.qualifyContractsAsync(contract)
-            trade = await self.client.placeOrderAsync(contract, order)
+            trade = self.client.placeOrder(contract, order)
             return trade
         except Exception as e:
             raise Exception(f"Error placing limit order for {symbol}: {str(e)}")
@@ -141,7 +141,7 @@ class IBTrader:
             contract = Option(symbol, expiry_date, strike, right, exchange, tradingClass=symbol)
             await self.client.qualifyContractsAsync(contract)
             
-            trade = await self.client.placeOrderAsync(contract, order)
+            trade = self.client.placeOrder(contract, order)
             return trade
         except Exception as e:
             raise Exception(f"Error placing option order for {symbol} {expiry_date} K={strike} {right}: {str(e)}")
@@ -213,7 +213,7 @@ class IBTrader:
                 raise ValueError("Invalid order type or missing limit price for LMT order.")
 
             print(f"DEBUG: Placing order: {order}")
-            trade = await self.client.placeOrderAsync(contract, order)
+            trade = self.client.placeOrder(contract, order)
             print(f"DEBUG: Order placed successfully. Trade: {trade}")
     
             return trade
