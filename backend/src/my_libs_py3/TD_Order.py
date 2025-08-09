@@ -80,8 +80,8 @@ class IBTrader:
             await self.connect()
             order = MarketOrder('BUY' if size >= 0 else "SELL", abs(size))
             contract = Forex(symbol)
-            await self.client.qualifyContractsAsync(contract)
-            trade = await self.client.placeOrderAsync(contract, order)
+            await self.client.qualifyContracts(contract)
+            trade = await self.client.placeOrder(contract, order)
             return trade
         except Exception as e:
             raise Exception(e)
@@ -91,8 +91,8 @@ class IBTrader:
             await self.connect()
             order = MarketOrder('BUY' if size >= 0 else "SELL", abs(size))
             contract = Stock(symbol, "SMART", "USD")
-            await self.client.qualifyContractsAsync(contract)
-            trade = await self.client.placeOrderAsync(contract, order)
+            await self.client.qualifyContracts(contract)
+            trade = await self.client.placeOrder(contract, order)
             return trade
         except Exception as e:
             raise Exception(e)
@@ -103,8 +103,8 @@ class IBTrader:
             action = 'BUY' if size > 0 else 'SELL'
             order = LimitOrder(action, abs(size), limit_price)
             contract = Stock(symbol, "SMART", "USD")
-            await self.client.qualifyContractsAsync(contract)
-            trade = await self.client.placeOrderAsync(contract, order)
+            await self.client.qualifyContracts(contract)
+            trade = await self.client.placeOrder(contract, order)
             return trade
         except Exception as e:
             raise Exception(f"Error placing limit order for {symbol}: {str(e)}")
@@ -139,9 +139,9 @@ class IBTrader:
                 raise ValueError("Invalid order type or missing limit price for LMT order.")
 
             contract = Option(symbol, expiry_date, strike, right, exchange, tradingClass=symbol)
-            await self.client.qualifyContractsAsync(contract)
+            await self.client.qualifyContracts(contract)
             
-            trade = await self.client.placeOrderAsync(contract, order)
+            trade = await self.client.placeOrder(contract, order)
             return trade
         except Exception as e:
             raise Exception(f"Error placing option order for {symbol} {expiry_date} K={strike} {right}: {str(e)}")
@@ -185,7 +185,7 @@ class IBTrader:
                     tradingClass=symbol
                 )
                 print(f"DEBUG: Qualifying leg: {leg_contract}")
-                await self.client.qualifyContractsAsync(leg_contract)
+                await self.client.qualifyContracts(leg_contract)
                 print(f"DEBUG: Leg qualified: {leg_contract.localSymbol}, conId: {leg_contract.conId}")
                 
                 # Create a ComboLeg for the Bag contract
@@ -198,7 +198,7 @@ class IBTrader:
                 
             contract.comboLegs = combo_legs
             print("DEBUG: Qualifying combo contract...")
-            await self.client.qualifyContractsAsync(contract)
+            await self.client.qualifyContracts(contract)
             print("DEBUG: Combo contract qualified.")
 
             # Create the order for the whole strategy
@@ -213,7 +213,7 @@ class IBTrader:
                 raise ValueError("Invalid order type or missing limit price for LMT order.")
 
             print(f"DEBUG: Placing order: {order}")
-            trade = await self.client.placeOrderAsync(contract, order)
+            trade = await self.client.placeOrder(contract, order)
             print(f"DEBUG: Order placed successfully. Trade: {trade}")
     
             return trade
@@ -299,7 +299,7 @@ class IBTrader:
         try:
             await self.connect() # Ensure connection
             contract = Option(symbol, expiry_date, strike, right, exchange, tradingClass=symbol)
-            await self.client.qualifyContractsAsync(contract)
+            await self.client.qualifyContracts(contract)
             
             ticker = self.client.reqMktData(contract, '', False, False)
             await asyncio.sleep(2) # Allow time for data to arrive, adjust as needed
