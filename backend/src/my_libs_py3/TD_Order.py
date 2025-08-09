@@ -17,13 +17,6 @@ tw_port = 4002
 TIMEOUT = 60
 
 
-async def _run_in_executor(func, *args):
-    """Runs a synchronous function in a separate thread to avoid blocking the asyncio event loop."""
-    loop = asyncio.get_running_loop()
-    # None uses the default ThreadPoolExecutor
-    return await loop.run_in_executor(None, func, *args)
-
-
 class IBTrader:
     def __init__(self):
         # Use an environment variable for the host, defaulting to a common local IP.
@@ -87,8 +80,8 @@ class IBTrader:
             await self.connect()
             order = MarketOrder('BUY' if size >= 0 else "SELL", abs(size))
             contract = Forex(symbol)
-            await _run_in_executor(self.client.qualifyContracts, contract)
-            trade = await _run_in_executor(self.client.placeOrder, contract, order)
+            await self.client.qualifyContractsAsync(contract)
+            trade = await self.client.placeOrderAsync(contract, order)
             return trade
         except Exception as e:
             raise Exception(e)
@@ -98,8 +91,8 @@ class IBTrader:
             await self.connect()
             order = MarketOrder('BUY' if size >= 0 else "SELL", abs(size))
             contract = Stock(symbol, "SMART", "USD")
-            await _run_in_executor(self.client.qualifyContracts, contract)
-            trade = await _run_in_executor(self.client.placeOrder, contract, order)
+            await self.client.qualifyContractsAsync(contract)
+            trade = await self.client.placeOrderAsync(contract, order)
             return trade
         except Exception as e:
             raise Exception(e)
@@ -110,8 +103,8 @@ class IBTrader:
             action = 'BUY' if size > 0 else 'SELL'
             order = LimitOrder(action, abs(size), limit_price)
             contract = Stock(symbol, "SMART", "USD")
-            await _run_in_executor(self.client.qualifyContracts, contract)
-            trade = await _run_in_executor(self.client.placeOrder, contract, order)
+            await self.client.qualifyContractsAsync(contract)
+            trade = await self.client.placeOrderAsync(contract, order)
             return trade
         except Exception as e:
             raise Exception(f"Error placing limit order for {symbol}: {str(e)}")
@@ -146,9 +139,9 @@ class IBTrader:
                 raise ValueError("Invalid order type or missing limit price for LMT order.")
 
             contract = Option(symbol, expiry_date, strike, right, exchange, tradingClass=symbol)
-            await _run_in_executor(self.client.qualifyContracts, contract)
+            await self.client.qualifyContractsAsync(contract)
             
-            trade = await _run_in_executor(self.client.placeOrder, contract, order)
+            trade = await self.client.placeOrderAsync(contract, order)
             return trade
         except Exception as e:
             raise Exception(f"Error placing option order for {symbol} {expiry_date} K={strike} {right}: {str(e)}")
@@ -192,7 +185,7 @@ class IBTrader:
                     tradingClass=symbol
                 )
                 print(f"DEBUG: Qualifying leg: {leg_contract}")
-                await _run_in_executor(self.client.qualifyContracts, leg_contract)
+                await self.client.qualifyContractsAsync(leg_contract)
                 print(f"DEBUG: Leg qualified: {leg_contract.localSymbol}, conId: {leg_contract.conId}")
                 
                 # Create a ComboLeg for the Bag contract
@@ -205,7 +198,7 @@ class IBTrader:
                 
             contract.comboLegs = combo_legs
             print("DEBUG: Qualifying combo contract...")
-            await _run_in_executor(self.client.qualifyContracts, contract)
+            await self.client.qualifyContractsAsync(contract)
             print("DEBUG: Combo contract qualified.")
 
             # Create the order for the whole strategy
@@ -220,7 +213,7 @@ class IBTrader:
                 raise ValueError("Invalid order type or missing limit price for LMT order.")
 
             print(f"DEBUG: Placing order: {order}")
-            trade = await _run_in_executor(self.client.placeOrder, contract, order)
+            trade = await self.client.placeOrderAsync(contract, order)
             print(f"DEBUG: Order placed successfully. Trade: {trade}")
     
             return trade
@@ -235,7 +228,7 @@ class IBTrader:
 
         while not trade.isDone():
             if time.time() - start_time > timeout:
-                await _run_in_executor(self.client.cancelOrder, trade.order)
+                await self.client.cancelOrderAsync(trade.order)
                 break
             await asyncio.sleep(1)  # Use asyncio.sleep for non-blocking wait
 
@@ -282,7 +275,7 @@ class IBTrader:
 
             start = ''
             end = datetime.now()
-            ticks = await _run_in_executor(self.client.reqHistoricalTicks, contract, start, end, 1, 'Trades', useRth=False)
+            ticks = await self.client.reqHistoricalTicksAsync(contract, start, end, 1, 'Trades', useRth=False)
             if ticks:
                 return ticks[-1].price
             return None
@@ -306,7 +299,7 @@ class IBTrader:
         try:
             await self.connect() # Ensure connection
             contract = Option(symbol, expiry_date, strike, right, exchange, tradingClass=symbol)
-            await _run_in_executor(self.client.qualifyContracts, contract)
+            await self.client.qualifyContractsAsync(contract)
             
             ticker = self.client.reqMktData(contract, '', False, False)
             await asyncio.sleep(2) # Allow time for data to arrive, adjust as needed
@@ -316,8 +309,7 @@ class IBTrader:
                 return ticker
             else:
                 # Attempt to get historical data if live tick fails or is empty
-                hist_data = await _run_in_executor(
-                    self.client.reqHistoricalData,
+                hist_data = await self.client.reqHistoricalDataAsync(
                     contract,
                     endDateTime='',
                     durationStr='1 D', # Get data for 1 day
@@ -377,7 +369,7 @@ class IBTrader:
             await self.connect()
             if trade.orderStatus.status not in ["Filled", "Cancelled", "ApiCancelled", "Inactive"]:
                 # Send cancel request
-                await _run_in_executor(self.client.cancelOrder, trade.order)
+                await self.client.cancelOrderAsync(trade.order)
                 
                 # Wait briefly to ensure the cancel request is processed
                 await asyncio.sleep(1)
