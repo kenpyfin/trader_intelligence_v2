@@ -34,7 +34,7 @@ class IBTrader:
         if not self.client.isConnected():
             try:
                 print(f"INFO: Connecting to TWS at {self.ip_add}:{self.port}...")
-                await self.client.connect(self.ip_add, self.port, clientId=0, timeout=10)
+                await self.client.connectAsync(self.ip_add, self.port, clientId=0, timeout=10)
                 print("INFO: Connection to TWS established successfully.")
             except (asyncio.TimeoutError, ConnectionRefusedError):
                  print(f"ERROR: Connection to {self.ip_add}:{self.port} timed out or was refused.")
