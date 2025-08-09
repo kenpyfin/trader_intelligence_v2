@@ -1,4 +1,7 @@
 import atexit
+import os
+import socket
+import asyncio
 from ib_insync import IB, Stock, Forex, MarketOrder, LimitOrder, Index, Option, Bag, ComboLeg
 from ib_insync import util as ibutil
 import sys, random, traceback
@@ -10,39 +13,60 @@ sys.path.append('/home/ken/big_storage/airflowProd/airflow_notebook/My_Trader/my
 from .my_lib import *
 
 
-ip_add = "10.0.1.22"
 tw_port = 4002
 TIMEOUT = 60
 
 
 class IBTrader:
     def __init__(self):
-        self.ip_add = ip_add
+        # Use an environment variable for the host, defaulting to a common local IP.
+        # For Docker on Mac/Windows, 'host.docker.internal' is preferred.
+        # For Docker on Linux, the host's network IP is needed.
+        self.ip_add = os.getenv('TWS_HOST', '10.0.1.22')
         self.port = tw_port
+        print(f"INFO: IBTrader initialized to connect to TWS at {self.ip_add}:{self.port}")
         self.client = IB()
-        self.connect()
+        # The connection is now established on-demand by async methods.
         atexit.register(self.disconnect)
 
-    def connect(self):
+    async def connect(self):
+        """Establishes connection to TWS/Gateway asynchronously if not already connected."""
         if not self.client.isConnected():
             try:
-                self.client.connect(self.ip_add, self.port, clientId=0)
+                print(f"INFO: Connecting to TWS at {self.ip_add}:{self.port}...")
+                await self.client.connectAsync(self.ip_add, self.port, clientId=0, timeout=10)
+                print("INFO: Connection to TWS established successfully.")
+            except (asyncio.TimeoutError, ConnectionRefusedError):
+                 print(f"ERROR: Connection to {self.ip_add}:{self.port} timed out or was refused.")
+                 print("HINT: Ensure TWS/Gateway is running, API connections are enabled, and the IP is whitelisted.")
+                 # Consider if a retry is needed here or if the exception should propagate.
+                 # For now, we let it propagate to the caller.
+                 raise
+            except socket.gaierror:
+                print(f"ERROR: Hostname '{self.ip_add}' could not be resolved. This is a DNS lookup failure.")
+                print("HINT: If using Docker on Linux, 'host.docker.internal' may not work without extra configuration. Try setting TWS_HOST to your host's IP address (e.g., 10.0.1.22).")
+                raise
             except Exception as e:
-                time.sleep(60)
-                self.client.connect(self.ip_add, self.port, clientId=0)
+                print(f"ERROR: An unexpected exception occurred while connecting to TWS: {e}")
+                traceback.print_exc()
+                raise
 
     def disconnect(self):
         if self.client.isConnected():
             self.client.disconnect()
 
-    def get_available_fund(self):
+    async def get_available_fund(self):
         try:
+            await self.connect()
+            # accountSummary is a synchronous call that returns cached data after connection.
+            # To get live data, one would need to subscribe. For this purpose, it's fine.
             return float(list(filter(lambda x: x.tag == "AvailableFunds", self.client.accountSummary()))[0].value)
         except Exception as e:
             raise Exception(e)
 
-    def get_position_by_symbol(self, symbol) -> float:
+    async def get_position_by_symbol(self, symbol) -> float:
         try:
+            await self.connect()
             position_list = list(filter(lambda x: x.contract.symbol == symbol, self.client.positions()))
             if len(position_list) == 0:
                 return 0
@@ -51,40 +75,43 @@ class IBTrader:
         except Exception as e:
             raise Exception(e)
 
-    def place_forex_market_order(self, symbol, size):
+    async def place_forex_market_order(self, symbol, size):
         try:
+            await self.connect()
             order = MarketOrder('BUY' if size >= 0 else "SELL", abs(size))
             contract = Forex(symbol)
-            self.client.qualifyContracts(contract)
-            trade = self.client.placeOrder(contract, order)
+            await self.client.qualifyContractsAsync(contract)
+            trade = await self.client.placeOrderAsync(contract, order)
             return trade
         except Exception as e:
             raise Exception(e)
 
-    def place_stock_market_order(self, symbol, size):
+    async def place_stock_market_order(self, symbol, size):
         try:
+            await self.connect()
             order = MarketOrder('BUY' if size >= 0 else "SELL", abs(size))
             contract = Stock(symbol, "SMART", "USD")
-            self.client.qualifyContracts(contract)
-            trade = self.client.placeOrder(contract, order)
+            await self.client.qualifyContractsAsync(contract)
+            trade = await self.client.placeOrderAsync(contract, order)
             return trade
         except Exception as e:
             raise Exception(e)
 
-    def place_stock_limit_order(self, symbol, size, limit_price):
+    async def place_stock_limit_order(self, symbol, size, limit_price):
         try:
+            await self.connect()
             action = 'BUY' if size > 0 else 'SELL'
             order = LimitOrder(action, abs(size), limit_price)
             contract = Stock(symbol, "SMART", "USD")
-            self.client.qualifyContracts(contract)
-            trade = self.client.placeOrder(contract, order)
+            await self.client.qualifyContractsAsync(contract)
+            trade = await self.client.placeOrderAsync(contract, order)
             return trade
         except Exception as e:
             raise Exception(f"Error placing limit order for {symbol}: {str(e)}")
 
-    def place_option_order(self, symbol: str, size: int, expiry_date: str, strike: float, right: str, order_type: str = 'MKT', limit_price: float = None, exchange: str = 'SMART'):
+    async def place_option_order(self, symbol: str, size: int, expiry_date: str, strike: float, right: str, order_type: str = 'MKT', limit_price: float = None, exchange: str = 'SMART'):
         """
-        Places an option order.
+        Places an option order asynchronously.
 
         Args:
             symbol (str): The underlying symbol.
@@ -100,7 +127,7 @@ class IBTrader:
             ib_insync.Trade: The trade object.
         """
         try:
-            self.connect()
+            await self.connect()
             action = 'BUY' if size > 0 else 'SELL'
             quantity = abs(size)
 
@@ -112,9 +139,9 @@ class IBTrader:
                 raise ValueError("Invalid order type or missing limit price for LMT order.")
 
             contract = Option(symbol, expiry_date, strike, right, exchange, tradingClass=symbol)
-            self.client.qualifyContracts(contract)
+            await self.client.qualifyContractsAsync(contract)
             
-            trade = self.client.placeOrder(contract, order)
+            trade = await self.client.placeOrderAsync(contract, order)
             return trade
         except Exception as e:
             raise Exception(f"Error placing option order for {symbol} {expiry_date} K={strike} {right}: {str(e)}")
@@ -136,7 +163,7 @@ class IBTrader:
             ib_insync.Trade: The trade object.
         """
         try:
-            self.connect() # Assuming this is fast if already connected.
+            await self.connect()
             print(f"DEBUG: Placing strategy order for {symbol} with size {size}")
             print(f"DEBUG: Legs data: {legs_data}")
             
@@ -196,26 +223,27 @@ class IBTrader:
             print("-----------------------------")
             raise Exception(f"Error placing strategy order for {symbol}: {str(e)}")
 
-    def wait_for_order_fill(self, trade, timeout=TIMEOUT):
-        ib = self.client
+    async def wait_for_order_fill(self, trade, timeout=TIMEOUT):
         start_time = time.time()
 
         while not trade.isDone():
             if time.time() - start_time > timeout:
-                self.client.cancelOrder(trade.order)
+                await self.client.cancelOrderAsync(trade.order)
                 break
-            ib.sleep(1)  # Poll every second
+            await asyncio.sleep(1)  # Use asyncio.sleep for non-blocking wait
 
         return trade.orderStatus.status
 
-    def open_positions_symbol(self):
+    async def open_positions_symbol(self):
         try:
+            await self.connect()
             return [x.contract.symbol for x in self.client.positions()]
         except Exception as e:
             raise Exception(e)
 
-    def open_positions(self):
+    async def open_positions(self):
         try:
+            await self.connect()
             data = self.client.positions()
             unpacked_data = []
 
@@ -237,8 +265,9 @@ class IBTrader:
         except Exception as e:
             raise Exception(e)
 
-    def realtimequote(self, ticker):
+    async def realtimequote(self, ticker):
         try:
+            await self.connect()
             if (ticker.upper() == 'VIX'):
                 contract = Index(ticker, 'CBOE')  # Use the Index wrapper for VIX
             else:
@@ -246,14 +275,16 @@ class IBTrader:
 
             start = ''
             end = datetime.now()
-            ticks = self.client.reqHistoricalTicks(contract, start, end, 1, 'Trades', useRth=False)
-            return ticks[-1].price
+            ticks = await self.client.reqHistoricalTicksAsync(contract, start, end, 1, 'Trades', useRth=False)
+            if ticks:
+                return ticks[-1].price
+            return None
         except Exception as e:
             raise Exception(e)
 
-    def get_option_market_data(self, symbol: str, expiry_date: str, strike: float, right: str, exchange: str = 'SMART'):
+    async def get_option_market_data(self, symbol: str, expiry_date: str, strike: float, right: str, exchange: str = 'SMART'):
         """
-        Fetches market data for a specific option contract.
+        Fetches market data for a specific option contract asynchronously.
 
         Args:
             symbol (str): The underlying symbol (e.g., 'AAPL').
@@ -266,18 +297,19 @@ class IBTrader:
             ib_insync.Ticker: Ticker object containing market data, or None if data retrieval fails.
         """
         try:
-            self.connect() # Ensure connection
+            await self.connect() # Ensure connection
             contract = Option(symbol, expiry_date, strike, right, exchange, tradingClass=symbol)
-            self.client.qualifyContracts(contract)
+            await self.client.qualifyContractsAsync(contract)
             
             ticker = self.client.reqMktData(contract, '', False, False)
-            self.client.sleep(2) # Allow time for data to arrive, adjust as needed
+            await asyncio.sleep(2) # Allow time for data to arrive, adjust as needed
 
-            if ticker and (ticker.last != float('nan') or ticker.close != float('nan')): # Check if we got some price
+            if ticker and (ticker.last is not None and not pd.isna(ticker.last) or ticker.close is not None and not pd.isna(ticker.close)): # Check if we got some price
+                self.client.cancelMktData(contract)
                 return ticker
             else:
                 # Attempt to get historical data if live tick fails or is empty
-                hist_data = self.client.reqHistoricalData(
+                hist_data = await self.client.reqHistoricalDataAsync(
                     contract,
                     endDateTime='',
                     durationStr='1 D', # Get data for 1 day
@@ -286,6 +318,7 @@ class IBTrader:
                     useRTH=True,
                     formatDate=1
                 )
+                self.client.cancelMktData(contract) # Clean up subscription
                 if hist_data:
                     # Create a mock ticker object from historical data if needed
                     # This part depends on what specific fields you need from the ticker
@@ -322,9 +355,9 @@ class IBTrader:
             # For now, returning None to indicate failure
             return None
         
-    def cancel_order(self, trade):
+    async def cancel_order(self, trade):
         """
-        Cancels an existing order.
+        Cancels an existing order asynchronously.
         
         Args:
             trade: The trade object to cancel
@@ -333,12 +366,13 @@ class IBTrader:
             None
         """
         try:
+            await self.connect()
             if trade.orderStatus.status not in ["Filled", "Cancelled", "ApiCancelled", "Inactive"]:
                 # Send cancel request
-                self.client.cancelOrder(trade.order)
+                await self.client.cancelOrderAsync(trade.order)
                 
                 # Wait briefly to ensure the cancel request is processed
-                self.client.sleep(2)
+                await asyncio.sleep(1)
                     
         except Exception as e:
             raise Exception(f"Error cancelling order: {str(e)}")
