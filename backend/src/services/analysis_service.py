@@ -11,7 +11,23 @@ import re
 
 from src.my_libs_py3.my_data import PriceDataFetcher
 from src.my_libs_py3.fmp import FMPClient
+from src.my_libs_py3.TD_Order import IBTrader
 import plotly.graph_objects as go
+
+
+async def get_option_expirations(ticker: str):
+    """
+    Fetches the next 10 available option expiration dates for a given ticker.
+    """
+    trader = IBTrader()
+    # This will require a new method in IBTrader
+    expirations = await trader.get_option_expirations(ticker)
+    
+    # The dates from IB are strings 'YYYYMMDD'. Sorting them is correct.
+    sorted_expirations = sorted(expirations)
+    
+    # Return up to the next 10 dates
+    return sorted_expirations[:10]
 
 
 # A custom JSON encoder to handle numpy types, useful for FastAPI's response model
