@@ -5,7 +5,7 @@ from ..services import portfolio_service
 from ..models.portfolio_models import CloseStrategyRequest
 
 router = APIRouter(
-    prefix="/api/portfolio",
+    prefix="/portfolio",
     tags=["Portfolio"],
 )
 
