@@ -9,15 +9,15 @@ router = APIRouter(
     tags=["Portfolio"],
 )
 
-@router.get("/open-strategies")
-async def get_open_strategies():
-    """Endpoint to fetch and list all open option strategies from the broker."""
+@router.get("/open-positions")
+async def get_open_positions():
+    """Endpoint to fetch and list all open positions from the broker, grouped by type."""
     try:
-        strategies = await portfolio_service.get_open_strategies()
-        return strategies
+        positions = await portfolio_service.get_grouped_open_positions()
+        return positions
     except Exception as e:
         print(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Failed to fetch open strategies: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch open positions: {e}")
 
 @router.post("/close-strategy")
 async def close_open_strategy(request: CloseStrategyRequest):

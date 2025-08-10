@@ -5,26 +5,39 @@ import pandas as pd
 from ..my_libs_py3.TD_Order import IBTrader
 from ..models.portfolio_models import CloseStrategyRequest
 
-async def get_open_strategies():
+async def get_grouped_open_positions():
     """
-    Fetches all open positions, filters for options, and groups them by underlying
-    symbol to represent them as strategies.
+    Fetches all open positions from the broker and groups them by contract type.
+    Options are further grouped by underlying symbol.
     """
     trader = IBTrader()
     positions_df = await trader.open_positions()
+
+    if positions_df.empty:
+        return {"options": {}, "stocks": [], "others": []}
+
+    grouped_positions = {
+        "options": defaultdict(list),
+        "stocks": [],
+        "others": []
+    }
+
+    all_positions = positions_df.to_dict('records')
+
+    for pos in all_positions:
+        contract_type = pos.get('contract_type')
+        if contract_type == 'Option':
+            grouped_positions['options'][pos['symbol']].append(pos)
+        elif contract_type == 'Stock':
+            grouped_positions['stocks'].append(pos)
+        else:
+            # For futures, forex, etc.
+            grouped_positions['others'].append(pos)
+
+    # Convert defaultdict to regular dict for JSON serialization
+    grouped_positions['options'] = dict(grouped_positions['options'])
     
-    # Filter for options only. If no options, return empty dict.
-    if positions_df.empty or 'contract_type' not in positions_df.columns or not (positions_df['contract_type'] == 'Option').any():
-        return {}
-        
-    option_positions = positions_df[positions_df['contract_type'] == 'Option'].to_dict('records')
-    
-    # Group by underlying symbol
-    strategies = defaultdict(list)
-    for pos in option_positions:
-        strategies[pos['symbol']].append(pos)
-        
-    return dict(strategies)
+    return grouped_positions
 
 async def close_strategy(request: CloseStrategyRequest):
     """

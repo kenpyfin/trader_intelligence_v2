@@ -2,29 +2,29 @@ import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 
 const PortfolioPage = () => {
-  const [strategies, setStrategies] = useState({});
+  const [positions, setPositions] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [closingStatus, setClosingStatus] = useState({});
 
   useEffect(() => {
-    const fetchOpenStrategies = async () => {
+    const fetchOpenPositions = async () => {
       try {
-        const response = await axios.get('/api/portfolio/open-strategies');
-        setStrategies(response.data);
+        const response = await axios.get('/api/portfolio/open-positions');
+        setPositions(response.data);
       } catch (err) {
         setError(err.response?.data?.detail || 'Failed to fetch open positions.');
       } finally {
         setLoading(false);
       }
     };
-    fetchOpenStrategies();
+    fetchOpenPositions();
   }, []);
 
   const handleCloseStrategy = async (symbol) => {
     setClosingStatus(prev => ({ ...prev, [symbol]: { inProgress: true } }));
     
-    const legsToClose = strategies[symbol].map(leg => ({
+    const legsToClose = positions.options[symbol].map(leg => ({
         symbol: leg.symbol,
         secType: 'OPT',
         expiry: leg.expiry,
@@ -110,17 +110,54 @@ const PortfolioPage = () => {
     );
   };
 
+  const StockPositions = ({ stocks }) => {
+    if (!stocks || stocks.length === 0) {
+      return null;
+    }
+
+    return (
+      <div style={{ marginTop: '24px' }}>
+        <h2>Stock Positions</h2>
+        <table style={{ width: '100%', marginTop: '10px', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr style={{ background: '#f8f9fa' }}>
+              <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Symbol</th>
+              <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Quantity</th>
+              <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Avg Cost/Share</th>
+            </tr>
+          </thead>
+          <tbody>
+            {stocks.map((stock, index) => (
+              <tr key={index}>
+                <td style={{ padding: '8px', border: '1px solid #ddd', fontWeight: 'bold' }}>{stock.symbol}</td>
+                <td style={{ padding: '8px', border: '1px solid #ddd' }}>{stock.position}</td>
+                <td style={{ padding: '8px', border: '1px solid #ddd' }}>${(stock.avgCost / stock.position).toFixed(2)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+  };
+
   if (loading) return <p>Loading open positions from broker...</p>;
   if (error) return <p style={{ color: 'red' }}>{error}</p>;
-  if (Object.keys(strategies).length === 0) return <p>No open option positions found in the account.</p>;
+  if (!positions || (Object.keys(positions.options || {}).length === 0 && (!positions.stocks || positions.stocks.length === 0))) {
+      return <p>No open positions found in the account.</p>;
+  }
 
   return (
     <div>
-      <h2>Open Option Strategies</h2>
-      <p>This page shows all open option positions in your account, grouped by underlying ticker.</p>
-      {Object.entries(strategies).map(([symbol, legs]) => (
-        <StrategyCard key={symbol} symbol={symbol} legs={legs} />
-      ))}
+      {Object.keys(positions.options || {}).length > 0 && (
+        <>
+            <h2>Open Option Strategies</h2>
+            <p>This page shows all open option positions in your account, grouped by underlying ticker.</p>
+            {Object.entries(positions.options).map(([symbol, legs]) => (
+                <StrategyCard key={symbol} symbol={symbol} legs={legs} />
+            ))}
+        </>
+      )}
+      <StockPositions stocks={positions.stocks} />
     </div>
   );
 };
