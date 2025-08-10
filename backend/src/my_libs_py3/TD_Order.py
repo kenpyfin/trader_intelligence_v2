@@ -197,9 +197,10 @@ class IBTrader:
                 combo_legs.append(combo_leg)
                 
             contract.comboLegs = combo_legs
-            print("DEBUG: Qualifying combo contract...")
-            await self.client.qualifyContractsAsync(contract)
-            print("DEBUG: Combo contract qualified.")
+            # A 'Bag' contract for a combo strategy is defined by its legs and is not qualified directly.
+            # Each individual leg has already been qualified above to get its conId.
+            # Attempting to qualify the Bag contract results in the API error you observed.
+            print("DEBUG: Combo contract constructed from qualified legs.")
 
             # Create the order for the whole strategy
             strategy_action = 'BUY' if size > 0 else 'SELL'
