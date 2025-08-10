@@ -8,6 +8,7 @@ from .models.order_models import StrategyOrderRequest
 from .services.analysis_service import run_full_analysis
 from .services.macro_service import get_macro_futures_data, calculate_market_implied_risk_free_rate
 from .services import broker_service
+from .routers import portfolio
 
 
 app = FastAPI(
@@ -15,6 +16,8 @@ app = FastAPI(
     description="API for stock and option analysis.",
     version="1.0.0",
 )
+
+app.include_router(portfolio.router)
 
 @app.get("/")
 def read_root():

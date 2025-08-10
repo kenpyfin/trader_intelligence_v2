@@ -260,6 +260,12 @@ class IBTrader:
                     'position': pos.position,
                     'avgCost': pos.avgCost
                 }
+                # Add option-specific details if the contract is an Option
+                if isinstance(pos.contract, Option):
+                    position_data['strike'] = pos.contract.strike
+                    position_data['right'] = pos.contract.right
+                    position_data['expiry'] = pos.contract.lastTradeDateOrContractMonth
+
                 unpacked_data.append(position_data)
 
             return pd.DataFrame(unpacked_data)
