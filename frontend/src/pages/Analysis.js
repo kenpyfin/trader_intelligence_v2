@@ -322,40 +322,15 @@ const AnalysisDetails = ({ data }) => {
   );
 };
 
-const ResultsDisplay = ({ analysisResults }) => {
-  const [activeTab, setActiveTab] = useState(0);
-
-  if (!analysisResults || analysisResults.length === 0) {
+const ResultsDisplay = ({ analysisResult }) => {
+  if (!analysisResult) {
     return <p>No analysis results to display.</p>;
   }
 
-  // Sort results by DTE for consistent tab order
-  const sortedResults = [...analysisResults].sort((a, b) => a.dte - b.dte);
-
+  // The component now directly renders the details of the single result.
   return (
     <div style={{ marginTop: '20px' }}>
-      <div style={{ display: 'flex', borderBottom: '1px solid #ccc', marginBottom: '10px' }}>
-        {sortedResults.map((result, index) => (
-          <button
-            key={index}
-            onClick={() => setActiveTab(index)}
-            style={{
-              padding: '10px 15px',
-              border: 'none',
-              cursor: 'pointer',
-              background: activeTab === index ? '#fff' : '#f4f4f4',
-              borderBottom: activeTab === index ? '3px solid #007bff' : '3px solid transparent',
-              fontWeight: activeTab === index ? 'bold' : 'normal',
-            }}
-          >
-            {result.dte} DTE ({new Date(result.expiration_date).toLocaleDateString()})
-          </button>
-        ))}
-      </div>
-      <div>
-        {/* Render the details for the active tab using the sorted results */}
-        <AnalysisDetails data={sortedResults[activeTab]} />
-      </div>
+      <AnalysisDetails data={analysisResult} />
     </div>
   );
 };
@@ -363,18 +338,52 @@ const ResultsDisplay = ({ analysisResults }) => {
 const AnalysisPage = () => {
   const [ticker, setTicker] = useStickyState('SPY', 'ticker');
   const [riskFreeRate, setRiskFreeRate] = useStickyState(0.045, 'riskFreeRate');
+  const [expirations, setExpirations] = useState([]);
+  const [selectedExpiration, setSelectedExpiration] = useState('');
+  const [fetchingExpirations, setFetchingExpirations] = useState(false);
   const [analysisResult, setAnalysisResult] = useStickyState(null, 'analysisResult');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
+  const handleFetchExpirations = async () => {
+    if (!ticker) {
+      setError('Please enter a ticker symbol first.');
+      return;
+    }
+    setFetchingExpirations(true);
+    setExpirations([]);
+    setSelectedExpiration('');
+    setAnalysisResult(null);
+    setError('');
+    try {
+      // This endpoint needs to be created in the backend.
+      const response = await axios.get(`/api/analysis/expirations/${ticker}`);
+      if (response.data && response.data.length > 0) {
+        setExpirations(response.data);
+        setSelectedExpiration(response.data[0]); // Default to the first expiration
+      } else {
+        setError('No option expirations found for this ticker.');
+      }
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Failed to fetch expirations.');
+    } finally {
+      setFetchingExpirations(false);
+    }
+  };
+
   const handleAnalyze = async (e) => {
     e.preventDefault();
+    if (!selectedExpiration) {
+      setError('Please fetch and select an expiration date.');
+      return;
+    }
     setLoading(true);
     setError('');
     setAnalysisResult(null);
     try {
-      const response = await axios.post('/api/analyze/stock', {
+      const response = await axios.post('/api/analysis/stock', {
         ticker: ticker,
+        expiration_date: selectedExpiration,
         risk_free_rate: riskFreeRate,
       });
       setAnalysisResult(response.data);
@@ -390,23 +399,44 @@ const AnalysisPage = () => {
       <MacroInsights onRateCalculated={setRiskFreeRate} />
       
       <AnalysisCard title="Stock and Option Analysis">
-        <form onSubmit={handleAnalyze} style={{ display: 'flex', gap: '15px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '20px' }}>
-          <div>
-            <label>Ticker: </label>
-            <input type="text" value={ticker} onChange={(e) => setTicker(e.target.value)} required />
+        <form onSubmit={handleAnalyze} style={{ marginBottom: '20px' }}>
+          <div style={{ display: 'flex', gap: '15px', alignItems: 'flex-end', flexWrap: 'wrap' }}>
+              <div>
+                <label>Ticker:</label><br/>
+                <input type="text" value={ticker} onChange={(e) => setTicker(e.target.value)} required />
+              </div>
+
+              <button type="button" onClick={handleFetchExpirations} disabled={fetchingExpirations || !ticker.trim()} style={{ padding: '5px 15px', cursor: 'pointer', height: 'fit-content' }}>
+                {fetchingExpirations ? 'Fetching...' : '1. Fetch Expirations'}
+              </button>
+
+              {expirations.length > 0 && (
+                <div>
+                  <label>Expiration Date:</label><br/>
+                  <select value={selectedExpiration} onChange={e => setSelectedExpiration(e.target.value)} style={{ padding: '4px', height: '29px' }}>
+                    {expirations.map(exp => (
+                      <option key={exp} value={exp}>
+                        {new Date(exp.replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3')).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' })}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <div>
+                <label>Risk-Free Rate:</label><br/>
+                <input type="number" step="0.001" value={riskFreeRate} onChange={(e) => setRiskFreeRate(parseFloat(e.target.value))} required style={{width: '80px'}}/>
+              </div>
+
+              <button type="submit" disabled={loading || !selectedExpiration} style={{ padding: '5px 15px', cursor: 'pointer', height: 'fit-content' }}>
+                {loading ? 'Analyzing...' : '2. Run Analysis'}
+              </button>
           </div>
-          <div>
-            <label>Risk-Free Rate: </label>
-            <input type="number" step="0.001" value={riskFreeRate} onChange={(e) => setRiskFreeRate(parseFloat(e.target.value))} required style={{width: '80px'}}/>
-          </div>
-          <button type="submit" disabled={loading} style={{ padding: '5px 15px', cursor: 'pointer' }}>
-            {loading ? 'Analyzing...' : 'Run Analysis'}
-          </button>
         </form>
 
         {error && <p style={{ color: 'red', border: '1px solid red', padding: '10px', borderRadius: '5px' }}><strong>Error:</strong> {error}</p>}
         {loading && <p>Loading analysis...</p>}
-        {analysisResult && <ResultsDisplay analysisResults={analysisResult} />}
+        {analysisResult && <ResultsDisplay analysisResult={analysisResult} />}
       </AnalysisCard>
     </div>
   );

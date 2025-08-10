@@ -272,6 +272,34 @@ class IBTrader:
         except Exception as e:
             raise Exception(e)
 
+    async def get_option_expirations(self, symbol: str):
+        """
+        Fetches all available option expiration dates for a given underlying symbol.
+        """
+        try:
+            await self.connect()
+            contract = Stock(symbol, 'SMART', 'USD')
+            await self.client.qualifyContractsAsync(contract)
+            
+            # This request returns a list of chain parameters.
+            chains = await self.client.reqSecDefOptParamsAsync(
+                underlyingSymbol=contract.symbol,
+                futFopExchange='',
+                underlyingSecType=contract.secType,
+                underlyingConId=contract.conId
+            )
+            
+            # The result is grouped by exchange. We'll collect all unique expirations.
+            expirations = set()
+            if chains:
+                for chain in chains:
+                    expirations.update(chain.expirations)
+                
+            return sorted(list(expirations))
+        except Exception as e:
+            print(f"Error fetching option expirations for {symbol}: {e}")
+            raise
+
     async def realtimequote(self, ticker):
         try:
             await self.connect()
