@@ -5,7 +5,7 @@ from datetime import date, timedelta
 
 from .models.analysis_models import AnalysisRequest, RiskFreeRateRequest
 from .models.order_models import StrategyOrderRequest
-from .services.analysis_service import run_full_analysis
+from .services.analysis_service import run_full_analysis, get_option_expirations
 from .services.macro_service import get_macro_futures_data, calculate_market_implied_risk_free_rate
 from .services import broker_service
 from .routers import portfolio
@@ -60,6 +60,18 @@ async def create_strategy_order(request: StrategyOrderRequest):
         if result["status"] == "error":
             raise HTTPException(status_code=500, detail=result["message"])
         return result
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
+
+
+@app.get("/analysis/expirations/{ticker}")
+async def fetch_expirations(ticker: str):
+    """Fetches available option expiration dates for a given ticker."""
+    try:
+        expirations = await get_option_expirations(ticker)
+        # Frontend is designed to handle an empty list gracefully.
+        return expirations
     except Exception as e:
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
