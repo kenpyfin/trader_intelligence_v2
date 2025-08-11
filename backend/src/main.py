@@ -77,7 +77,7 @@ async def fetch_expirations(ticker: str):
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
 
 
-@app.post("/analyze/stock")
+@app.post("/analysis/stock")
 async def analyze_stock(request: AnalysisRequest):
     """
     Runs a full stock and option analysis concurrently for multiple, standard expiration dates (DTEs).

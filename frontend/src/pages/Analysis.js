@@ -247,10 +247,7 @@ const AnalysisDetails = ({ data }) => {
 
   return (
     <div>
-      <h2>Analysis for {data.ticker?.toUpperCase()}</h2>
-      <p>Current Price: <strong>{typeof data.S_current === 'number' ? `$${data.S_current.toFixed(2)}` : 'N/A'}</strong></p>
-      
-      <AnalysisCard title="Holistic Conclusion & Strategy">
+      <AnalysisCard title={`Holistic Conclusion & Strategy (DTE: ${data.dte} days)`}>
         <h4 style={{ color: biasColor }}>Final Bias: {finalBias}</h4>
         <div dangerouslySetInnerHTML={{ __html: data.final_conclusion_html }} />
       </AnalysisCard>
@@ -324,14 +321,22 @@ const AnalysisDetails = ({ data }) => {
 };
 
 const ResultsDisplay = ({ analysisResult }) => {
-  if (!analysisResult) {
+  if (!analysisResult || !Array.isArray(analysisResult) || analysisResult.length === 0) {
     return <p>No analysis results to display.</p>;
   }
+  
+  const commonData = analysisResult[0]; // Use first result for common data like ticker and price
 
-  // The component now directly renders the details of the single result.
   return (
     <div style={{ marginTop: '20px' }}>
-      <AnalysisDetails data={analysisResult} />
+      <h2>Analysis for {commonData.ticker?.toUpperCase()}</h2>
+      <p>Current Price: <strong>{typeof commonData.S_current === 'number' ? `$${commonData.S_current.toFixed(2)}` : 'N/A'}</strong></p>
+      
+      {analysisResult.map((result, index) => (
+         <div key={index} style={{ borderTop: index > 0 ? '3px solid #007bff' : 'none', paddingTop: index > 0 ? '20px' : '0', marginTop: index > 0 ? '20px' : '0' }}>
+            <AnalysisDetails data={result} />
+         </div>
+      ))}
     </div>
   );
 };
