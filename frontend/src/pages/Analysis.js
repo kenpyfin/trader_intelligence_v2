@@ -387,9 +387,11 @@ const AnalysisPage = () => {
     setError('');
     setAnalysisResult(null);
     try {
+      // The backend expects YYYY-MM-DD format, but selectedExpiration is YYYYMMDD.
+      const formattedDate = selectedExpiration.replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3');
       const response = await axios.post('/api/analysis/stock', {
         ticker: ticker,
-        expiration_date: selectedExpiration,
+        expiration_date: formattedDate,
         risk_free_rate: riskFreeRate,
       });
       setAnalysisResult(response.data);
