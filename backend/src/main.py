@@ -80,47 +80,39 @@ async def fetch_expirations(ticker: str):
 @app.post("/analysis/stock")
 async def analyze_stock(request: AnalysisRequest):
     """
-    Runs a full stock and option analysis concurrently for multiple, standard expiration dates (DTEs).
+    Runs a full stock and option analysis for a single, user-selected expiration date.
     This endpoint serves as the core of Key Feature 1.
     """
+    from datetime import datetime
     try:
-        # Define a standard set of DTEs to analyze for a comprehensive view.
-        standard_dtes_to_analyze = [15, 30, 60]
-        
-        # Create a list of concurrent tasks.
-        # asyncio.to_thread runs the synchronous function in a separate thread,
-        # allowing I/O-bound operations (like network requests) to run in parallel.
-        tasks = []
-        for dte in standard_dtes_to_analyze:
-            expiration_date = date.today() + timedelta(days=dte)
-            task = asyncio.to_thread(
-                run_full_analysis,
-                ticker=request.ticker.upper(),
-                expiration_date=expiration_date,
-                r_current=request.risk_free_rate
-            )
-            tasks.append((dte, task))
+        # The frontend sends expiration_date as a 'YYYYMMDD' string.
+        # We need to parse it into a date object for the analysis service.
+        try:
+            expiration_date = datetime.strptime(request.expiration_date, '%Y%m%d').date()
+        except (ValueError, TypeError):
+             raise HTTPException(status_code=400, detail="Invalid expiration_date format. Expected 'YYYYMMDD'.")
 
-        # Run all analysis tasks concurrently and wait for them to complete
-        results_from_tasks = await asyncio.gather(*(task for _, task in tasks))
-        
-        all_results = []
-        for (dte, _), analysis_result in zip(tasks, results_from_tasks):
-            # We only add successful analyses to the final result list.
-            # Errors for a single DTE (e.g., no options available) are logged by the service
-            # but don't stop the entire request.
-            if analysis_result.get("status") == "success":
-                analysis_result['dte'] = dte
-                all_results.append(analysis_result)
+        analysis_result = await asyncio.to_thread(
+            run_full_analysis,
+            ticker=request.ticker.upper(),
+            expiration_date=expiration_date,
+            r_current=request.risk_free_rate
+        )
 
-        if not all_results:
-             raise HTTPException(status_code=400, detail="Analysis failed for all requested expiration dates. This could be due to no options being available for those dates.")
+        # Check if the single analysis was successful
+        if analysis_result.get("status") != "success":
+            error_message = analysis_result.get("message", "Analysis failed for the selected date.")
+            raise HTTPException(status_code=400, detail=error_message)
 
-        # The frontend will now receive an array of analysis results.
-        return all_results
+        # The frontend expects an array of results, so we wrap the single result in a list.
+        # We also calculate and add the DTE (days to expiration) for display purposes.
+        analysis_result['dte'] = (expiration_date - date.today()).days
+        return [analysis_result]
 
     except Exception as e:
         # Print the full error to the console for debugging
         print(traceback.format_exc())
-        # Return a 500 Internal Server Error for unexpected issues
+        # Re-raise HTTP exceptions, otherwise wrap as a 500 error.
+        if isinstance(e, HTTPException):
+            raise e
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
