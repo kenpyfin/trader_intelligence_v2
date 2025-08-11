@@ -226,7 +226,8 @@ const StrategyOrder = ({ strategy, ticker, expirationDate }) => {
 };
 
 const AnalysisDetails = ({ data }) => {
-  const biasColor = data.final_bias?.includes('Bullish') ? 'green' : data.final_bias?.includes('Bearish') ? 'red' : 'orange';
+  const finalBias = data.final_bias || '';
+  const biasColor = finalBias.includes('Bullish') ? 'green' : finalBias.includes('Bearish') ? 'red' : 'orange';
 
   const renderUOA = (uoaList, type) => {
     if (!uoaList || uoaList.length === 0) return null;
@@ -250,7 +251,7 @@ const AnalysisDetails = ({ data }) => {
       <p>Current Price: <strong>${data.S_current.toFixed(2)}</strong></p>
       
       <AnalysisCard title="Holistic Conclusion & Strategy">
-        <h4 style={{ color: biasColor }}>Final Bias: {data.final_bias}</h4>
+        <h4 style={{ color: biasColor }}>Final Bias: {finalBias}</h4>
         <div dangerouslySetInnerHTML={{ __html: data.final_conclusion_html }} />
       </AnalysisCard>
       
