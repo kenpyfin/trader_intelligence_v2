@@ -114,7 +114,7 @@ const MacroInsights = ({ onRateCalculated }) => {
 
   const renderFuturesTable = () => {
     if (loading) return <p>Loading futures data...</p>;
-    if (!futures || futures.error) return <p>Could not load futures data.</p>;
+    if (!futures || futures.error || Object.keys(futures).length === 0) return <p>Could not load futures data.</p>;
 
     return (
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.9em' }}>
