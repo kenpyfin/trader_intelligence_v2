@@ -247,8 +247,8 @@ const AnalysisDetails = ({ data }) => {
 
   return (
     <div>
-      <h2>Analysis for {data.ticker.toUpperCase()}</h2>
-      <p>Current Price: <strong>${data.S_current.toFixed(2)}</strong></p>
+      <h2>Analysis for {data.ticker?.toUpperCase()}</h2>
+      <p>Current Price: <strong>{typeof data.S_current === 'number' ? `$${data.S_current.toFixed(2)}` : 'N/A'}</strong></p>
       
       <AnalysisCard title="Holistic Conclusion & Strategy">
         <h4 style={{ color: biasColor }}>Final Bias: {finalBias}</h4>
@@ -258,9 +258,9 @@ const AnalysisDetails = ({ data }) => {
       <StrategyOrder strategy={data.recommended_strategy} ticker={data.ticker} expirationDate={data.expiration_date} />
       
       <AnalysisCard title="1. Price Trend & Candlestick Analysis">
-        {data.candlestick_analysis.plot_data ? 
+        {data.candlestick_analysis?.plot_data ? 
           <CandlestickChart plotData={data.candlestick_analysis.plot_data} ticker={data.ticker} /> :
-          <p>{data.candlestick_analysis.error || "No chart data."}</p>
+          <p>{data.candlestick_analysis?.error || "No chart data."}</p>
         }
         <p><strong>Primary Trend:</strong> {data.candlestick_analysis?.context?.primary_trend}</p>
         <p><strong>Secondary Trend:</strong> {data.candlestick_analysis?.context?.secondary_trend}</p>
