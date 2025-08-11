@@ -226,7 +226,7 @@ const StrategyOrder = ({ strategy, ticker, expirationDate }) => {
 };
 
 const AnalysisDetails = ({ data }) => {
-  const biasColor = data.final_bias.includes('Bullish') ? 'green' : data.final_bias.includes('Bearish') ? 'red' : 'orange';
+  const biasColor = data.final_bias?.includes('Bullish') ? 'green' : data.final_bias?.includes('Bearish') ? 'red' : 'orange';
 
   const renderUOA = (uoaList, type) => {
     if (!uoaList || uoaList.length === 0) return null;
