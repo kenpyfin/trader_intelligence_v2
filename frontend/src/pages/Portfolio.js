@@ -8,9 +8,68 @@ const formatCurrency = (value) => {
   return value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 };
 
+const RecentOrders = ({ orders, isLoading }) => {
+  if (isLoading) {
+    return (
+      <div style={{ border: '1px solid #ddd', borderRadius: '8px', padding: '16px', marginBottom: '24px', background: '#f8f9fa' }}>
+        <h2 style={{ marginTop: 0, marginBottom: '16px' }}>Recent Orders</h2>
+        <p>Loading recent orders...</p>
+      </div>
+    );
+  }
+
+  if (!orders || orders.length === 0) {
+    return (
+        <div style={{ border: '1px solid #ddd', borderRadius: '8px', padding: '16px', marginBottom: '24px', background: '#f8f9fa' }}>
+            <h2 style={{ marginTop: 0, marginBottom: '16px' }}>Recent Orders</h2>
+            <p>No recent orders found for this session.</p>
+        </div>
+    );
+  }
+
+  return (
+    <div style={{ border: '1px solid #ddd', borderRadius: '8px', padding: '16px', marginBottom: '24px', background: '#f8f9fa' }}>
+      <h2 style={{ marginTop: 0, marginBottom: '16px' }}>Recent Orders (Last 10)</h2>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.9em' }}>
+        <thead>
+          <tr style={{ background: '#f0f0f0' }}>
+            <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Time</th>
+            <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Symbol</th>
+            <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Description</th>
+            <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Action</th>
+            <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Qty</th>
+            <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Status</th>
+            <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Avg Fill Price</th>
+          </tr>
+        </thead>
+        <tbody>
+          {orders.map((order, index) => {
+            const actionColor = order.action === 'BUY' ? 'green' : 'red';
+            const statusColor = order.status === 'Filled' ? 'green' : (order.status === 'Cancelled' ? 'red' : 'orange');
+            const time = order.lastFillTime ? new Date(order.lastFillTime).toLocaleString() : 'N/A';
+            return (
+              <tr key={index}>
+                <td style={{ padding: '8px', border: '1px solid #ddd' }}>{time}</td>
+                <td style={{ padding: '8px', border: '1px solid #ddd', fontWeight: 'bold' }}>{order.symbol}</td>
+                <td style={{ padding: '8px', border: '1px solid #ddd' }}>{order.description || order.secType}</td>
+                <td style={{ padding: '8px', border: '1px solid #ddd', color: actionColor, fontWeight: 'bold' }}>{order.action}</td>
+                <td style={{ padding: '8px', border: '1px solid #ddd' }}>{order.quantity}</td>
+                <td style={{ padding: '8px', border: '1px solid #ddd', color: statusColor, fontWeight: 'bold' }}>{order.status}</td>
+                <td style={{ padding: '8px', border: '1px solid #ddd' }}>{order.avgFillPrice > 0 ? `$${formatCurrency(order.avgFillPrice)}` : 'N/A'}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+};
+
 const PortfolioPage = () => {
   const [portfolioData, setPortfolioData] = useState(null);
+  const [recentOrders, setRecentOrders] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadingOrders, setLoadingOrders] = useState(true);
   const [error, setError] = useState('');
   const [closingStatus, setClosingStatus] = useState({});
 
@@ -25,7 +84,20 @@ const PortfolioPage = () => {
         setLoading(false);
       }
     };
+
+    const fetchRecentOrders = async () => {
+        try {
+            const response = await axios.get('/api/portfolio/recent-orders');
+            setRecentOrders(response.data);
+        } catch (err) {
+            console.error('Failed to fetch recent orders:', err.response?.data?.detail || err.message);
+        } finally {
+            setLoadingOrders(false);
+        }
+    };
+
     fetchOpenPositions();
+    fetchRecentOrders();
   }, []);
 
   const handleCloseStrategy = async (symbol) => {
@@ -196,6 +268,7 @@ const PortfolioPage = () => {
   return (
     <div>
       <PortfolioSummary summary={portfolioData.summary} />
+      <RecentOrders orders={recentOrders} isLoading={loadingOrders} />
 
       {Object.keys(positions.options || {}).length > 0 && (
         <div style={{marginTop: '24px'}}>

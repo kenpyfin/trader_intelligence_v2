@@ -84,6 +84,16 @@ async def get_grouped_open_positions():
     }
     return _sanitize_for_json(response_data)
 
+async def get_recent_orders_service():
+    """
+    Fetches the 10 most recent orders from the broker.
+    """
+    trader = IBTrader()
+    recent_orders = await trader.get_recent_orders(count=10)
+    # The data is already sanitized in the trader method by creating dicts,
+    # but an extra _sanitize_for_json call ensures full compliance.
+    return _sanitize_for_json(recent_orders)
+
 async def close_strategy(request: CloseStrategyRequest):
     """
     Closes a strategy by placing opposing market orders for each of its legs concurrently.

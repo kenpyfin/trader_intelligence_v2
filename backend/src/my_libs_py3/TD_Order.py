@@ -412,3 +412,61 @@ class IBTrader:
                     
         except Exception as e:
             raise Exception(f"Error cancelling order: {str(e)}")
+
+    async def get_recent_orders(self, count=10):
+        """
+        Fetches the most recent trades from the current session.
+        """
+        try:
+            await self.connect()
+            # client.trades() returns all trades for the session.
+            all_trades = self.client.trades()
+            
+            # Sort trades by the execution time of their last fill.
+            def get_latest_fill_time(trade):
+                if not trade.fills:
+                    # For orders that are not filled yet (e.g. submitted), use logTime from status.
+                    if trade.orderStatus.logTime:
+                         return trade.orderStatus.logTime
+                    return datetime.fromtimestamp(0).astimezone() # return timezone aware datetime
+                # A trade can have multiple fills, we need the latest one.
+                return max(f.time for f in trade.fills)
+
+            # Sort trades, most recent first.
+            sorted_trades = sorted(all_trades, key=get_latest_fill_time, reverse=True)
+            
+            recent_trades = sorted_trades[:count]
+            
+            unpacked_trades = []
+            for trade in recent_trades:
+                contract = trade.contract
+                order = trade.order
+                status = trade.orderStatus
+
+                trade_data = {
+                    'symbol': contract.symbol,
+                    'secType': contract.secType,
+                    'action': order.action,
+                    'quantity': order.totalQuantity,
+                    'orderType': order.orderType,
+                    'status': status.status,
+                    'filled': status.filled,
+                    'avgFillPrice': status.avgFillPrice,
+                    'lastFillTime': get_latest_fill_time(trade).isoformat() if status.status == 'Filled' else None,
+                    'description': ''
+                }
+
+                if isinstance(contract, Option):
+                    trade_data['description'] = f"{contract.lastTradeDateOrContractMonth} {contract.strike} {contract.right}"
+                elif isinstance(contract, Stock):
+                    trade_data['description'] = 'Stock'
+                elif isinstance(contract, Forex):
+                    trade_data['description'] = 'Forex'
+
+                unpacked_trades.append(trade_data)
+                
+            return unpacked_trades
+        except Exception as e:
+            print(f"Error fetching recent orders: {e}")
+            traceback.print_exc()
+            raise

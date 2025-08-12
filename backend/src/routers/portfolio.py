@@ -28,3 +28,13 @@ async def close_open_strategy(request: CloseStrategyRequest):
     except Exception as e:
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to close strategy: {e}")
+
+@router.get("/recent-orders")
+async def get_recent_orders():
+    """Endpoint to fetch the 10 most recent orders."""
+    try:
+        orders = await portfolio_service.get_recent_orders_service()
+        return orders
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to fetch recent orders: {e}")
