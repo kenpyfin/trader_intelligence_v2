@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 
 const PortfolioPage = () => {
-  const [positions, setPositions] = useState(null);
+  const [portfolioData, setPortfolioData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [closingStatus, setClosingStatus] = useState({});
@@ -11,7 +11,7 @@ const PortfolioPage = () => {
     const fetchOpenPositions = async () => {
       try {
         const response = await axios.get('/api/portfolio/open-positions');
-        setPositions(response.data);
+        setPortfolioData(response.data);
       } catch (err) {
         setError(err.response?.data?.detail || 'Failed to fetch open positions.');
       } finally {
@@ -24,7 +24,7 @@ const PortfolioPage = () => {
   const handleCloseStrategy = async (symbol) => {
     setClosingStatus(prev => ({ ...prev, [symbol]: { inProgress: true } }));
     
-    const legsToClose = positions.options[symbol].map(leg => ({
+    const legsToClose = portfolioData.positions.options[symbol].map(leg => ({
         symbol: leg.symbol,
         secType: 'OPT',
         expiry: leg.expiry,
@@ -44,15 +44,43 @@ const PortfolioPage = () => {
     }
   };
 
+  const PortfolioSummary = ({ summary }) => {
+    if (!summary) return null;
+
+    const pnlColor = summary.unrealized_pnl >= 0 ? 'green' : 'red';
+    const formatCurrency = (value) => value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+    return (
+        <div style={{ border: '1px solid #ddd', borderRadius: '8px', padding: '20px', marginBottom: '24px', background: '#f8f9fa' }}>
+            <h2 style={{ marginTop: 0, marginBottom: '16px' }}>Portfolio Overview</h2>
+            <div style={{ display: 'flex', justifyContent: 'space-around', fontSize: '1.2em' }}>
+                <div>
+                    <span style={{ color: '#666', marginRight: '10px' }}>Total Market Value:</span>
+                    <strong>${formatCurrency(summary.market_value)}</strong>
+                </div>
+                <div>
+                    <span style={{ color: '#666', marginRight: '10px' }}>Unrealized P&L:</span>
+                    <strong style={{ color: pnlColor }}>${formatCurrency(summary.unrealized_pnl)}</strong>
+                </div>
+            </div>
+        </div>
+    );
+  };
+
   const StrategyCard = ({ symbol, legs }) => {
     const status = closingStatus[symbol];
     const isClosing = status?.inProgress;
     const legTotal = legs.reduce((acc, leg) => acc + leg.position, 0);
+    const strategyUnrealizedPNL = legs.reduce((acc, leg) => acc + (leg.unrealizedPNL || 0), 0);
+    const pnlColor = strategyUnrealizedPNL >= 0 ? 'green' : 'red';
 
     return (
       <div style={{ border: '1px solid #ddd', borderRadius: '8px', padding: '16px', marginBottom: '16px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>
         <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
-            <h3 style={{ marginTop: 0 }}>{symbol} <span style={{fontSize: '0.8em', color: '#666'}}>({legs.length} Legs)</span></h3>
+            <div>
+                <h3 style={{ marginTop: 0, marginBottom: '5px' }}>{symbol} <span style={{fontSize: '0.8em', color: '#666'}}>({legs.length} Legs)</span></h3>
+                <span style={{fontSize: '0.9em'}}>Unrealized P/L: <strong style={{color: pnlColor}}>${strategyUnrealizedPNL.toFixed(2)}</strong></span>
+            </div>
             <button 
                 onClick={() => handleCloseStrategy(symbol)} 
                 disabled={isClosing}
@@ -77,18 +105,23 @@ const PortfolioPage = () => {
                     <th style={{padding: '8px', border: '1px solid #ddd', textAlign: 'left'}}>Strike</th>
                     <th style={{padding: '8px', border: '1px solid #ddd', textAlign: 'left'}}>Expiry</th>
                     <th style={{padding: '8px', border: '1px solid #ddd', textAlign: 'left'}}>Avg Cost</th>
+                    <th style={{padding: '8px', border: '1px solid #ddd', textAlign: 'left'}}>Unrealized P/L</th>
                 </tr>
             </thead>
             <tbody>
-                {legs.map((leg, index) => (
-                    <tr key={index}>
-                        <td style={{padding: '8px', border: '1px solid #ddd', color: leg.position > 0 ? 'green' : 'red', fontWeight: 'bold'}}>{leg.position > 0 ? `+${leg.position}` : leg.position}</td>
-                        <td style={{padding: '8px', border: '1px solid #ddd'}}>{leg.right === 'C' ? 'Call' : 'Put'}</td>
-                        <td style={{padding: '8px', border: '1px solid #ddd'}}>${leg.strike.toFixed(2)}</td>
-                        <td style={{padding: '8px', border: '1px solid #ddd'}}>{leg.expiry}</td>
-                        <td style={{padding: '8px', border: '1px solid #ddd'}}>${(leg.avgCost / (leg.position * 100)).toFixed(2)}</td>
-                    </tr>
-                ))}
+                {legs.map((leg, index) => {
+                    const legPnlColor = leg.unrealizedPNL >= 0 ? 'green' : 'red';
+                    return (
+                        <tr key={index}>
+                            <td style={{padding: '8px', border: '1px solid #ddd', color: leg.position > 0 ? 'green' : 'red', fontWeight: 'bold'}}>{leg.position > 0 ? `+${leg.position}` : leg.position}</td>
+                            <td style={{padding: '8px', border: '1px solid #ddd'}}>{leg.right === 'C' ? 'Call' : 'Put'}</td>
+                            <td style={{padding: '8px', border: '1px solid #ddd'}}>${leg.strike.toFixed(2)}</td>
+                            <td style={{padding: '8px', border: '1px solid #ddd'}}>{leg.expiry}</td>
+                            <td style={{padding: '8px', border: '1px solid #ddd'}}>${(leg.avgCost / (leg.position * 100)).toFixed(2)}</td>
+                            <td style={{padding: '8px', border: '1px solid #ddd', color: legPnlColor}}>${leg.unrealizedPNL?.toFixed(2) || '0.00'}</td>
+                        </tr>
+                    );
+                })}
             </tbody>
         </table>
         {status?.data && (
@@ -124,16 +157,21 @@ const PortfolioPage = () => {
               <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Symbol</th>
               <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Quantity</th>
               <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Avg Cost/Share</th>
+              <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Unrealized P/L</th>
             </tr>
           </thead>
           <tbody>
-            {stocks.map((stock, index) => (
-              <tr key={index}>
-                <td style={{ padding: '8px', border: '1px solid #ddd', fontWeight: 'bold' }}>{stock.symbol}</td>
-                <td style={{ padding: '8px', border: '1px solid #ddd' }}>{stock.position}</td>
-                <td style={{ padding: '8px', border: '1px solid #ddd' }}>${(stock.avgCost / stock.position).toFixed(2)}</td>
-              </tr>
-            ))}
+            {stocks.map((stock, index) => {
+              const pnlColor = stock.unrealizedPNL >= 0 ? 'green' : 'red';
+              return (
+                <tr key={index}>
+                  <td style={{ padding: '8px', border: '1px solid #ddd', fontWeight: 'bold' }}>{stock.symbol}</td>
+                  <td style={{ padding: '8px', border: '1px solid #ddd' }}>{stock.position}</td>
+                  <td style={{ padding: '8px', border: '1px solid #ddd' }}>${(stock.avgCost / stock.position).toFixed(2)}</td>
+                  <td style={{ padding: '8px', border: '1px solid #ddd', color: pnlColor }}>${stock.unrealizedPNL?.toFixed(2) || '0.00'}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -142,20 +180,25 @@ const PortfolioPage = () => {
 
   if (loading) return <p>Loading open positions from broker...</p>;
   if (error) return <p style={{ color: 'red' }}>{error}</p>;
-  if (!positions || (Object.keys(positions.options || {}).length === 0 && (!positions.stocks || positions.stocks.length === 0))) {
+  
+  const positions = portfolioData ? portfolioData.positions : null;
+
+  if (!portfolioData || !positions || (Object.keys(positions.options || {}).length === 0 && (!positions.stocks || positions.stocks.length === 0))) {
       return <p>No open positions found in the account.</p>;
   }
 
   return (
     <div>
+      <PortfolioSummary summary={portfolioData.summary} />
+
       {Object.keys(positions.options || {}).length > 0 && (
-        <>
+        <div style={{marginTop: '24px'}}>
             <h2>Open Option Strategies</h2>
             <p>This page shows all open option positions in your account, grouped by underlying ticker.</p>
             {Object.entries(positions.options).map(([symbol, legs]) => (
                 <StrategyCard key={symbol} symbol={symbol} legs={legs} />
             ))}
-        </>
+        </div>
       )}
       <StockPositions stocks={positions.stocks} />
     </div>

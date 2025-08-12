@@ -7,16 +7,35 @@ from ..models.portfolio_models import CloseStrategyRequest
 
 async def get_grouped_open_positions():
     """
-    Fetches all open positions from the broker and groups them by contract type.
-    Options are further grouped by underlying symbol.
+    Fetches all open positions from the broker, calculates portfolio summary metrics,
+    and groups positions by contract type. Options are further grouped by underlying symbol.
     """
     trader = IBTrader()
     positions_df = await trader.open_positions()
 
     if positions_df.empty:
-        return {"options": {}, "stocks": [], "others": []}
+        return {
+            "summary": {"market_value": 0, "unrealized_pnl": 0},
+            "positions": {"options": {}, "stocks": [], "others": []}
+        }
 
-    grouped_positions = {
+    # Ensure required columns exist before trying to sum them.
+    if 'marketValue' not in positions_df.columns:
+        positions_df['marketValue'] = 0
+    if 'unrealizedPNL' not in positions_df.columns:
+        positions_df['unrealizedPNL'] = 0
+        
+    # Calculate portfolio-wide summary
+    total_market_value = positions_df['marketValue'].sum()
+    total_unrealized_pnl = positions_df['unrealizedPNL'].sum()
+
+    portfolio_summary = {
+        "market_value": total_market_value,
+        "unrealized_pnl": total_unrealized_pnl
+    }
+    
+    # Group individual positions
+    grouped_positions_data = {
         "options": defaultdict(list),
         "stocks": [],
         "others": []
@@ -27,17 +46,20 @@ async def get_grouped_open_positions():
     for pos in all_positions:
         contract_type = pos.get('contract_type')
         if contract_type == 'Option':
-            grouped_positions['options'][pos['symbol']].append(pos)
+            grouped_positions_data['options'][pos['symbol']].append(pos)
         elif contract_type == 'Stock':
-            grouped_positions['stocks'].append(pos)
+            grouped_positions_data['stocks'].append(pos)
         else:
             # For futures, forex, etc.
-            grouped_positions['others'].append(pos)
+            grouped_positions_data['others'].append(pos)
 
     # Convert defaultdict to regular dict for JSON serialization
-    grouped_positions['options'] = dict(grouped_positions['options'])
+    grouped_positions_data['options'] = dict(grouped_positions_data['options'])
     
-    return grouped_positions
+    return {
+        "summary": portfolio_summary,
+        "positions": grouped_positions_data
+    }
 
 async def close_strategy(request: CloseStrategyRequest):
     """
