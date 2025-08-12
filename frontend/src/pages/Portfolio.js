@@ -123,7 +123,7 @@ const PortfolioPage = () => {
                             <td style={{padding: '8px', border: '1px solid #ddd'}}>{leg.right === 'C' ? 'Call' : 'Put'}</td>
                             <td style={{padding: '8px', border: '1px solid #ddd'}}>${leg.strike.toFixed(2)}</td>
                             <td style={{padding: '8px', border: '1px solid #ddd'}}>{leg.expiry}</td>
-                            <td style={{padding: '8px', border: '1px solid #ddd'}}>${(leg.avgCost / (leg.position * 100)).toFixed(2)}</td>
+                            <td style={{padding: '8px', border: '1px solid #ddd'}}>${leg.position !== 0 ? (leg.avgCost / (leg.position * 100)).toFixed(2) : '0.00'}</td>
                             <td style={{padding: '8px', border: '1px solid #ddd', color: legPnlColor}}>${formatCurrency(leg.unrealizedPNL)}</td>
                         </tr>
                     );
@@ -173,7 +173,7 @@ const PortfolioPage = () => {
                 <tr key={index}>
                   <td style={{ padding: '8px', border: '1px solid #ddd', fontWeight: 'bold' }}>{stock.symbol}</td>
                   <td style={{ padding: '8px', border: '1px solid #ddd' }}>{stock.position}</td>
-                  <td style={{ padding: '8px', border: '1px solid #ddd' }}>${(stock.avgCost / stock.position).toFixed(2)}</td>
+                  <td style={{ padding: '8px', border: '1px solid #ddd' }}>${stock.position !== 0 ? (stock.avgCost / stock.position).toFixed(2) : '0.00'}</td>
                   <td style={{ padding: '8px', border: '1px solid #ddd', color: pnlColor }}>${formatCurrency(stock.unrealizedPNL)}</td>
                 </tr>
               );
