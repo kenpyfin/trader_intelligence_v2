@@ -1,9 +1,31 @@
 from collections import defaultdict
 import asyncio
 import pandas as pd
+import numpy as np
 
 from ..my_libs_py3.TD_Order import IBTrader
 from ..models.portfolio_models import CloseStrategyRequest
+
+def _sanitize_for_json(item):
+    """
+    Recursively walk a data structure and convert non-JSON-compliant types
+    (NaN, Infinity, numpy integers/floats) to standard Python types.
+    """
+    if isinstance(item, dict):
+        return {k: _sanitize_for_json(v) for k, v in item.items()}
+    elif isinstance(item, list):
+        return [_sanitize_for_json(elem) for elem in item]
+    elif isinstance(item, np.integer):
+        return int(item)
+    elif isinstance(item, np.floating):
+        if np.isnan(item) or np.isinf(item):
+            return None
+        return float(item)
+    elif isinstance(item, np.ndarray):
+        return item.tolist()
+    elif isinstance(item, float) and (np.isnan(item) or np.isinf(item)):
+        return None
+    return item
 
 async def get_grouped_open_positions():
     """
@@ -56,10 +78,11 @@ async def get_grouped_open_positions():
     # Convert defaultdict to regular dict for JSON serialization
     grouped_positions_data['options'] = dict(grouped_positions_data['options'])
     
-    return {
+    response_data = {
         "summary": portfolio_summary,
         "positions": grouped_positions_data
     }
+    return _sanitize_for_json(response_data)
 
 async def close_strategy(request: CloseStrategyRequest):
     """
@@ -106,4 +129,4 @@ async def close_strategy(request: CloseStrategyRequest):
                 "remaining": result.orderStatus.remaining,
             })
             
-    return {"status": "submitted", "trades": closing_trades}
+    return _sanitize_for_json({"status": "submitted", "trades": closing_trades})
