@@ -34,11 +34,12 @@ class IBTrader:
         if not self.client.isConnected():
             try:
                 print(f"INFO: Connecting to TWS at {self.ip_add}:{self.port}...")
-                await self.client.connectAsync(self.ip_add, self.port, clientId=0, timeout=10)
+                await self.client.connectAsync(self.ip_add, self.port, clientId=random.randint(0, 1000), timeout=10)
                 print("INFO: Connection to TWS established successfully.")
             except (asyncio.TimeoutError, ConnectionRefusedError):
                  print(f"ERROR: Connection to {self.ip_add}:{self.port} timed out or was refused.")
                  print("HINT: Ensure TWS/Gateway is running, API connections are enabled, and the IP is whitelisted.")
+                 self.client.connect(self.ip_add, self.port, clientId=random.randint(0, 1000) + 1)
                  # Consider if a retry is needed here or if the exception should propagate.
                  # For now, we let it propagate to the caller.
                  raise
