@@ -341,8 +341,37 @@ const ResultsDisplay = ({ analysisResult }) => {
   );
 };
 
+const MethodologyExplanation = ({ methodology }) => {
+  if (methodology !== 'holistic-market-edge') {
+    return null;
+  }
+
+  return (
+    <AnalysisCard title="About: Holistic Market Edge Analysis">
+      <p>
+        The <strong>Holistic Market Edge</strong> methodology is a multi-faceted approach to stock and option analysis, designed to synthesize a wide range of market data into a single, actionable conclusion. It avoids relying on a single indicator and instead builds a "weight of the evidence" verdict.
+      </p>
+      <h5>How the Final Verdict is Generated:</h5>
+      <p>
+        The final bias (e.g., Bullish, Bearish, Neutral) is determined by a scoring system that aggregates sentiment from several core analytical components:
+      </p>
+      <ol>
+        <li><strong>Price Trend & Candlesticks:</strong> Establishes the market's primary and secondary trends using moving averages and identifies recent, psychologically significant candlestick patterns for short-term sentiment.</li>
+        <li><strong>Sentiment Analysis:</strong> Gauges market sentiment by analyzing put/call ratios, unusual options activity (UOA), and significant open interest levels (support/resistance walls).</li>
+        <li><strong>Volatility Analysis:</strong> Compares implied volatility (IV) to historical volatility (HV) to determine if options are "cheap" or "expensive." It also checks for volatility compression, which often precedes large price moves.</li>
+        <li><strong>Catalyst Events:</strong> Checks for upcoming earnings reports before the option expiration, as these are significant drivers of volatility and price movement.</li>
+        <li><strong>Quantitative Valuation:</strong> Uses a binomial pricing model to calculate a theoretical option price, which is then compared to the market price to find potentially undervalued opportunities.</li>
+      </ol>
+      <p>
+        Each component contributes a bullish, bearish, or neutral signal to the final score. A strong bias is formed only when the evidence from multiple, diverse components points in the same direction. This comprehensive approach aims to provide a robust and well-rounded trading edge.
+      </p>
+    </AnalysisCard>
+  );
+};
+
 const AnalysisPage = () => {
   const [ticker, setTicker] = useStickyState('SPY', 'ticker');
+  const [analysisMethod, setAnalysisMethod] = useStickyState('holistic-market-edge', 'analysisMethod');
   const [riskFreeRate, setRiskFreeRate] = useStickyState(0.045, 'riskFreeRate');
   const [expirations, setExpirations] = useState([]);
   const [selectedExpiration, setSelectedExpiration] = useState('');
@@ -404,12 +433,21 @@ const AnalysisPage = () => {
     <div>
       <MacroInsights onRateCalculated={setRiskFreeRate} />
       
+      <MethodologyExplanation methodology={analysisMethod} />
+
       <AnalysisCard title="Stock and Option Analysis">
         <form onSubmit={handleAnalyze} style={{ marginBottom: '20px' }}>
           <div style={{ display: 'flex', gap: '15px', alignItems: 'flex-end', flexWrap: 'wrap' }}>
               <div>
                 <label>Ticker:</label><br/>
                 <input type="text" value={ticker} onChange={(e) => setTicker(e.target.value)} required />
+              </div>
+
+              <div>
+                <label>Analysis Methodology:</label><br/>
+                <select value={analysisMethod} onChange={e => setAnalysisMethod(e.target.value)} style={{ padding: '4px', height: '29px' }}>
+                    <option value="holistic-market-edge">Holistic Market Edge</option>
+                </select>
               </div>
 
               <button type="button" onClick={handleFetchExpirations} disabled={fetchingExpirations || !ticker.trim()} style={{ padding: '5px 15px', cursor: 'pointer', height: 'fit-content' }}>
