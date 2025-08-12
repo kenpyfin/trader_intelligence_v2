@@ -1,6 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 
+const formatCurrency = (value) => {
+  if (typeof value !== 'number' || isNaN(value)) {
+    return '0.00';
+  }
+  return value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+};
+
 const PortfolioPage = () => {
   const [portfolioData, setPortfolioData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -48,12 +55,6 @@ const PortfolioPage = () => {
     if (!summary) return null;
 
     const pnlColor = summary.unrealized_pnl >= 0 ? 'green' : 'red';
-    const formatCurrency = (value) => {
-      if (typeof value !== 'number' || isNaN(value)) {
-        return '0.00';
-      }
-      return value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    };
 
     return (
         <div style={{ border: '1px solid #ddd', borderRadius: '8px', padding: '20px', marginBottom: '24px', background: '#f8f9fa' }}>
@@ -84,7 +85,7 @@ const PortfolioPage = () => {
         <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
             <div>
                 <h3 style={{ marginTop: 0, marginBottom: '5px' }}>{symbol} <span style={{fontSize: '0.8em', color: '#666'}}>({legs.length} Legs)</span></h3>
-                <span style={{fontSize: '0.9em'}}>Unrealized P/L: <strong style={{color: pnlColor}}>${strategyUnrealizedPNL.toFixed(2)}</strong></span>
+                <span style={{fontSize: '0.9em'}}>Unrealized P/L: <strong style={{color: pnlColor}}>${formatCurrency(strategyUnrealizedPNL)}</strong></span>
             </div>
             <button 
                 onClick={() => handleCloseStrategy(symbol)} 
@@ -123,7 +124,7 @@ const PortfolioPage = () => {
                             <td style={{padding: '8px', border: '1px solid #ddd'}}>${leg.strike.toFixed(2)}</td>
                             <td style={{padding: '8px', border: '1px solid #ddd'}}>{leg.expiry}</td>
                             <td style={{padding: '8px', border: '1px solid #ddd'}}>${(leg.avgCost / (leg.position * 100)).toFixed(2)}</td>
-                            <td style={{padding: '8px', border: '1px solid #ddd', color: legPnlColor}}>${leg.unrealizedPNL?.toFixed(2) || '0.00'}</td>
+                            <td style={{padding: '8px', border: '1px solid #ddd', color: legPnlColor}}>${formatCurrency(leg.unrealizedPNL)}</td>
                         </tr>
                     );
                 })}
@@ -173,7 +174,7 @@ const PortfolioPage = () => {
                   <td style={{ padding: '8px', border: '1px solid #ddd', fontWeight: 'bold' }}>{stock.symbol}</td>
                   <td style={{ padding: '8px', border: '1px solid #ddd' }}>{stock.position}</td>
                   <td style={{ padding: '8px', border: '1px solid #ddd' }}>${(stock.avgCost / stock.position).toFixed(2)}</td>
-                  <td style={{ padding: '8px', border: '1px solid #ddd', color: pnlColor }}>${stock.unrealizedPNL?.toFixed(2) || '0.00'}</td>
+                  <td style={{ padding: '8px', border: '1px solid #ddd', color: pnlColor }}>${formatCurrency(stock.unrealizedPNL)}</td>
                 </tr>
               );
             })}
