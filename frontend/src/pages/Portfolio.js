@@ -48,7 +48,12 @@ const PortfolioPage = () => {
     if (!summary) return null;
 
     const pnlColor = summary.unrealized_pnl >= 0 ? 'green' : 'red';
-    const formatCurrency = (value) => value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const formatCurrency = (value) => {
+      if (typeof value !== 'number' || isNaN(value)) {
+        return '0.00';
+      }
+      return value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    };
 
     return (
         <div style={{ border: '1px solid #ddd', borderRadius: '8px', padding: '20px', marginBottom: '24px', background: '#f8f9fa' }}>
