@@ -421,7 +421,14 @@ const AnalysisPage = () => {
         expiration_date: selectedExpiration, // Send as YYYYMMDD
         risk_free_rate: riskFreeRate,
       });
-      setAnalysisResult(response.data);
+      const result = response.data;
+      // The ResultsDisplay component expects an array. If the API returns a single object,
+      // wrap it in an array for consistent handling.
+      if (result && typeof result === 'object' && !Array.isArray(result)) {
+        setAnalysisResult([result]);
+      } else {
+        setAnalysisResult(result);
+      }
     } catch (err) {
       setError(err.response?.data?.detail || 'An unexpected error occurred.');
     } finally {
