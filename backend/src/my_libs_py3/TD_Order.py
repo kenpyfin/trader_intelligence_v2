@@ -424,13 +424,25 @@ class IBTrader:
             
             # Sort trades by the execution time of their last fill.
             def get_latest_fill_time(trade):
-                if not trade.fills:
-                    # For orders that are not filled yet (e.g. submitted), use logTime from status.
-                    if trade.orderStatus.logTime:
-                         return trade.orderStatus.logTime
-                    return datetime.fromtimestamp(0).astimezone() # return timezone aware datetime
-                # A trade can have multiple fills, we need the latest one.
-                return max(f.time for f in trade.fills)
+                try:
+                    # Prefer the latest execution fill time if available
+                    if trade.fills:
+                        latest_fill_time = max(
+                            (f.time for f in trade.fills if getattr(f, "time", None)),
+                            default=None
+                        )
+                        if latest_fill_time:
+                            return latest_fill_time
+                    # Fallback: use latest trade log event time if available
+                    if getattr(trade, "log", None):
+                        log_times = [getattr(l, "time", None) for l in trade.log if getattr(l, "time", None)]
+                        if log_times:
+                            return max(log_times)
+                    # Final fallback: epoch (tz-aware) to keep sorting stable
+                    return datetime.fromtimestamp(0).astimezone()
+                except Exception:
+                    # Defensive fallback in case of unexpected structures
+                    return datetime.fromtimestamp(0).astimezone()
 
             # Sort trades, most recent first.
             sorted_trades = sorted(all_trades, key=get_latest_fill_time, reverse=True)
