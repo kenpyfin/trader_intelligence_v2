@@ -13,6 +13,7 @@ from src.my_libs_py3.my_data import PriceDataFetcher
 from src.my_libs_py3.fmp import FMPClient
 from src.my_libs_py3.TD_Order import IBTrader
 import plotly.graph_objects as go
+from src.analytics.sabr import calibrate_sabr, sabr_iv
 
 
 async def get_option_expirations(ticker: str):
@@ -684,6 +685,49 @@ def run_full_analysis(ticker: str, expiration_date: date, r_current: float = 0.0
     # --- Quantitative Valuation ---
     days_to_exp = (expiration_date - date.today()).days
     vol_term_structure = generate_forward_vol_structure(days_to_exp, key_vols_iv)
+
+    # --- SABR calibration (per-expiration) ---
+    sabr_surface_info = None
+    iv_residual_outliers = []
+    try:
+        if days_to_exp > 0 and 'IV' in option_chain_df.columns:
+            iv_series = option_chain_df[['Strike', 'IV']].copy()
+            iv_series['Strike'] = pd.to_numeric(iv_series['Strike'], errors='coerce')
+            iv_series = iv_series.dropna(subset=['Strike', 'IV'])
+            iv_series['IV'] = iv_series['IV'].apply(_parse_finviz_iv_string)
+            iv_series = iv_series.dropna(subset=['IV'])
+            grouped = iv_series.groupby('Strike')['IV'].median().reset_index()
+            if len(grouped) >= 5:
+                T = days_to_exp / 365.0
+                F = S_current * np.exp((r_current - div_current) * T)
+                Ks = grouped['Strike'].values
+                mkt_ivs = grouped['IV'].values
+                params = calibrate_sabr(F, Ks, mkt_ivs, T)
+                fitted_ivs = np.array([sabr_iv(F, k, T, *params) for k in Ks])
+                residuals = mkt_ivs - fitted_ivs
+                rmse = float(np.sqrt(np.mean((residuals) ** 2)))
+                order = np.argsort(-np.abs(residuals))
+                top = min(5, len(order))
+                for idx in order[:top]:
+                    iv_residual_outliers.append({
+                        "strike": float(Ks[idx]),
+                        "market_iv": float(mkt_ivs[idx]),
+                        "fitted_iv": float(fitted_ivs[idx]),
+                        "residual": float(residuals[idx])
+                    })
+                sabr_surface_info = {
+                    "params": {
+                        "alpha": float(params[0]),
+                        "beta": float(params[1]),
+                        "rho": float(params[2]),
+                        "nu": float(params[3])
+                    },
+                    "rmse": rmse
+                }
+    except Exception as _:
+        sabr_surface_info = None
+        iv_residual_outliers = []
+
     undervalued_results = []
     parity_data = []
     
@@ -697,7 +741,7 @@ def run_full_analysis(ticker: str, expiration_date: date, r_current: float = 0.0
 
         for opt_type, market_price in [('call', call_market_price), ('put', put_market_price)]:
             if market_price is None: continue
-            model_price, _, _, _ = universal_binomial_pricer(S_current, K, expiration_date, r_current, vol_term_structure, option_type=opt_type, div=div_current, historical_vol=hv_current)
+            model_price, _, _, _ = universal_binomial_pricer(S_current, K, expiration_date, r_current, vol_term_structure, model='crr', option_type=opt_type, div=div_current, historical_vol=hv_current)
             if model_price > market_price * 1.2: # Find options undervalued by at least 20%
                 undervalued_results.append({"Strike": K, "Type": opt_type.capitalize(), "Market Price": market_price, "Model Price": model_price})
     
@@ -757,6 +801,7 @@ def run_full_analysis(ticker: str, expiration_date: date, r_current: float = 0.0
         "final_conclusion_html": final_conclusion_html, "final_bias": final_bias,
         "recommended_strategy": recommended_strategy,
         "candlestick_analysis": candlestick_analysis, "volume_oi_analysis": volume_oi_analysis,
-        "movement_analysis": movement_analysis, "results_df": undervalued_results
+        "movement_analysis": movement_analysis, "results_df": undervalued_results,
+        "iv_surface": sabr_surface_info, "iv_residual_outliers": iv_residual_outliers
     }
     return _sanitize_for_json(response_data)
