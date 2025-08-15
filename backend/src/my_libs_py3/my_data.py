@@ -81,6 +81,109 @@ class PriceDataFetcher:
                  logging.warning("finviz_api_key not found in Airflow Variables or .env file. Finviz queries may fail.")
         return key
 
+    def adjust_with_corporate_actions(self, ticker: str, df: pd.DataFrame, persist: bool = True) -> pd.DataFrame:
+        """
+        Adjusts the Close (and OHL if present) series for splits and dividends using FMP endpoints.
+        - Splits: apply split ratio backwards (pre-split prices adjusted by 1/ratio).
+        - Dividends: adjust pre-dividend prices by (P_prev - D) / P_prev on ex-date.
+        Persists adjusted series to Mongo 'adjusted_prices' collection when persist=True.
+        """
+        try:
+            if df is None or df.empty or 'TimeStamp' not in df.columns or 'Close' not in df.columns:
+                return df
+            df = df.copy()
+            # Ensure datetime and ascending order
+            df['TimeStamp'] = pd.to_datetime(df['TimeStamp'])
+            df.sort_values('TimeStamp', inplace=True)
+            df.reset_index(drop=True, inplace=True)
+
+            start_str = (self.start_date if hasattr(self, 'start_date') and self.start_date else df['TimeStamp'].min()).strftime('%Y-%m-%d')
+            end_str = (self.end_date if hasattr(self, 'end_date') and self.end_date else df['TimeStamp'].max()).strftime('%Y-%m-%d')
+
+            # Fetch splits and dividends
+            splits_df = self.fmp_client.get_symbol_splits(ticker, start_str, end_str)
+            dividends_df = self.fmp_client.get_symbol_dividends(ticker, start_str, end_str)
+
+            # Prepare adjustment factor series (initialize to 1.0)
+            adj_factor = pd.Series(1.0, index=df.index)
+
+            # Apply splits
+            if not splits_df.empty:
+                # Normalize fields
+                if 'date' in splits_df.columns:
+                    splits_df['date'] = pd.to_datetime(splits_df['date'])
+                if 'numerator' in splits_df.columns and 'denominator' in splits_df.columns:
+                    splits_df['ratio'] = splits_df['numerator'].astype(float) / splits_df['denominator'].astype(float)
+                elif 'splitRatio' in splits_df.columns:
+                    # format like "2:1"
+                    def parse_ratio(s):
+                        try:
+                            a, b = str(s).split(':')
+                            return float(a) / float(b)
+                        except Exception:
+                            return 1.0
+                    splits_df['ratio'] = splits_df['splitRatio'].apply(parse_ratio)
+                else:
+                    splits_df['ratio'] = 1.0
+                # For each split, multiply all prior dates by 1/ratio
+                for _, row in splits_df.sort_values('date', ascending=True).iterrows():
+                    ratio = row.get('ratio', 1.0)
+                    event_date = row.get('date')
+                    if pd.isna(ratio) or ratio <= 0 or pd.isna(event_date):
+                        continue
+                    # prior dates strictly before event_date
+                    prior_mask = df['TimeStamp'] < event_date
+                    adj_factor.loc[prior_mask] = adj_factor.loc[prior_mask] / float(ratio)
+
+            # Apply dividends
+            if not dividends_df.empty:
+                if 'date' in dividends_df.columns:
+                    dividends_df['date'] = pd.to_datetime(dividends_df['date'])
+                # Dividend field can be 'dividend' or 'adjDividend'
+                div_col = 'dividend' if 'dividend' in dividends_df.columns else ('adjDividend' if 'adjDividend' in dividends_df.columns else None)
+                if div_col:
+                    # For each dividend, apply factor to all prior dates: (P_prev - D)/P_prev
+                    for _, row in dividends_df.sort_values('date', ascending=True).iterrows():
+                        event_date = row.get('date')
+                        D = row.get(div_col, 0.0)
+                        if pd.isna(event_date) or pd.isna(D) or float(D) <= 0:
+                            continue
+                        # find previous available close before event_date
+                        prev_idx = df.index[df['TimeStamp'] < event_date]
+                        if len(prev_idx) == 0:
+                            continue
+                        prev_close = df.loc[prev_idx.max(), 'Close']
+                        if prev_close and prev_close > 0:
+                            f = (float(prev_close) - float(D)) / float(prev_close)
+                            # multiply all dates strictly before event_date
+                            adj_factor.loc[df['TimeStamp'] < event_date] = adj_factor.loc[df['TimeStamp'] < event_date] * f
+
+            # Apply factor
+            df['RawClose'] = df['Close']
+            df['Close'] = df['Close'] * adj_factor
+            # Adjust O/H/L if present
+            for col in ['Open', 'High', 'Low']:
+                if col in df.columns:
+                    df[col] = df[col] * adj_factor
+
+            # Add Ticker column for persistence
+            if 'Ticker' not in df.columns:
+                df['Ticker'] = ticker
+
+            if persist:
+                try:
+                    db = mongo(coll_name="adjusted_prices")
+                    # Persist only necessary columns
+                    cols = [c for c in ['Ticker', 'TimeStamp', 'Close', 'RawClose', 'Open', 'High', 'Low'] if c in df.columns]
+                    db.frame_to_mongo(df[cols])
+                except Exception as e:
+                    logging.info(f"Persist adjusted series skipped due to: {e}")
+
+            return df
+        except Exception as e:
+            logging.info(f"adjust_with_corporate_actions failed for {ticker}: {e}")
+            return df
+
     def get_price_data(self, tic_list, method, start_date=None, end_date=None, back_day=90, max_retries=2, last_record=False, fmp_switch=False, fall_back=True, frequency=None):
         valid_methods = ["minute", "day", "self_minute", "td_data", "intraday", "minute_to_day", "fmp","realtimedata", "finviz","ib"]
         if method not in valid_methods:
@@ -163,6 +266,7 @@ class PriceDataFetcher:
         for tic in tic_list:
             try:
                 temp = self._fetch_from_ib(tic, back_day, bar_size, what_to_show, max_retries)
+                temp = self.adjust_with_corporate_actions(tic, temp)
                 temp = self._calculate_returns(temp)
                 temp["Ticker"] = tic
                 new_data = temp.iloc[-1:] if last_record else temp
@@ -274,6 +378,7 @@ class PriceDataFetcher:
                     # Drop original date column if needed, keep others like Open, High, Low, Volume
                     df = df.drop(columns=['Date'])
 
+                    df = self.adjust_with_corporate_actions(tic, df)
                     df = self._calculate_returns(df)
 
                     new_data = df.iloc[-1:] if last_record else df

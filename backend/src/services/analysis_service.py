@@ -15,6 +15,8 @@ from src.my_libs_py3.TD_Order import IBTrader
 import plotly.graph_objects as go
 from src.analytics.sabr import calibrate_sabr, sabr_iv
 from src.analytics.analysis import _parse_finviz_iv_string
+from src.analytics.treasury_curve import build_treasury_curve
+from src.my_libs_py3.db import mongo
 
 
 async def get_option_expirations(ticker: str):
@@ -623,7 +625,7 @@ def _sanitize_for_json(item):
         return None
     return item
 
-def run_full_analysis(ticker: str, expiration_date: date, r_current: float = 0.045):
+def run_full_analysis(ticker: str, expiration_date: date, r_current: float = 0.045, rate_source: str = 'etf'):
     """
     Performs all calculations for the option screener, fully implementing Key Feature 1.
     """
@@ -634,6 +636,13 @@ def run_full_analysis(ticker: str, expiration_date: date, r_current: float = 0.0
     if rt_quote is None or rt_quote.empty or 'price' not in rt_quote.columns:
         return {"status": "error", "message": f"Could not fetch current price for {ticker}."}
     S_current = rt_quote.price.iloc[0]
+
+    # Determine risk-free input: constant vs Treasury curve
+    if rate_source == 'treasury':
+        curve = build_treasury_curve(fmp)
+        r_param = curve['rate_fn']
+    else:
+        r_param = r_current
 
     # --- Fetch Option Chain with fallback to nearest date ---
     option_chain_df = None
@@ -727,12 +736,14 @@ def run_full_analysis(ticker: str, expiration_date: date, r_current: float = 0.0
         call_market_price = _get_market_price_from_finviz_df(option_chain_df, K, 'C')
         put_market_price = _get_market_price_from_finviz_df(option_chain_df, K, 'P')
         if call_market_price and put_market_price and days_to_exp > 0:
-            parity_diff = (call_market_price - put_market_price) - (S_current - K * np.exp(-r_current * (days_to_exp/365.0)))
+            T = (days_to_exp/365.0)
+            r_T = r_param(T) if callable(r_param) else r_param
+            parity_diff = (call_market_price - put_market_price) - (S_current - K * np.exp(-r_T * T))
             parity_data.append({"Strike": K, "Parity Difference": parity_diff})
 
         for opt_type, market_price in [('call', call_market_price), ('put', put_market_price)]:
             if market_price is None: continue
-            model_price, _, _, _ = universal_binomial_pricer(S_current, K, expiration_date, r_current, vol_term_structure, model='crr', option_type=opt_type, div=div_current, historical_vol=hv_current)
+            model_price, _, _, _ = universal_binomial_pricer(S_current, K, expiration_date, r_param, vol_term_structure, model='crr', option_type=opt_type, div=div_current, historical_vol=hv_current)
             if model_price > market_price * 1.2: # Find options undervalued by at least 20%
                 undervalued_results.append({"Strike": K, "Type": opt_type.capitalize(), "Market Price": market_price, "Model Price": model_price})
     
@@ -758,6 +769,18 @@ def run_full_analysis(ticker: str, expiration_date: date, r_current: float = 0.0
         if avg_parity_diff_pct > 0.15: parity_sentiment = 'bullish'
         elif avg_parity_diff_pct < -0.15: parity_sentiment = 'bearish'
         synthesis_data['parity'] = {'sentiment': parity_sentiment, 'summary': f"Put-Call Parity shows calls are relatively {'expensive' if parity_sentiment == 'bullish' else 'cheap' if parity_sentiment == 'bearish' else 'fairly priced'} (avg deviation: {avg_parity_diff_pct:+.2f}%)."}
+        # Persist rolling metrics: P/C ratio and parity deviation
+        try:
+            pc_ratio_val = volume_oi_analysis.get('pc_ratio') if volume_oi_analysis else None
+            if pc_ratio_val is not None:
+                metrics = pd.DataFrame([
+                    {"Ticker": ticker.upper(), "Date": date.today(), "Metric": "PC_RATIO", "Value": float(pc_ratio_val)},
+                    {"Ticker": ticker.upper(), "Date": date.today(), "Metric": "PARITY_DEV_PCT", "Value": float(avg_parity_diff_pct)}
+                ])
+                mongo("rolling_metrics").frame_to_mongo(metrics)
+        except Exception as _:
+            # Best-effort persistence; do not break analysis
+            pass
     if volume_oi_analysis and not volume_oi_analysis.get("error"):
         bull_signals, bear_signals = len(volume_oi_analysis.get('uoa_calls', [])), len(volume_oi_analysis.get('uoa_puts', []))
         pc_ratio = volume_oi_analysis.get('pc_ratio')
@@ -793,6 +816,7 @@ def run_full_analysis(ticker: str, expiration_date: date, r_current: float = 0.0
         "recommended_strategy": recommended_strategy,
         "candlestick_analysis": candlestick_analysis, "volume_oi_analysis": volume_oi_analysis,
         "movement_analysis": movement_analysis, "results_df": undervalued_results,
-        "iv_surface": sabr_surface_info, "iv_residual_outliers": iv_residual_outliers
+        "iv_surface": sabr_surface_info, "iv_residual_outliers": iv_residual_outliers,
+        "rate_source": rate_source
     }
     return _sanitize_for_json(response_data)

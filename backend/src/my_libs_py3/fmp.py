@@ -126,3 +126,41 @@ class FMPClient:
         data = self.fetch_url_with_rate_limit(url)
         return pd.DataFrame(data)
 
+    def get_symbol_splits(self, ticker: str, from_date: str, to_date: str) -> pd.DataFrame:
+        """
+        Fetch historical stock split events for a symbol between two dates (inclusive).
+        """
+        url = f"{self.url_root_v3}historical-price-full/stock_split/{ticker.upper()}?from={from_date}&to={to_date}&apikey={self.api_key}"
+        data = self.fetch_url_with_rate_limit(url)
+        # FMP returns {"symbol": "...", "historical": [...]}
+        hist = data.get('historical', data if isinstance(data, list) else [])
+        return pd.DataFrame(hist)
+
+    def get_symbol_dividends(self, ticker: str, from_date: str, to_date: str) -> pd.DataFrame:
+        """
+        Fetch historical stock dividend events for a symbol between two dates (inclusive).
+        """
+        url = f"{self.url_root_v3}historical-price-full/stock_dividend/{ticker.upper()}?from={from_date}&to={to_date}&apikey={self.api_key}"
+        data = self.fetch_url_with_rate_limit(url)
+        hist = data.get('historical', data if isinstance(data, list) else [])
+        return pd.DataFrame(hist)
+
+    def get_treasury_yields(self, date: str = None, from_date: str = None, to_date: str = None) -> pd.DataFrame:
+        """
+        Fetch U.S. Treasury yield curve data from FMP.
+        - If 'date' is provided, fetch that day's yields.
+        - Else, use from/to range (defaults to recent window if not provided).
+        Returns a DataFrame with columns including: date, month1, month3, month6, year1, year2, year3,
+        year5, year7, year10, year20, year30 (as available).
+        """
+        if date:
+            url = f"{self.url_root_v4}treasury?date={date}&apikey={self.api_key}"
+        else:
+            if not from_date or not to_date:
+                # default to last 10 days if range not provided
+                to_date = (datetime.utcnow().date()).strftime('%Y-%m-%d')
+                from_date = (datetime.utcnow().date() - timedelta(days=10)).strftime('%Y-%m-%d')
+            url = f"{self.url_root_v4}treasury?from={from_date}&to={to_date}&apikey={self.api_key}"
+        data = self.fetch_url_with_rate_limit(url)
+        return pd.DataFrame(data)
+

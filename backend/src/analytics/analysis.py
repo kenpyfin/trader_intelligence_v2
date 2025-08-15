@@ -3,6 +3,7 @@ import numpy as np
 from datetime import date, timedelta
 from src.my_libs_py3.my_data import PriceDataFetcher
 from src.my_libs_py3.fmp import FMPClient
+from src.analytics.treasury_curve import build_treasury_curve
 
 # This file is a migration of the analysis logic from option_trade.py.
 # All Streamlit-specific code (st.*) has been removed.
@@ -162,7 +163,7 @@ def parse_earnings_date(earnings_str, today=date.today()):
         else: return dt_obj.replace(year=today.year)
     except (ValueError, AttributeError): return None
 
-def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05):
+def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, rate_source: str = 'etf'):
     """
     This is the core analysis function, refactored from run_option_screener in option_trade.py.
     It returns a JSON-serializable dictionary with the analysis results.
@@ -200,6 +201,13 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05):
     
     vol_term_structure = generate_forward_vol_structure(days_to_exp, key_vols_iv)
     
+    # Determine risk-free rate input for pricer
+    if rate_source == 'treasury':
+        curve = build_treasury_curve(fmp)
+        r_input = curve['rate_fn']
+    else:
+        r_input = r_current
+
     results = []
     for K in selected_strikes:
         for option_type in ['call', 'put']:
@@ -207,7 +215,7 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05):
             if market_price is None: continue
             
             model_price, _, _, _ = universal_binomial_pricer(
-                S=S_current, K=K, expiration_date=expiration_date, r_input=r_current,
+                S=S_current, K=K, expiration_date=expiration_date, r_input=r_input,
                 sigma_input=vol_term_structure, option_type=option_type, div=div_current
             )
             
@@ -225,5 +233,6 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05):
         "ticker": ticker,
         "current_price": S_current,
         "analysis_time": date.today().isoformat(),
-        "undervalued_options": results
+        "undervalued_options": results,
+        "rate_source": rate_source
     }
