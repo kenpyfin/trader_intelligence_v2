@@ -177,7 +177,7 @@ class PriceDataFetcher:
         attempt = 0
         while attempt <= max_retries:
             try:
-                self.ib.connect()
+                self.ib_client.connect(self.ib.ip_add, self.ib.port)
                 contract = Stock(ticker, 'SMART', "USD")
                 if back_day > 365:
                     years = back_day // 365 + 1
@@ -198,13 +198,12 @@ class PriceDataFetcher:
                 df["Close"] = df["close"]
                 df["TimeStamp"] = df["date"]
                 df = df.drop(columns=['close', "date"])
-                self.ib_client.cancelHistoricalData(bars)
                 attempt += 10000000
                 return df
             except Exception as e:
                 attempt += 1
                 if attempt > max_retries:
-                    self.ib.disconnect()
+                    self.ib_client.disconnect()
                     logging.info(f"Failed to fetch data for {ticker} after {max_retries} attempts. Error: {e}")
                     if self.fmp_switch:
                         logging.info("Switching to FMP")
@@ -214,7 +213,7 @@ class PriceDataFetcher:
                         df = df.drop(columns=['close', "date"])
                         return df
                 else:
-                    self.ib.disconnect()
+                    self.ib_client.disconnect()
                     if "timeout" in str(e).lower() or 'ConnectionRefused' in str(e) or "Connect call failed" in str(e):
                         logging.info(f"Error: {e}; API connection wait")
                         time.sleep(500)
@@ -286,12 +285,12 @@ class PriceDataFetcher:
 
                 except requests.exceptions.RequestException as e:
                     attempt += 1
-                    if response is not None and response.status_code == 429 and attempt <= max_retries:
+                    if 'response' in locals() and response is not None and response.status_code == 429 and attempt <= max_retries:
                         logging.warning(f"Finviz API rate limit hit for {tic}. Retrying in {retry_delay} seconds...")
                         time.sleep(retry_delay)
                     elif attempt > max_retries:
                         logging.error(f"Failed to fetch data for {tic} from Finviz after {max_retries} attempts. Error: {e}")
-                    elif response is not None and response.status_code == 400:
+                    elif 'response' in locals() and response is not None and response.status_code == 400:
                         logging.error(f"400 Error: Probably not supported ticker {tic}")
 
                         attempt = max_retries + 1
@@ -391,13 +390,13 @@ class PriceDataFetcher:
 
             except requests.exceptions.RequestException as e:
                 attempt += 1
-                if response is not None and response.status_code == 429 and attempt <= max_retries:
+                if 'response' in locals() and response is not None and response.status_code == 429 and attempt <= max_retries:
                     logging.warning(f"Finviz API rate limit hit for {tic} options. Retrying in {retry_delay} seconds...")
                     time.sleep(retry_delay)
                 elif attempt > max_retries:
                     logging.error(f"Failed to fetch option data for {tic} from Finviz after {max_retries} attempts. Error: {e}")
                     return pd.DataFrame()
-                elif response is not None and response.status_code == 400:
+                elif 'response' in locals() and response is not None and response.status_code == 400:
                     logging.error(f"Finviz API 400 Error for {tic} options: Likely invalid parameters (e.g., ticker, date format, option type). URL: {url}")
                     return pd.DataFrame() # Do not retry on 400
                 else:
@@ -483,13 +482,13 @@ class PriceDataFetcher:
             except requests.exceptions.RequestException as e_req:
                 attempt += 1
                 current_response_text = response.text if 'response' in locals() and response is not None else "No response object"
-                if response is not None and response.status_code == 429 and attempt <= max_retries:
+                if 'response' in locals() and response is not None and response.status_code == 429 and attempt <= max_retries:
                     logging.warning(f"Finviz API rate limit hit for {tic} stock details. Retrying in {retry_delay} seconds...")
                     time.sleep(retry_delay)
                 elif attempt > max_retries:
                     logging.error(f"Failed to fetch stock details for {tic} from Finviz after {max_retries} attempts. Error: {e_req}. Last response: {current_response_text[:200]}")
                     return {}
-                elif response is not None and response.status_code == 400:
+                elif 'response' in locals() and response is not None and response.status_code == 400:
                     logging.error(f"Finviz API 400 Error for {tic} stock details: Likely invalid ticker. URL: {url}. Response: {current_response_text[:200]}")
                     return {} # Do not retry on 400
                 else:
@@ -544,7 +543,7 @@ class PriceDataFetcher:
             except requests.exceptions.RequestException as e:
                 attempt += 1
                 current_response_text = response.text if 'response' in locals() and response is not None else "No response object"
-                if response is not None and response.status_code == 429 and attempt <= max_retries:
+                if 'response' in locals() and response is not None and response.status_code == 429 and attempt <= max_retries:
                     logging.warning(f"Finviz API rate limit hit for futures. Retrying in {retry_delay} seconds...")
                     time.sleep(retry_delay)
                 elif attempt > max_retries:
