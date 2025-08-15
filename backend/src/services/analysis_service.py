@@ -14,6 +14,7 @@ from src.my_libs_py3.fmp import FMPClient
 from src.my_libs_py3.TD_Order import IBTrader
 import plotly.graph_objects as go
 from src.analytics.sabr import calibrate_sabr, sabr_iv
+from src.analytics.analysis import _parse_finviz_iv_string
 
 
 async def get_option_expirations(ticker: str):
@@ -153,17 +154,6 @@ def universal_binomial_pricer(S, K, expiration_date, r_input, sigma_input, model
                 early_exercise_premium_at_t0 = intrinsic_value_t0 - continuation_value_t0
     return option_value_tree[0,0], greeks, actionable_alerts, early_exercise_premium_at_t0
 
-def _parse_finviz_iv_string(iv_input):
-    if pd.isna(iv_input): return None
-    if isinstance(iv_input, float): return iv_input
-    if isinstance(iv_input, str):
-        if iv_input.endswith('%'):
-            try: return float(iv_input.strip('%')) / 100.0
-            except ValueError: return None
-        else:
-            try: return float(iv_input)
-            except ValueError: return None
-    return None
 
 def _get_market_price_from_finviz_df(df, strike, option_type_char, current_stock_price_for_atm_fallback=None):
     if df is None or df.empty: return None
@@ -699,7 +689,8 @@ def run_full_analysis(ticker: str, expiration_date: date, r_current: float = 0.0
             grouped = iv_series.groupby('Strike')['IV'].median().reset_index()
             if len(grouped) >= 5:
                 T = days_to_exp / 365.0
-                F = S_current * np.exp((r_current - div_current) * T)
+                div_yield = div_current
+                F = S_current * np.exp((r_current - div_yield) * T)
                 Ks = grouped['Strike'].values
                 mkt_ivs = grouped['IV'].values
                 params = calibrate_sabr(F, Ks, mkt_ivs, T)
