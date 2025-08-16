@@ -10,6 +10,8 @@ from .services.macro_service import get_macro_futures_data, calculate_market_imp
 from .services import broker_service
 from .routers import portfolio
 from .my_libs_py3.my_data import PriceDataFetcher
+from .analytics.treasury_curve import build_treasury_curve
+from .my_libs_py3.fmp import FMPClient
 import numpy as np
 import math
 
@@ -99,6 +101,32 @@ def get_macro_data():
         print(traceback.format_exc())
         # Return an error payload instead of a 500 to let the frontend render a friendly message
         return {"error": f"An unexpected error occurred while fetching macro data: {e}"}
+
+@app.get("/yield-curve")
+@app.get("/api/yield-curve")
+async def get_yield_curve(source: str = "treasury", tickers: str = "SPY, QQQ, IWM"):
+    try:
+        standard = [
+            ("1M", 1/12), ("3M", 3/12), ("6M", 6/12), ("1Y", 1.0), ("2Y", 2.0),
+            ("3Y", 3.0), ("5Y", 5.0), ("7Y", 7.0), ("10Y", 10.0), ("20Y", 20.0), ("30Y", 30.0)
+        ]
+        if source.lower() == "treasury":
+            curve = build_treasury_curve(FMPClient())
+            rate_fn = curve["rate_fn"]
+            out = [{"tenor": t, "rate": float(rate_fn(T))} for t, T in standard]
+            return {"source": "treasury", "as_of": curve["as_of"], "curve": out}
+        elif source.lower() == "etf":
+            ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+            rate, logs = await calculate_market_implied_risk_free_rate(ticker_list)
+            if rate is None:
+                return {"source": "etf", "curve": [], "logs": logs, "error": "Could not compute implied rate"}
+            out = [{"tenor": t, "rate": float(rate)} for t, _ in standard]
+            return {"source": "etf", "curve": out, "logs": logs}
+        else:
+            raise HTTPException(status_code=400, detail="Invalid source. Use 'treasury' or 'etf'.")
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to build yield curve: {e}")
 
 @app.post("/calculate-risk-free-rate")
 async def get_risk_free_rate(request: RiskFreeRateRequest):
