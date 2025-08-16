@@ -64,9 +64,28 @@ def get_macro_data():
 
     try:
         data = get_macro_futures_data()
-        # If the primary service returns a usable mapping, return it directly.
+        # If the primary service returns a usable mapping, normalize numpy/pandas scalars to JSON-safe types.
         if isinstance(data, dict) and "error" not in data and len(data) > 0:
-            return data
+            def _clean_scalar(v):
+                try:
+                    if isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
+                        return None
+                    if hasattr(v, "item"):
+                        vi = v.item()
+                        if isinstance(vi, float) and (np.isnan(vi) or np.isinf(vi)):
+                            return None
+                        return vi
+                except Exception:
+                    pass
+                return v
+
+            cleaned = {}
+            for k, row in data.items():
+                if isinstance(row, dict):
+                    cleaned[k] = {kk: _clean_scalar(vv) for kk, vv in row.items()}
+                else:
+                    cleaned[k] = _clean_scalar(row)
+            return cleaned
 
         # Fallback to direct Finviz fetch
         fetcher = PriceDataFetcher()
