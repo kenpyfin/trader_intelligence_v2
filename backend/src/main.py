@@ -9,6 +9,9 @@ from .services.analysis_service import run_full_analysis, get_option_expirations
 from .services.macro_service import get_macro_futures_data, calculate_market_implied_risk_free_rate
 from .services import broker_service
 from .routers import portfolio
+from .my_libs_py3.my_data import PriceDataFetcher
+import numpy as np
+import math
 
 
 app = FastAPI(
@@ -26,15 +29,57 @@ def read_root():
 
 @app.get("/macro-data")
 def get_macro_data():
-    """Endpoint to fetch macro economic data (futures)."""
+    """Endpoint to fetch macro economic data (futures). Falls back to Finviz if the primary service fails."""
+    def _df_to_mapping(df):
+        """Convert a pandas DataFrame of futures into a dict-of-rows mapping suitable for the frontend table."""
+        if df is None or getattr(df, "empty", True):
+            return {}
+        records = df.to_dict(orient="records")
+        # Choose a stable key column if present; otherwise use row index
+        key_col = None
+        for cand in ("Ticker", "Symbol", "Name"):
+            if cand in getattr(df, "columns", []):
+                key_col = cand
+                break
+
+        def _clean_val(v):
+            try:
+                if isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
+                    return None
+                if hasattr(v, "item"):
+                    vi = v.item()
+                    if isinstance(vi, float) and (np.isnan(vi) or np.isinf(vi)):
+                        return None
+                    return vi
+            except Exception:
+                pass
+            return v
+
+        out = {}
+        for idx, row in enumerate(records):
+            key_val = row.get(key_col) if key_col else None
+            key = str(key_val) if key_val not in (None, np.nan) else str(idx)
+            out[key] = {k: _clean_val(v) for k, v in row.items()}
+        return out
+
     try:
         data = get_macro_futures_data()
-        if "error" in data:
-            raise HTTPException(status_code=500, detail=data["error"])
-        return data
+        # If the primary service returns a usable mapping, return it directly.
+        if isinstance(data, dict) and "error" not in data and len(data) > 0:
+            return data
+
+        # Fallback to direct Finviz fetch
+        fetcher = PriceDataFetcher()
+        df = fetcher.get_futures_data_finviz()
+        if df is not None and not df.empty:
+            return _df_to_mapping(df)
+
+        # Gracefully return an error payload the frontend can handle (HTTP 200)
+        return {"error": "No futures data available from Finviz. Verify API access and availability."}
     except Exception as e:
         print(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
+        # Return an error payload instead of a 500 to let the frontend render a friendly message
+        return {"error": f"An unexpected error occurred while fetching macro data: {e}"}
 
 @app.post("/calculate-risk-free-rate")
 async def get_risk_free_rate(request: RiskFreeRateRequest):
