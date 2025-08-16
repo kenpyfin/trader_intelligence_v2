@@ -147,11 +147,8 @@ class FMPClient:
 
     def get_treasury_yields(self, date: str = None, from_date: str = None, to_date: str = None) -> pd.DataFrame:
         """
-        Fetch U.S. Treasury yield curve data from FMP.
-        - If 'date' is provided, fetch that day's yields.
-        - Else, use from/to range (defaults to recent window if not provided).
-        Returns a DataFrame with columns including: date, month1, month3, month6, year1, year2, year3,
-        year5, year7, year10, year20, year30 (as available).
+        Fetch U.S. Treasury yield curve data from FMP if available.
+        If the endpoint is unavailable or errors, return an empty DataFrame gracefully.
         """
         if date:
             url = f"{self.url_root_v4}treasury?date={date}&apikey={self.api_key}"
@@ -161,6 +158,10 @@ class FMPClient:
                 to_date = (datetime.utcnow().date()).strftime('%Y-%m-%d')
                 from_date = (datetime.utcnow().date() - timedelta(days=10)).strftime('%Y-%m-%d')
             url = f"{self.url_root_v4}treasury?from={from_date}&to={to_date}&apikey={self.api_key}"
-        data = self.fetch_url_with_rate_limit(url)
-        return pd.DataFrame(data)
+        try:
+            data = self.fetch_url_with_rate_limit(url)
+            return pd.DataFrame(data)
+        except Exception:
+            # Gracefully handle missing endpoint or HTTP/rate-limit errors
+            return pd.DataFrame()
 

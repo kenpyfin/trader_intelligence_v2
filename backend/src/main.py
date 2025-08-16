@@ -112,6 +112,20 @@ async def get_yield_curve(source: str = "treasury", tickers: str = "SPY, QQQ, IW
         ]
         if source.lower() == "treasury":
             curve = build_treasury_curve(FMPClient())
+            # If FMP yields are unavailable, fall back to a flat curve using ETF-implied rate
+            if not curve.get("terms"):
+                ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+                rate, logs = await calculate_market_implied_risk_free_rate(ticker_list)
+                if rate is not None:
+                    out = [{"tenor": t, "rate": float(rate)} for t, _ in standard]
+                    return {
+                        "source": "treasury",
+                        "as_of": curve.get("as_of"),
+                        "curve": out,
+                        "logs": logs,
+                        "note": "FMP treasury yields unavailable; using ETF-implied flat curve."
+                    }
+                # As a last resort, keep the internal default rate function (likely 4.5%)
             rate_fn = curve["rate_fn"]
             out = [{"tenor": t, "rate": float(rate_fn(T))} for t, T in standard]
             return {"source": "treasury", "as_of": curve["as_of"], "curve": out}
