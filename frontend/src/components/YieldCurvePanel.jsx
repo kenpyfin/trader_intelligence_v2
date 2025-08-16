@@ -143,7 +143,7 @@ export const YieldCurvePanel = ({ defaultSource = 'treasury', defaultTickers = '
 
   return (
     <div style={{ border: '1px solid #ddd', borderRadius: 8, padding: 16, marginBottom: 16 }}>
-      <h2 style={{ marginTop: 0, marginBottom: 12 }}>Yield Curve & Risk-Free Source</h2>
+      <h2 style={{ marginTop: 0, marginBottom: 12 }}>Yield Curve &amp; Risk-Free Source</h2>
 
       <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
         <div>
