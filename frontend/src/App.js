@@ -8,6 +8,7 @@ import {
 
 import AnalysisPage from './pages/Analysis';
 import PortfolioPage from './pages/Portfolio';
+import YieldCurvePage from './pages/YieldCurve';
 
 const App = () => {
   const navStyle = ({ isActive }) => ({
@@ -30,6 +31,9 @@ const App = () => {
             <NavLink to="/portfolio" style={navStyle}>
               Portfolio
             </NavLink>
+            <NavLink to="/rates" style={navStyle}>
+              Rates
+            </NavLink>
           </nav>
         </header>
 
@@ -37,6 +41,7 @@ const App = () => {
           <Routes>
             <Route path="/" element={<AnalysisPage />} />
             <Route path="/portfolio" element={<PortfolioPage />} />
+            <Route path="/rates" element={<YieldCurvePage />} />
           </Routes>
         </main>
       </div>
