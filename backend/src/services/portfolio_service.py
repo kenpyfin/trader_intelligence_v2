@@ -27,6 +27,21 @@ def _sanitize_for_json(item):
         return None
     return item
 
+def _coalesce_column(df, target_name, candidates, default=0):
+    """
+    Ensures a numeric column named `target_name` exists by taking the first present candidate column,
+    converting it to numeric, and filling missing values. If none of the candidates exist, creates
+    the column with the provided default.
+    """
+    for name in candidates:
+        if name in df.columns:
+            df[target_name] = pd.to_numeric(df[name], errors='coerce')
+            break
+    if target_name not in df.columns:
+        df[target_name] = default
+    df[target_name] = df[target_name].fillna(default)
+    return df
+
 async def get_grouped_open_positions():
     """
     Fetches all open positions from the broker, calculates portfolio summary metrics,
@@ -41,11 +56,10 @@ async def get_grouped_open_positions():
             "positions": {"options": {}, "stocks": [], "others": []}
         }
 
-    # Ensure required columns exist before trying to sum them.
-    if 'marketValue' not in positions_df.columns:
-        positions_df['marketValue'] = 0
-    if 'unrealizedPNL' not in positions_df.columns:
-        positions_df['unrealizedPNL'] = 0
+    # Normalize numeric columns from various possible source field names.
+    positions_df = positions_df.copy()
+    _coalesce_column(positions_df, 'marketValue', ['marketValue', 'market_value', 'marketvalue'], default=0)
+    _coalesce_column(positions_df, 'unrealizedPNL', ['unrealizedPNL', 'unrealizedPnl', 'unrealizedPnL', 'unrealized_pnl', 'unrealized'], default=0)
         
     # Calculate portfolio-wide summary
     total_market_value = positions_df['marketValue'].sum()
