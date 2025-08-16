@@ -12,6 +12,7 @@ from .routers import portfolio
 from .my_libs_py3.my_data import PriceDataFetcher
 from .analytics.treasury_curve import build_treasury_curve
 from .my_libs_py3.fmp import FMPClient
+from .analytics.methodologies.gpt_verdict import generate_gpt_verdict
 import numpy as np
 import math
 
@@ -153,6 +154,70 @@ async def get_risk_free_rate(request: RiskFreeRateRequest):
         return {"risk_free_rate": rate, "logs": logs}
     except Exception as e:
         print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
+
+@app.post("/analysis/stock-gpt")
+async def analyze_stock_with_gpt(request: AnalysisRequest):
+    """
+    Alternative methodology: run the standard sub-analyses, then ask an LLM (gpt-5) to produce the final verdict
+    and enhanced conclusion, including a brief external search if available.
+    """
+    from datetime import datetime
+    try:
+        # Parse expiration date
+        try:
+            expiration_date = datetime.strptime(request.expiration_date, '%Y%m%d').date()
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="Invalid expiration_date format. Expected 'YYYYMMDD'.")
+
+        # Reuse the same core analysis pipeline
+        base_result = await asyncio.to_thread(
+            run_full_analysis,
+            ticker=request.ticker.upper(),
+            expiration_date=expiration_date,
+            r_current=request.risk_free_rate
+        )
+
+        if base_result.get("status") != "success":
+            error_message = base_result.get("message", "Analysis failed for the selected date.")
+            raise HTTPException(status_code=400, detail=error_message)
+
+        # Ask AI for a final verdict using the sub-analyses
+        ai = generate_gpt_verdict(request.ticker.upper(), base_result)
+
+        # Merge AI verdict into the response while retaining the original model-based content
+        final_bias = ai.get("final_bias", base_result.get("final_bias", "Neutral"))
+
+        ai_html = ai.get("summary_html") or "<h5>AI Verdict</h5><p>No summary provided.</p>"
+        rationale = ai.get("rationale", "")
+        ideas = ai.get("actionable_ideas", [])
+        risks = ai.get("risk_factors", [])
+        sources = ai.get("sources", [])
+
+        enhanced_html = (
+            f"{ai_html}"
+            f"<h5>AI Rationale</h5><p>{rationale}</p>"
+            f"{'<h5>Actionable Ideas</h5><ul>' + ''.join(f'<li>{x}</li>' for x in ideas) + '</ul>' if ideas else ''}"
+            f"{'<h5>Key Risks</h5><ul>' + ''.join(f'<li>{x}</li>' for x in risks) + '</ul>' if risks else ''}"
+            f"{'<h5>Sources</h5><ul>' + ''.join(f'<li>{x}</li>' for x in sources) + '</ul>' if sources else ''}"
+            f"<hr/><h5>Model-Based Summary</h5>{base_result.get('final_conclusion_html', '')}"
+        )
+
+        # Construct final payload
+        result = dict(base_result)
+        result["final_bias"] = final_bias
+        result["final_conclusion_html"] = enhanced_html
+        result["ai_meta"] = {
+            "search_performed": bool(ai.get("search_performed", False)),
+            "sources": sources,
+        }
+        result['dte'] = (expiration_date - date.today()).days
+
+        return [result]
+    except Exception as e:
+        print(traceback.format_exc())
+        if isinstance(e, HTTPException):
+            raise e
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
 
 @app.post("/orders/strategy")
