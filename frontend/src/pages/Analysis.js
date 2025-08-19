@@ -408,6 +408,10 @@ const AnalysisPage = () => {
 
   const handleAnalyze = async (e) => {
     e.preventDefault();
+    if (analysisMethod === 'gpt-verdict') {
+      setError('GPT Verdict methodology is not yet enabled in this build. Please select "Holistic Market Edge" for now.');
+      return;
+    }
     if (!selectedExpiration) {
       setError('Please fetch and select an expiration date.');
       return;
@@ -454,6 +458,7 @@ const AnalysisPage = () => {
                 <label>Analysis Methodology:</label><br/>
                 <select value={analysisMethod} onChange={e => setAnalysisMethod(e.target.value)} style={{ padding: '4px', height: '29px' }}>
                     <option value="holistic-market-edge">Holistic Market Edge</option>
+                    <option value="gpt-verdict">GPT Verdict</option>
                 </select>
               </div>
 

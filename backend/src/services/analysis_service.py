@@ -625,7 +625,7 @@ def _sanitize_for_json(item):
         return None
     return item
 
-def run_full_analysis(ticker: str, expiration_date: date, r_current: float = 0.045, rate_source: str = 'etf'):
+def run_full_analysis(ticker: str, expiration_date: date, r_current: float = 0.045, rate_source: str = 'etf', methodology: str = 'holistic-market-edge'):
     """
     Performs all calculations for the option screener, fully implementing Key Feature 1.
     """
@@ -817,6 +817,6 @@ def run_full_analysis(ticker: str, expiration_date: date, r_current: float = 0.0
         "candlestick_analysis": candlestick_analysis, "volume_oi_analysis": volume_oi_analysis,
         "movement_analysis": movement_analysis, "results_df": undervalued_results,
         "iv_surface": sabr_surface_info, "iv_residual_outliers": iv_residual_outliers,
-        "rate_source": rate_source
+        "rate_source": rate_source, "methodology": methodology
     }
     return _sanitize_for_json(response_data)
