@@ -359,7 +359,7 @@ const MethodologyExplanation = ({ methodology }) => {
         <li><strong>Price Trend &amp; Candlesticks:</strong> Establishes the market&apos;s primary and secondary trends using moving averages and identifies recent, psychologically significant candlestick patterns for short-term sentiment.</li>
         <li><strong>Sentiment Analysis:</strong> Gauges market sentiment by analyzing put/call ratios, unusual options activity (UOA), and significant open interest levels (support/resistance walls).</li>
         <li><strong>Volatility Analysis:</strong> Compares implied volatility (IV) to historical volatility (HV) to determine if options are &quot;cheap&quot; or &quot;expensive.&quot; It also checks for volatility compression, which often precedes large price moves.</li>
-        <li><strong>Catalyst Events:</strong> Checks for upcoming earnings reports before the option expiration, as these are significant drivers of volatility and price movement.</li>
+        <li><strong>Catalyst Events:</strong> Checks for upcoming earnings reports before the option&apos;s expiration date, as these are significant drivers of volatility and price movement.</li>
         <li><strong>Quantitative Valuation:</strong> Uses a binomial pricing model to calculate a theoretical option price, which is then compared to the market price to find potentially undervalued opportunities.</li>
       </ol>
       <p>
