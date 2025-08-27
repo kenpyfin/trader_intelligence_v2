@@ -408,10 +408,6 @@ const AnalysisPage = () => {
 
   const handleAnalyze = async (e) => {
     e.preventDefault();
-    if (analysisMethod === 'gpt-verdict') {
-      setError('GPT Verdict methodology is not yet enabled in this build. Please select "Holistic Market Edge" for now.');
-      return;
-    }
     if (!selectedExpiration) {
       setError('Please fetch and select an expiration date.');
       return;
@@ -424,6 +420,7 @@ const AnalysisPage = () => {
         ticker: ticker,
         expiration_date: selectedExpiration, // Send as YYYYMMDD
         risk_free_rate: riskFreeRate,
+        analysis_method: analysisMethod,
       });
       const result = response.data;
       // The ResultsDisplay component expects an array. If the API returns a single object,
