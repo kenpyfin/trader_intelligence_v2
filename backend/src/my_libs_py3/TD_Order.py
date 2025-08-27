@@ -83,6 +83,7 @@ class IBTrader:
             contract = Forex(symbol)
             await self.client.qualifyContractsAsync(contract)
             trade = self.client.placeOrder(contract, order)
+            await asyncio.sleep(1)  # Allow ib_insync to process and send the order
             return trade
         except Exception as e:
             raise Exception(e)
@@ -94,6 +95,7 @@ class IBTrader:
             contract = Stock(symbol, "SMART", "USD")
             await self.client.qualifyContractsAsync(contract)
             trade = self.client.placeOrder(contract, order)
+            await asyncio.sleep(1)  # Allow ib_insync to process and send the order
             return trade
         except Exception as e:
             raise Exception(e)
@@ -106,6 +108,7 @@ class IBTrader:
             contract = Stock(symbol, "SMART", "USD")
             await self.client.qualifyContractsAsync(contract)
             trade = self.client.placeOrder(contract, order)
+            await asyncio.sleep(1)  # Allow ib_insync to process and send the order
             return trade
         except Exception as e:
             raise Exception(f"Error placing limit order for {symbol}: {str(e)}")
@@ -143,6 +146,7 @@ class IBTrader:
             await self.client.qualifyContractsAsync(contract)
             
             trade = self.client.placeOrder(contract, order)
+            await asyncio.sleep(1)  # Allow ib_insync to process and send the order
             return trade
         except Exception as e:
             raise Exception(f"Error placing option order for {symbol} {expiry_date} K={strike} {right}: {str(e)}")
@@ -216,6 +220,7 @@ class IBTrader:
 
             print(f"DEBUG: Placing order: {order}")
             trade = self.client.placeOrder(contract, order)
+            await asyncio.sleep(1)  # Allow ib_insync to process and send the order
             print(f"DEBUG: Order placed successfully. Trade: {trade}")
     
             return trade
