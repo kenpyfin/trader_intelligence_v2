@@ -424,18 +424,91 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
             if market_price is None: continue
             model_price, _, _, _ = universal_binomial_pricer(S=S_current, K=K, expiration_date=expiration_date, r_input=r_input, sigma_input=vol_term_structure, option_type=option_type, div=div_current)
             if model_price > market_price:
-                results.append({"Strike": K, "Type": option_type.capitalize(), "Market Price": market_price, "Model Price": model_price})
+                diff = model_price - market_price
+                diff_pct = (diff / market_price) * 100 if market_price > 0 else float('inf')
+                results.append({
+                    "Strike": K, "Type": option_type.capitalize(), "Market Price": market_price,
+                    "Model Price": model_price, "Undervalued By ($)": diff, "Undervalued By (%)": diff_pct
+                })
 
     synthesis_data = {}
-    spot_iv = key_vols_iv[0][1] if key_vols_iv else None
+    iv_available = bool(key_vols_iv)
+    spot_iv = key_vols_iv[0][1] if iv_available and key_vols_iv[0][0] == 0 else (key_vols_iv[0][1] if iv_available else None)
     iv_high, iv_low = False, False
-    if key_vols_iv and hv_current:
+    if iv_available and spot_iv and hv_current:
         if spot_iv > hv_current * 1.2: iv_high = True
         elif spot_iv < hv_current * 0.8: iv_low = True
     
-    # This section is a simplified port from option_trade.py's synthesis logic
-    if candlestick_analysis and "context" in candlestick_analysis:
-        synthesis_data['trend'] = {'sentiment': 'bullish' if candlestick_analysis['context']['primary_trend'] == 'Uptrend' else 'bearish', 'summary': f"Primary trend is {candlestick_analysis['context']['primary_trend']}"}
+    if candlestick_analysis and "context" in candlestick_analysis and "error" not in candlestick_analysis:
+        context = candlestick_analysis["context"]
+        primary_trend = context.get('primary_trend', 'Undetermined')
+        secondary_trend = context.get('secondary_trend', 'Undetermined')
+        trend_sentiment = 'neutral'
+        if primary_trend == "Uptrend":
+            if secondary_trend == "Uptrend": trend_sentiment = 'bullish'
+            else: trend_sentiment = 'neutral'
+        elif primary_trend == "Downtrend":
+            if secondary_trend == "Downtrend": trend_sentiment = 'bearish'
+            else: trend_sentiment = 'neutral'
+        synthesis_data['trend'] = {'sentiment': trend_sentiment, 'weight': 1.5, 'summary': f"The primary trend is **{primary_trend}** and the secondary trend is **{secondary_trend}**."}
+        patterns = candlestick_analysis.get("patterns", [])
+        if patterns:
+            bullish_patterns = [p for p in patterns if "Bullish" in p['name']]
+            bearish_patterns = [p for p in patterns if "Bearish" in p['name']]
+            candlestick_sentiment = 'neutral'
+            if bullish_patterns and not bearish_patterns: candlestick_sentiment = 'bullish'
+            elif bearish_patterns and not bullish_patterns: candlestick_sentiment = 'bearish'
+            strongest_pattern = sorted(patterns, key=lambda p: {"Strong": 0, "Moderate": 1, "Weak": 2, "Neutral": 3}.get(p.get('strength', 'Neutral'), 99))[0]
+            synthesis_data['candlestick'] = {'sentiment': candlestick_sentiment, 'summary': f"A **'{strongest_pattern['name']}'** pattern was identified with **{strongest_pattern['strength']}** strength."}
+        else:
+            synthesis_data['candlestick'] = { 'sentiment': 'neutral', 'summary': "No significant candlestick patterns were found." }
+    if parity_data:
+        parity_df = pd.DataFrame(parity_data)
+        parity_df['Parity Diff (%)'] = (parity_df['Parity Difference'] / S_current) * 100
+        avg_parity_diff_pct = parity_df['Parity Diff (%)'].mean()
+        parity_sentiment, parity_summary = 'neutral', "Put and call prices appear fairly valued against each other."
+        if avg_parity_diff_pct > 0.15:
+            parity_sentiment, parity_summary = 'bullish', f"Calls are relatively expensive to puts (avg dev: {avg_parity_diff_pct:+.2f}%), implying **bullish** market sentiment."
+        elif avg_parity_diff_pct < -0.15:
+            parity_sentiment, parity_summary = 'bearish', f"Puts are relatively expensive to calls (avg dev: {avg_parity_diff_pct:+.2f}%), implying **bearish** market sentiment."
+        synthesis_data['parity'] = {'sentiment': parity_sentiment, 'summary': parity_summary, 'weight': 0.5}
+    if volume_oi_analysis and not volume_oi_analysis.get("error"):
+        pc_ratio, uoa_calls, uoa_puts = volume_oi_analysis.get('pc_ratio'), volume_oi_analysis.get('uoa_calls', []), volume_oi_analysis.get('uoa_puts', [])
+        bull_signals, bear_signals, summary_parts = 0, 0, []
+        if pc_ratio is not None:
+            if pc_ratio < 0.7: bull_signals += 1; summary_parts.append(f"a low P/C ratio of {pc_ratio:.2f} (bullish)")
+            elif pc_ratio > 1.0: bear_signals += 1; summary_parts.append(f"a high P/C ratio of {pc_ratio:.2f} (bearish)")
+            else: summary_parts.append(f"a neutral P/C ratio of {pc_ratio:.2f}")
+        if uoa_calls: bull_signals += 1.5; summary_parts.append("unusual buying in OTM calls")
+        if uoa_puts: bear_signals += 1.5; summary_parts.append("unusual buying in OTM puts")
+        put_wall, call_wall = volume_oi_analysis.get('oi_put_wall'), volume_oi_analysis.get('oi_call_wall')
+        if put_wall: summary_parts.append(f"a significant Put Wall at K ${put_wall['Strike']:.2f} (potential support)")
+        if call_wall: summary_parts.append(f"a significant Call Wall at K ${call_wall['Strike']:.2f} (potential resistance)")
+        vol_sentiment = 'neutral'
+        if bull_signals > bear_signals: vol_sentiment = 'bullish'
+        elif bear_signals > bull_signals: vol_sentiment = 'bearish'
+        vol_summary = "Volume and OI signals are neutral." if not summary_parts else "Key signals include: " + ", ".join(summary_parts) + "."
+        synthesis_data['volume_oi'] = {'sentiment': vol_sentiment, 'summary': vol_summary}
+    iv_summary = "IV is in line with HV."
+    if iv_high: iv_summary = "IV is **high** relative to HV, suggesting option premiums are expensive. This favors premium-selling (credit) strategies."
+    elif iv_low: iv_summary = "IV is **low** relative to HV, suggesting option premiums are cheap. This favors premium-buying (debit) strategies."
+    synthesis_data['iv_hv'] = {'sentiment': 'high_vol' if iv_high else ('low_vol' if iv_low else 'neutral_vol'), 'summary': iv_summary}
+    if movement_analysis_results:
+        movement_summary_parts = []
+        if 'expected_move_pct' in movement_analysis_results: movement_summary_parts.append(f"The market implies a **{movement_analysis_results['expected_move_pct']:.2f}%** move by expiration.")
+        vol_comp_text = movement_analysis_results.get('vol_compression_text')
+        if vol_comp_text and "compression detected" in vol_comp_text: movement_summary_parts.append(vol_comp_text)
+        if movement_summary_parts: synthesis_data['movement'] = {'sentiment': 'event', 'summary': ' '.join(movement_summary_parts)}
+    if movement_analysis_results.get('earnings_note'): synthesis_data['earnings'] = {'sentiment': 'earnings_event', 'summary': movement_analysis_results['earnings_note']}
+    
+    results_df = pd.DataFrame(results).sort_values("Undervalued By (%)", ascending=False) if results else None
+    if results_df is not None and not results_df.empty:
+        top_result = results_df.iloc[0]
+        undervalued_sentiment = 'bullish' if top_result['Type'] == 'Call' else 'bearish'
+        undervalued_summary = f"The quantitative model's top pick is an undervalued **{top_result['Type']}** at K ${top_result['Strike']:.2f}, suggesting a **{undervalued_sentiment}** bias."
+        synthesis_data['undervalued'] = {'sentiment': undervalued_sentiment, 'summary': undervalued_summary}
+    else:
+        synthesis_data['undervalued'] = {'sentiment': 'neutral', 'summary': 'The model found no clearly undervalued options.'}
 
     final_conclusion_html, final_bias = generate_holistic_conclusion(synthesis_data)
 
@@ -444,7 +517,7 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
         "synthesis_data": synthesis_data,
         "final_conclusion_html": final_conclusion_html, "final_bias": final_bias, "iv_high": iv_high,
         "iv_low": iv_low, "candlestick_analysis": candlestick_analysis, "volume_oi_analysis": volume_oi_analysis,
-        "movement_analysis_results": movement_analysis_results, "results_df": results
+        "movement_analysis_results": movement_analysis_results, "results_df": results_df
     }
 
     if 'gpt-verdict' in analysis_method:
@@ -453,5 +526,11 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
         analysis_result_package['final_bias'] = gpt_verdict.get('final_bias', 'Neutral')
         analysis_result_package['final_conclusion_html'] = gpt_verdict.get('summary_html', 'Failed to get AI summary.')
         analysis_result_package['gpt_verdict'] = gpt_verdict
+
+    # Serialize DataFrame for API response after all internal processing is done
+    if analysis_result_package.get('results_df') is not None:
+        analysis_result_package['results_df'] = analysis_result_package['results_df'].to_dict('records')
+    else:
+        analysis_result_package['results_df'] = []
 
     return analysis_result_package
