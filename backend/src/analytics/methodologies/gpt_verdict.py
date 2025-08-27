@@ -69,7 +69,7 @@ def _sanitize_for_json(obj: Any, max_list_len: int = 200) -> Any:
     return str(obj)
 
 
-def _build_messages(ticker: str, analysis_payload: Dict[str, Any]) -> Dict[str, Any]:
+def _build_messages(ticker: str, analysis_payload: Dict[str, Any], use_web_search: bool = False) -> Dict[str, Any]:
     """
     Build system/user messages for the chat completion API.
     We instruct the model to return strict JSON so we can parse it reliably.
@@ -78,8 +78,20 @@ def _build_messages(ticker: str, analysis_payload: Dict[str, Any]) -> Dict[str, 
         "You are a senior options strategist and equity analyst. "
         "Given structured sub-analyses (trend, candlesticks, parity, volume/oi, iv/hv, movement, undervalued table), "
         "produce a decisive trading verdict for the underlying stock's option positioning. "
-        "When possible, perform a quick web search to enrich context (recent catalysts, earnings, regulatory news). "
-        "If web search is not available in your current toolset, explicitly state that and proceed with your best judgment. "
+    )
+
+    if use_web_search:
+        system += (
+            "You MUST perform a web search to find recent catalysts, earnings reports, regulatory news, and overall market sentiment for this stock. "
+            "Incorporate these findings directly into your rationale and summary. "
+        )
+    else:
+        system += (
+            "When possible, perform a quick web search to enrich context (recent catalysts, earnings, regulatory news). "
+            "If web search is not available in your current toolset, explicitly state that and proceed with your best judgment. "
+        )
+
+    system += (
         "Return STRICT JSON with keys: "
         "{"
         "\"final_bias\": one of [\"Bullish\",\"Slightly Bullish\",\"Neutral\",\"Slightly Bearish\",\"Bearish\"], "
@@ -142,7 +154,7 @@ def _openai_chat_completion(messages, model: str = "gpt-5", temperature: float =
         }
 
 
-def generate_gpt_verdict(ticker: str, analysis_result: Dict[str, Any]) -> Dict[str, Any]:
+def generate_gpt_verdict(ticker: str, analysis_result: Dict[str, Any], model: str = "gpt-5", use_web_search: bool = False) -> Dict[str, Any]:
     """
     Compose a prompt from the existing sub-analyses and call the LLM to obtain a final verdict.
     Returns a dict with keys:
@@ -170,10 +182,10 @@ def generate_gpt_verdict(ticker: str, analysis_result: Dict[str, Any]) -> Dict[s
         "final_bias"
     ]
     payload = {k: _sanitize_for_json(analysis_result.get(k)) for k in keys_of_interest if k in analysis_result}
-    messages = _build_messages(ticker, payload)
+    messages = _build_messages(ticker, payload, use_web_search=use_web_search)
 
     try:
-        ai = _openai_chat_completion(messages)
+        ai = _openai_chat_completion(messages, model=model)
         return ai
     except Exception as e:
         # Graceful fallback: return neutral verdict with error note
