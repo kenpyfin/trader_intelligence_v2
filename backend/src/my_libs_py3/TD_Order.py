@@ -59,9 +59,9 @@ class IBTrader:
     async def get_available_fund(self):
         try:
             await self.connect()
-            # accountSummary is a synchronous call that returns cached data after connection.
-            # To get live data, one would need to subscribe. For this purpose, it's fine.
-            return float(list(filter(lambda x: x.tag == "AvailableFunds", self.client.accountSummary()))[0].value)
+            # Use accountSummaryAsync to avoid blocking the event loop
+            summary = await self.client.accountSummaryAsync()
+            return float(list(filter(lambda x: x.tag == "AvailableFunds", summary))[0].value)
         except Exception as e:
             raise Exception(e)
 
@@ -69,14 +69,15 @@ class IBTrader:
         """Fetches the account summary."""
         try:
             await self.connect()
-            return self.client.accountSummary()
+            return await self.client.accountSummaryAsync()
         except Exception as e:
             raise Exception(f"Error fetching account summary: {e}")
 
     async def get_position_by_symbol(self, symbol) -> float:
         try:
             await self.connect()
-            position_list = list(filter(lambda x: x.contract.symbol == symbol, self.client.positions()))
+            positions = await self.client.positionsAsync()
+            position_list = list(filter(lambda x: x.contract.symbol == symbol, positions))
             if len(position_list) == 0:
                 return 0
             else:
@@ -252,14 +253,15 @@ class IBTrader:
     async def open_positions_symbol(self):
         try:
             await self.connect()
-            return [x.contract.symbol for x in self.client.positions()]
+            positions = await self.client.positionsAsync()
+            return [x.contract.symbol for x in positions]
         except Exception as e:
             raise Exception(e)
 
     async def open_positions(self):
         try:
             await self.connect()
-            data = self.client.positions()
+            data = await self.client.positionsAsync()
             unpacked_data = []
 
             for pos in data:
