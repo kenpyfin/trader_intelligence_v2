@@ -225,6 +225,43 @@ const StrategyOrder = ({ strategy, ticker, expirationDate }) => {
     );
 };
 
+const GptVerdictCard = ({ verdict }) => {
+  if (!verdict) return null;
+
+  return (
+    <AnalysisCard title="GPT-Powered Verdict & Rationale">
+      {verdict.rationale && <p><strong>Rationale:</strong> {verdict.rationale}</p>}
+      
+      {verdict.actionable_ideas && verdict.actionable_ideas.length > 0 && (
+        <>
+          <h5>Actionable Ideas</h5>
+          <ul>
+            {verdict.actionable_ideas.map((idea, i) => <li key={i}>{idea}</li>)}
+          </ul>
+        </>
+      )}
+
+      {verdict.risk_factors && verdict.risk_factors.length > 0 && (
+        <>
+          <h5>Risk Factors</h5>
+          <ul>
+            {verdict.risk_factors.map((risk, i) => <li key={i}>{risk}</li>)}
+          </ul>
+        </>
+      )}
+
+      {verdict.search_performed && verdict.sources && verdict.sources.length > 0 && (
+        <>
+          <h5>Sources Consulted</h5>
+          <ul>
+            {verdict.sources.map((source, i) => <li key={i}><a href={source} target="_blank" rel="noopener noreferrer">{source}</a></li>)}
+          </ul>
+        </>
+      )}
+    </AnalysisCard>
+  );
+};
+
 const AnalysisDetails = ({ data }) => {
   const finalBias = data.final_bias || '';
   const biasColor = finalBias.includes('Bullish') ? 'green' : finalBias.includes('Bearish') ? 'red' : 'orange';
@@ -251,6 +288,8 @@ const AnalysisDetails = ({ data }) => {
         <h4 style={{ color: biasColor }}>Final Bias: {finalBias}</h4>
         <div dangerouslySetInnerHTML={{ __html: data.final_conclusion_html }} />
       </AnalysisCard>
+
+      {data.gpt_verdict && <GptVerdictCard verdict={data.gpt_verdict} />}
       
       <StrategyOrder strategy={data.recommended_strategy} ticker={data.ticker} expirationDate={data.expiration_date} />
       
@@ -342,6 +381,19 @@ const ResultsDisplay = ({ analysisResult }) => {
 };
 
 const MethodologyExplanation = ({ methodology }) => {
+  if (methodology === 'gpt-verdict') {
+    return (
+      <AnalysisCard title="About: GPT Verdict Analysis">
+        <p>
+          The <strong>GPT Verdict</strong> methodology leverages a powerful Large Language Model (LLM) to synthesize the output of all standard sub-analyses.
+        </p>
+        <p>
+          Instead of relying on a rules-based scoring system, this approach provides the AI with the complete, structured data from the Trend, Sentiment, Volatility, and Quantitative analyses. The model then acts as an expert analyst, weighing the evidence, identifying nuanced connections, and generating a final verdict that includes a detailed rationale, actionable ideas, and key risk factors. This provides a qualitative, expert-level second opinion on the quantitative data.
+        </p>
+      </AnalysisCard>
+    );
+  }
+
   if (methodology !== 'holistic-market-edge') {
     return null;
   }
