@@ -16,6 +16,7 @@ import plotly.graph_objects as go
 from src.analytics.sabr import calibrate_sabr, sabr_iv
 from src.analytics.analysis import _parse_finviz_iv_string
 from src.analytics.treasury_curve import build_treasury_curve
+from src.analytics.methodologies.gpt_verdict import generate_gpt_verdict
 from src.my_libs_py3.db import mongo
 
 
@@ -819,4 +820,25 @@ def run_full_analysis(ticker: str, expiration_date: date, r_current: float = 0.0
         "iv_surface": sabr_surface_info, "iv_residual_outliers": iv_residual_outliers,
         "rate_source": rate_source, "methodology": methodology
     }
+    
+    # --- GPT Verdict (if requested) ---
+    if methodology in ['gpt-verdict', 'gpt-5-web-verdict']:
+        use_web_search = 'web' in methodology
+        # NOTE: Using "gpt-5" as the model for both GPT methodologies.
+        # This can be changed if a different model is desired for the non-web version.
+        model_to_use = "gpt-5"
+
+        # Call the GPT service with the standard analysis results as context.
+        gpt_verdict = generate_gpt_verdict(
+            ticker=ticker,
+            analysis_result=response_data,
+            model=model_to_use,
+            use_web_search=use_web_search
+        )
+        response_data['gpt_verdict'] = gpt_verdict
+        
+        # Overwrite the rule-based conclusion with the AI's verdict for consistency.
+        response_data['final_bias'] = gpt_verdict.get('final_bias', response_data['final_bias'])
+        response_data['final_conclusion_html'] = gpt_verdict.get('summary_html', response_data['final_conclusion_html'])
+
     return _sanitize_for_json(response_data)
