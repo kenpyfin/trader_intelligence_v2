@@ -173,13 +173,15 @@ def generate_gpt_verdict(ticker: str, analysis_result: Dict[str, Any], model: st
         "volume_oi_analysis",
         "movement_analysis_results",
         "results_df",
-        "market_data",
-        "position_status",
-        "risk_exposure",
         "iv_high",
         "iv_low",
-        "final_conclusion_html",
-        "final_bias"
+        # The following keys are intentionally excluded to force the AI to generate its own
+        # verdict from raw data instead of repeating a pre-computed conclusion.
+        # "final_conclusion_html",
+        # "final_bias",
+        # "market_data",
+        # "position_status",
+        # "risk_exposure"
     ]
     payload = {k: _sanitize_for_json(analysis_result.get(k)) for k in keys_of_interest if k in analysis_result}
     messages = _build_messages(ticker, payload, use_web_search=use_web_search)
