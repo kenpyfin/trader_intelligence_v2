@@ -126,8 +126,6 @@ const PortfolioPage = () => {
   const PortfolioSummary = ({ summary }) => {
     if (!summary) return null;
 
-    const pnlColor = summary.unrealized_pnl >= 0 ? 'green' : 'red';
-
     return (
         <div style={{ border: '1px solid #ddd', borderRadius: '8px', padding: '20px', marginBottom: '24px', background: '#f8f9fa' }}>
             <h2 style={{ marginTop: 0, marginBottom: '16px' }}>Portfolio Overview</h2>
@@ -135,10 +133,6 @@ const PortfolioPage = () => {
                 <div>
                     <span style={{ color: '#666', marginRight: '10px' }}>Total Market Value:</span>
                     <strong>${formatCurrency(summary.market_value)}</strong>
-                </div>
-                <div>
-                    <span style={{ color: '#666', marginRight: '10px' }}>Unrealized P&L:</span>
-                    <strong style={{ color: pnlColor }}>${formatCurrency(summary.unrealized_pnl)}</strong>
                 </div>
             </div>
         </div>
