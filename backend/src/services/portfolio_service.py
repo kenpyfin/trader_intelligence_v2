@@ -49,6 +49,7 @@ async def get_grouped_open_positions():
     """
     trader = IBTrader()
     positions_df = await trader.open_positions()
+    account_summary_list = await trader.get_account_summary()
 
     if positions_df.empty:
         return {
@@ -61,13 +62,26 @@ async def get_grouped_open_positions():
     _coalesce_column(positions_df, 'marketValue', ['marketValue', 'market_value', 'marketvalue'], default=0)
     _coalesce_column(positions_df, 'unrealizedPNL', ['unrealizedPNL', 'unrealizedPnl', 'unrealizedPnL', 'unrealized_pnl', 'unrealized'], default=0)
         
-    # Calculate portfolio-wide summary
-    total_market_value = positions_df['marketValue'].sum()
-    total_unrealized_pnl = positions_df['unrealizedPNL'].sum()
+    # Calculate portfolio-wide summary from account summary
+    market_value = 0.0
+    unrealized_pnl = 0.0
+    # Find the summary values for USD currency from the 'All' aggregate account
+    for val in account_summary_list:
+        if val.account == 'All' and val.currency == 'USD':
+            if val.tag == 'NetLiquidationByCurrency':
+                try:
+                    market_value = float(val.value)
+                except (ValueError, TypeError):
+                    pass # Keep default 0.0 if value is not a valid float
+            elif val.tag == 'UnrealizedPnL':
+                try:
+                    unrealized_pnl = float(val.value)
+                except (ValueError, TypeError):
+                    pass # Keep default 0.0 if value is not a valid float
 
     portfolio_summary = {
-        "market_value": total_market_value,
-        "unrealized_pnl": total_unrealized_pnl
+        "market_value": market_value,
+        "unrealized_pnl": unrealized_pnl
     }
     
     # Group individual positions

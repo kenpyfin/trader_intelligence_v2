@@ -65,6 +65,14 @@ class IBTrader:
         except Exception as e:
             raise Exception(e)
 
+    async def get_account_summary(self):
+        """Fetches the account summary."""
+        try:
+            await self.connect()
+            return self.client.accountSummary()
+        except Exception as e:
+            raise Exception(f"Error fetching account summary: {e}")
+
     async def get_position_by_symbol(self, symbol) -> float:
         try:
             await self.connect()

@@ -235,18 +235,15 @@ const PortfolioPage = () => {
               <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Symbol</th>
               <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Quantity</th>
               <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Avg Cost/Share</th>
-              <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Unrealized P/L</th>
             </tr>
           </thead>
           <tbody>
             {stocks.map((stock, index) => {
-              const pnlColor = stock.unrealizedPNL >= 0 ? 'green' : 'red';
               return (
                 <tr key={index}>
                   <td style={{ padding: '8px', border: '1px solid #ddd', fontWeight: 'bold' }}>{stock.symbol}</td>
                   <td style={{ padding: '8px', border: '1px solid #ddd' }}>{stock.position}</td>
                   <td style={{ padding: '8px', border: '1px solid #ddd' }}>${formatCurrency(stock.position !== 0 ? (stock.avgCost / stock.position) : 0)}</td>
-                  <td style={{ padding: '8px', border: '1px solid #ddd', color: pnlColor }}>${formatCurrency(stock.unrealizedPNL)}</td>
                 </tr>
               );
             })}
