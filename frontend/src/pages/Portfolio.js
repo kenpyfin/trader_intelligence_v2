@@ -149,15 +149,12 @@ const PortfolioPage = () => {
     const status = closingStatus[symbol];
     const isClosing = status?.inProgress;
     const legTotal = legs.reduce((acc, leg) => acc + leg.position, 0);
-    const strategyUnrealizedPNL = legs.reduce((acc, leg) => acc + (leg.unrealizedPNL || 0), 0);
-    const pnlColor = strategyUnrealizedPNL >= 0 ? 'green' : 'red';
 
     return (
       <div style={{ border: '1px solid #ddd', borderRadius: '8px', padding: '16px', marginBottom: '16px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>
         <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
             <div>
                 <h3 style={{ marginTop: 0, marginBottom: '5px' }}>{symbol} <span style={{fontSize: '0.8em', color: '#666'}}>({legs.length} Legs)</span></h3>
-                <span style={{fontSize: '0.9em'}}>Unrealized P/L: <strong style={{color: pnlColor}}>${formatCurrency(strategyUnrealizedPNL)}</strong></span>
             </div>
             <button 
                 onClick={() => handleCloseStrategy(symbol)} 
@@ -183,12 +180,10 @@ const PortfolioPage = () => {
                     <th style={{padding: '8px', border: '1px solid #ddd', textAlign: 'left'}}>Strike</th>
                     <th style={{padding: '8px', border: '1px solid #ddd', textAlign: 'left'}}>Expiry</th>
                     <th style={{padding: '8px', border: '1px solid #ddd', textAlign: 'left'}}>Avg Cost</th>
-                    <th style={{padding: '8px', border: '1px solid #ddd', textAlign: 'left'}}>Unrealized P/L</th>
                 </tr>
             </thead>
             <tbody>
                 {legs.map((leg, index) => {
-                    const legPnlColor = leg.unrealizedPNL >= 0 ? 'green' : 'red';
                     return (
                         <tr key={index}>
                             <td style={{padding: '8px', border: '1px solid #ddd', color: leg.position > 0 ? 'green' : 'red', fontWeight: 'bold'}}>{leg.position > 0 ? `+${leg.position}` : leg.position}</td>
@@ -196,7 +191,6 @@ const PortfolioPage = () => {
                             <td style={{padding: '8px', border: '1px solid #ddd'}}>${leg.strike.toFixed(2)}</td>
                             <td style={{padding: '8px', border: '1px solid #ddd'}}>{leg.expiry}</td>
                             <td style={{padding: '8px', border: '1px solid #ddd'}}>${formatCurrency(leg.position !== 0 ? (leg.avgCost / (leg.position * 100)) : 0)}</td>
-                            <td style={{padding: '8px', border: '1px solid #ddd', color: legPnlColor}}>${formatCurrency(leg.unrealizedPNL)}</td>
                         </tr>
                     );
                 })}
