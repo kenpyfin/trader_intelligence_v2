@@ -626,7 +626,7 @@ def _sanitize_for_json(item):
         return None
     return item
 
-def run_full_analysis(ticker: str, expiration_date: date, r_current: float = 0.045, rate_source: str = 'etf', methodology: str = 'holistic-market-edge'):
+async def run_full_analysis(ticker: str, expiration_date: date, r_current: float = 0.045, rate_source: str = 'etf', methodology: str = 'holistic-market-edge'):
     """
     Performs all calculations for the option screener, fully implementing Key Feature 1.
     """
@@ -829,7 +829,7 @@ def run_full_analysis(ticker: str, expiration_date: date, r_current: float = 0.0
         model_to_use = "gpt-5"
 
         # Call the GPT service with the standard analysis results as context.
-        gpt_verdict = generate_gpt_verdict(
+        gpt_verdict = await generate_gpt_verdict(
             ticker=ticker,
             analysis_result=response_data,
             model=model_to_use,
