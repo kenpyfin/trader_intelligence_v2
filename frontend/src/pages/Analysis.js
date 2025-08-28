@@ -298,68 +298,72 @@ const AnalysisDetails = ({ data }) => {
       
       <StrategyOrder strategy={data.recommended_strategy} ticker={data.ticker} expirationDate={data.expiration_date} />
       
-      <AnalysisCard title="1. Price Trend & Candlestick Analysis">
-        {data.candlestick_analysis?.plot_data ? 
-          <CandlestickChart plotData={data.candlestick_analysis.plot_data} ticker={data.ticker} /> :
-          <p>{data.candlestick_analysis?.error || "No chart data."}</p>
-        }
-        <p><strong>Primary Trend:</strong> {data.candlestick_analysis?.context?.primary_trend}</p>
-        <p><strong>Secondary Trend:</strong> {data.candlestick_analysis?.context?.secondary_trend}</p>
-        
-        {data.candlestick_analysis?.patterns && data.candlestick_analysis.patterns.length > 0 ? (
-          <div style={{marginTop: '15px'}}>
-            <strong>Recent Patterns Identified:</strong>
-            <ul style={{ margin: '5px 0', paddingLeft: '20px' }}>
-              {data.candlestick_analysis.patterns.map((p, i) => (
-                <li key={i}>
-                  <strong>{p.name}</strong> (Strength: {p.strength}) - {p.interpretation}
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : (
-          <p style={{marginTop: '15px'}}><strong>Patterns:</strong> No significant candlestick patterns identified in the last few periods.</p>
-        )}
-      </AnalysisCard>
+      { !isGptResult &&
+        <>
+          <AnalysisCard title="1. Price Trend & Candlestick Analysis">
+            {data.candlestick_analysis?.plot_data ? 
+              <CandlestickChart plotData={data.candlestick_analysis.plot_data} ticker={data.ticker} /> :
+              <p>{data.candlestick_analysis?.error || "No chart data."}</p>
+            }
+            <p><strong>Primary Trend:</strong> {data.candlestick_analysis?.context?.primary_trend}</p>
+            <p><strong>Secondary Trend:</strong> {data.candlestick_analysis?.context?.secondary_trend}</p>
+            
+            {data.candlestick_analysis?.patterns && data.candlestick_analysis.patterns.length > 0 ? (
+              <div style={{marginTop: '15px'}}>
+                <strong>Recent Patterns Identified:</strong>
+                <ul style={{ margin: '5px 0', paddingLeft: '20px' }}>
+                  {data.candlestick_analysis.patterns.map((p, i) => (
+                    <li key={i}>
+                      <strong>{p.name}</strong> (Strength: {p.strength}) - {p.interpretation}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : (
+              <p style={{marginTop: '15px'}}><strong>Patterns:</strong> No significant candlestick patterns identified in the last few periods.</p>
+            )}
+          </AnalysisCard>
 
-      <AnalysisCard title="2. Sentiment Analysis (Volume & OI)">
-        <p><strong>Put/Call Ratio (Volume):</strong> {data.volume_oi_analysis?.pc_ratio?.toFixed(2) || 'N/A'}</p>
-        {data.volume_oi_analysis?.oi_put_wall && <p><strong>Put Wall (Support):</strong> ${data.volume_oi_analysis.oi_put_wall.Strike.toFixed(2)} (OI: {data.volume_oi_analysis.oi_put_wall['Open Int.']})</p>}
-        {data.volume_oi_analysis?.oi_call_wall && <p><strong>Call Wall (Resistance):</strong> ${data.volume_oi_analysis.oi_call_wall.Strike.toFixed(2)} (OI: {data.volume_oi_analysis.oi_call_wall['Open Int.']})</p>}
-        {renderUOA(data.volume_oi_analysis?.uoa_calls, 'Call')}
-        {renderUOA(data.volume_oi_analysis?.uoa_puts, 'Put')}
-      </AnalysisCard>
+          <AnalysisCard title="2. Sentiment Analysis (Volume & OI)">
+            <p><strong>Put/Call Ratio (Volume):</strong> {data.volume_oi_analysis?.pc_ratio?.toFixed(2) || 'N/A'}</p>
+            {data.volume_oi_analysis?.oi_put_wall && <p><strong>Put Wall (Support):</strong> ${data.volume_oi_analysis.oi_put_wall.Strike.toFixed(2)} (OI: {data.volume_oi_analysis.oi_put_wall['Open Int.']})</p>}
+            {data.volume_oi_analysis?.oi_call_wall && <p><strong>Call Wall (Resistance):</strong> ${data.volume_oi_analysis.oi_call_wall.Strike.toFixed(2)} (OI: {data.volume_oi_analysis.oi_call_wall['Open Int.']})</p>}
+            {renderUOA(data.volume_oi_analysis?.uoa_calls, 'Call')}
+            {renderUOA(data.volume_oi_analysis?.uoa_puts, 'Put')}
+          </AnalysisCard>
 
-      <AnalysisCard title="3. Volatility & Movement Analysis">
-        <p><strong>Market-Implied Move:</strong> {data.movement_analysis?.expected_move_pct?.toFixed(2) || 'N/A'}%</p>
-        {data.movement_analysis?.vol_compression_text && <p><strong>Volatility Compression:</strong> {data.movement_analysis.vol_compression_text}</p>}
-        {data.movement_analysis?.earnings_note && <p><strong>Catalyst Event:</strong> {data.movement_analysis.earnings_note}</p>}
-      </AnalysisCard>
-      
-      <AnalysisCard title="4. Quantitative Valuation (Undervalued Options)">
-        {data.results_df && data.results_df.length > 0 ? (
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr style={{ background: '#f4f4f4' }}>
-                <th style={{ padding: '8px', border: '1px solid #ddd' }}>Strike</th>
-                <th style={{ padding: '8px', border: '1px solid #ddd' }}>Type</th>
-                <th style={{ padding: '8px', border: '1px solid #ddd' }}>Market Price</th>
-                <th style={{ padding: '8px', border: '1px solid #ddd' }}>Model Price</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.results_df.map((opt, i) => (
-                <tr key={i}>
-                  <td style={{ padding: '8px', border: '1px solid #ddd' }}>${opt.Strike.toFixed(2)}</td>
-                  <td style={{ padding: '8px', border: '1px solid #ddd' }}>{opt.Type}</td>
-                  <td style={{ padding: '8px', border: '1px solid #ddd' }}>${opt['Market Price'].toFixed(2)}</td>
-                  <td style={{ padding: '8px', border: '1px solid #ddd' }}>${opt['Model Price'].toFixed(2)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : <p>No significantly undervalued options were found.</p>}
-      </AnalysisCard>
+          <AnalysisCard title="3. Volatility & Movement Analysis">
+            <p><strong>Market-Implied Move:</strong> {data.movement_analysis?.expected_move_pct?.toFixed(2) || 'N/A'}%</p>
+            {data.movement_analysis?.vol_compression_text && <p><strong>Volatility Compression:</strong> {data.movement_analysis.vol_compression_text}</p>}
+            {data.movement_analysis?.earnings_note && <p><strong>Catalyst Event:</strong> {data.movement_analysis.earnings_note}</p>}
+          </AnalysisCard>
+          
+          <AnalysisCard title="4. Quantitative Valuation (Undervalued Options)">
+            {data.results_df && data.results_df.length > 0 ? (
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr style={{ background: '#f4f4f4' }}>
+                    <th style={{ padding: '8px', border: '1px solid #ddd' }}>Strike</th>
+                    <th style={{ padding: '8px', border: '1px solid #ddd' }}>Type</th>
+                    <th style={{ padding: '8px', border: '1px solid #ddd' }}>Market Price</th>
+                    <th style={{ padding: '8px', border: '1px solid #ddd' }}>Model Price</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.results_df.map((opt, i) => (
+                    <tr key={i}>
+                      <td style={{ padding: '8px', border: '1px solid #ddd' }}>${opt.Strike.toFixed(2)}</td>
+                      <td style={{ padding: '8px', border: '1px solid #ddd' }}>{opt.Type}</td>
+                      <td style={{ padding: '8px', border: '1px solid #ddd' }}>${opt['Market Price'].toFixed(2)}</td>
+                      <td style={{ padding: '8px', border: '1px solid #ddd' }}>${opt['Model Price'].toFixed(2)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : <p>No significantly undervalued options were found.</p>}
+          </AnalysisCard>
+        </>
+      }
     </div>
   );
 };
