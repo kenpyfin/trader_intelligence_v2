@@ -510,27 +510,39 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
     else:
         synthesis_data['undervalued'] = {'sentiment': 'neutral', 'summary': 'The model found no clearly undervalued options.'}
 
-    final_conclusion_html, final_bias = generate_holistic_conclusion(synthesis_data)
-
+    # This is the base package of sub-analyses
     analysis_result_package = {
         "status": "success", "ticker": ticker, "S_current": S_current, "expiration_date": expiration_date.isoformat(), "dte": days_to_exp,
         "synthesis_data": synthesis_data,
-        "final_conclusion_html": final_conclusion_html, "final_bias": final_bias, "iv_high": iv_high,
+        "iv_high": iv_high,
         "iv_low": iv_low, "candlestick_analysis": candlestick_analysis, "volume_oi_analysis": volume_oi_analysis,
         "movement_analysis_results": movement_analysis_results, "results_df": results_df
     }
 
     if 'gpt-verdict' in analysis_method:
+        print(f"DEBUG: Running GPT Verdict analysis for {ticker} (method: {analysis_method})")
         use_web = 'web' in analysis_method
+        # Pass the sub-analyses to the AI
         gpt_verdict = generate_gpt_verdict(ticker, analysis_result_package, model="gpt-5", use_web_search=use_web)
+        print(f"DEBUG: GPT Verdict response received: {gpt_verdict}")
+
+        # Populate the package with AI results
         analysis_result_package['final_bias'] = gpt_verdict.get('final_bias', 'Neutral')
-        analysis_result_package['final_conclusion_html'] = gpt_verdict.get('summary_html', 'Failed to get AI summary.')
+        analysis_result_package['final_conclusion_html'] = gpt_verdict.get('summary_html', '<p>Failed to retrieve AI summary.</p>')
         analysis_result_package['gpt_verdict'] = gpt_verdict
+    else:
+        print(f"DEBUG: Running Holistic Market Edge analysis for {ticker}")
+        # Generate the rule-based conclusion
+        final_conclusion_html, final_bias = generate_holistic_conclusion(synthesis_data)
+        analysis_result_package['final_conclusion_html'] = final_conclusion_html
+        analysis_result_package['final_bias'] = final_bias
+        analysis_result_package['gpt_verdict'] = None # Ensure it's not present for rule-based analysis
 
     # Serialize DataFrame for API response after all internal processing is done
     if analysis_result_package.get('results_df') is not None:
         analysis_result_package['results_df'] = analysis_result_package['results_df'].to_dict('records')
     else:
         analysis_result_package['results_df'] = []
-
+    
+    print(f"DEBUG: Final analysis package for {ticker}: bias={analysis_result_package.get('final_bias')}")
     return analysis_result_package
