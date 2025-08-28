@@ -266,6 +266,11 @@ const AnalysisDetails = ({ data }) => {
   const finalBias = data.final_bias || '';
   const biasColor = finalBias.includes('Bullish') ? 'green' : finalBias.includes('Bearish') ? 'red' : 'orange';
 
+  const isGptResult = !!data.gpt_verdict;
+  const conclusionTitle = isGptResult
+    ? `AI-Powered Conclusion & Strategy (DTE: ${data.dte} days)`
+    : `Holistic Conclusion & Strategy (DTE: ${data.dte} days)`;
+
   const renderUOA = (uoaList, type) => {
     if (!uoaList || uoaList.length === 0) return null;
     return (
@@ -284,7 +289,7 @@ const AnalysisDetails = ({ data }) => {
 
   return (
     <div>
-      <AnalysisCard title={`Holistic Conclusion & Strategy (DTE: ${data.dte} days)`}>
+      <AnalysisCard title={conclusionTitle}>
         <h4 style={{ color: biasColor }}>Final Bias: {finalBias}</h4>
         <div dangerouslySetInnerHTML={{ __html: data.final_conclusion_html }} />
       </AnalysisCard>
@@ -381,6 +386,19 @@ const ResultsDisplay = ({ analysisResult }) => {
 };
 
 const MethodologyExplanation = ({ methodology }) => {
+  if (methodology === 'gpt-5-web-verdict') {
+    return (
+      <AnalysisCard title="About: GPT-5 Web Verdict Analysis">
+        <p>
+          The <strong>GPT-5 Web Verdict</strong> methodology enhances the standard GPT Verdict by empowering the AI model with real-time web search capabilities.
+        </p>
+        <p>
+          In addition to synthesizing the quantitative data provided by our internal analysis, the model will actively search for the latest news, analyst ratings, and market chatter related to the stock. This allows it to incorporate breaking developments and qualitative insights that are not captured in the raw market data, providing the most up-to-date and contextually-aware verdict possible.
+        </p>
+      </AnalysisCard>
+    );
+  }
+
   if (methodology === 'gpt-verdict') {
     return (
       <AnalysisCard title="About: GPT Verdict Analysis">
@@ -393,32 +411,32 @@ const MethodologyExplanation = ({ methodology }) => {
       </AnalysisCard>
     );
   }
-
-  if (methodology !== 'holistic-market-edge') {
-    return null;
+  
+  if (methodology === 'holistic-market-edge') {
+    return (
+      <AnalysisCard title="About: Holistic Market Edge Analysis">
+        <p>
+          The <strong>Holistic Market Edge</strong> methodology is a multi-faceted approach to stock and option analysis, designed to synthesize a wide range of market data into a single, actionable conclusion. It avoids relying on a single indicator and instead builds a &quot;weight of the evidence&quot; verdict.
+        </p>
+        <h5>How the Final Verdict is Generated:</h5>
+        <p>
+          The final bias (e.g., Bullish, Bearish, Neutral) is determined by a scoring system that aggregates sentiment from several core analytical components:
+        </p>
+        <ol>
+          <li><strong>Price Trend &amp; Candlesticks:</strong> Establishes the market&apos;s primary and secondary trends using moving averages and identifies recent, psychologically significant candlestick patterns for short-term sentiment.</li>
+          <li><strong>Sentiment Analysis:</strong> Gauges market sentiment by analyzing put/call ratios, unusual options activity (UOA), and significant open interest levels (support/resistance walls).</li>
+          <li><strong>Volatility Analysis:</strong> Compares implied volatility (IV) to historical volatility (HV) to determine if options are &quot;cheap&quot; or &quot;expensive.&quot; It also checks for volatility compression, which often precedes large price moves.</li>
+          <li><strong>Catalyst Events:</strong> Checks for upcoming earnings reports before the option&apos;s expiration date, as these are significant drivers of volatility and price movement.</li>
+          <li><strong>Quantitative Valuation:</strong> Uses a binomial pricing model to calculate a theoretical option price, which is then compared to the market price to find potentially undervalued opportunities.</li>
+        </ol>
+        <p>
+          Each component contributes a bullish, bearish, or neutral signal to the final score. A strong bias is formed only when the evidence from multiple, diverse components points in the same direction. This comprehensive approach aims to provide a robust and well-rounded trading edge.
+        </p>
+      </AnalysisCard>
+    );
   }
-
-  return (
-    <AnalysisCard title="About: Holistic Market Edge Analysis">
-      <p>
-        The <strong>Holistic Market Edge</strong> methodology is a multi-faceted approach to stock and option analysis, designed to synthesize a wide range of market data into a single, actionable conclusion. It avoids relying on a single indicator and instead builds a &quot;weight of the evidence&quot; verdict.
-      </p>
-      <h5>How the Final Verdict is Generated:</h5>
-      <p>
-        The final bias (e.g., Bullish, Bearish, Neutral) is determined by a scoring system that aggregates sentiment from several core analytical components:
-      </p>
-      <ol>
-        <li><strong>Price Trend &amp; Candlesticks:</strong> Establishes the market&apos;s primary and secondary trends using moving averages and identifies recent, psychologically significant candlestick patterns for short-term sentiment.</li>
-        <li><strong>Sentiment Analysis:</strong> Gauges market sentiment by analyzing put/call ratios, unusual options activity (UOA), and significant open interest levels (support/resistance walls).</li>
-        <li><strong>Volatility Analysis:</strong> Compares implied volatility (IV) to historical volatility (HV) to determine if options are &quot;cheap&quot; or &quot;expensive.&quot; It also checks for volatility compression, which often precedes large price moves.</li>
-        <li><strong>Catalyst Events:</strong> Checks for upcoming earnings reports before the option&apos;s expiration date, as these are significant drivers of volatility and price movement.</li>
-        <li><strong>Quantitative Valuation:</strong> Uses a binomial pricing model to calculate a theoretical option price, which is then compared to the market price to find potentially undervalued opportunities.</li>
-      </ol>
-      <p>
-        Each component contributes a bullish, bearish, or neutral signal to the final score. A strong bias is formed only when the evidence from multiple, diverse components points in the same direction. This comprehensive approach aims to provide a robust and well-rounded trading edge.
-      </p>
-    </AnalysisCard>
-  );
+  
+  return null;
 };
 
 const AnalysisPage = () => {
