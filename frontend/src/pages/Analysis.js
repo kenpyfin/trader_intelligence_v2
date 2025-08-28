@@ -526,6 +526,7 @@ const AnalysisPage = () => {
                 <select value={analysisMethod} onChange={e => setAnalysisMethod(e.target.value)} style={{ padding: '4px', height: '29px' }}>
                     <option value="holistic-market-edge">Holistic Market Edge</option>
                     <option value="gpt-verdict">GPT Verdict</option>
+                    <option value="gpt-5-web-verdict">GPT-5 Web Verdict</option>
                 </select>
               </div>
 
