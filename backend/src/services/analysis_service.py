@@ -832,7 +832,7 @@ async def run_full_analysis(ticker: str, expiration_date: date, r_current: float
         sanitized_analysis_result = _sanitize_for_json(response_data)
 
         # Call the GPT service with the standard analysis results as context.
-        gpt_verdict = await generate_gpt_verdict(
+        gpt_verdict = generate_gpt_verdict(
             ticker=ticker,
             analysis_result=sanitized_analysis_result,
             model=model_to_use,
