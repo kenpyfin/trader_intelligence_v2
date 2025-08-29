@@ -170,20 +170,20 @@ async def analyze_stock_with_gpt(request: AnalysisRequest):
         except (ValueError, TypeError):
             raise HTTPException(status_code=400, detail="Invalid expiration_date format. Expected 'YYYYMMDD'.")
 
-        # Reuse the same core analysis pipeline
-        base_result = await asyncio.to_thread(
-            run_full_analysis,
+        # Run the full analysis pipeline with the GPT methodology enabled.
+        base_result = await run_full_analysis(
             ticker=request.ticker.upper(),
             expiration_date=expiration_date,
-            r_current=request.risk_free_rate
+            r_current=request.risk_free_rate,
+            methodology='gpt-verdict'  # Use the gpt-verdict methodology
         )
 
         if base_result.get("status") != "success":
             error_message = base_result.get("message", "Analysis failed for the selected date.")
             raise HTTPException(status_code=400, detail=error_message)
 
-        # Ask AI for a final verdict using the sub-analyses
-        ai = generate_gpt_verdict(request.ticker.upper(), base_result)
+        # The GPT verdict is now part of the base_result.
+        ai = base_result.get('gpt_verdict', {})
 
         # Merge AI verdict into the response while retaining the original model-based content
         final_bias = ai.get("final_bias", base_result.get("final_bias", "Neutral"))
@@ -263,11 +263,11 @@ async def analyze_stock(request: AnalysisRequest):
         except (ValueError, TypeError):
              raise HTTPException(status_code=400, detail="Invalid expiration_date format. Expected 'YYYYMMDD'.")
 
-        analysis_result = await asyncio.to_thread(
-            run_full_analysis,
+        analysis_result = await run_full_analysis(
             ticker=request.ticker.upper(),
             expiration_date=expiration_date,
-            r_current=request.risk_free_rate
+            r_current=request.risk_free_rate,
+            methodology=request.analysis_method
         )
 
         # Check if the single analysis was successful
