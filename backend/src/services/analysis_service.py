@@ -4,6 +4,7 @@ import numpy as np
 from datetime import date, timedelta
 import json
 import re
+import os
 
 # IB-insync asyncio patching is not required in a FastAPI/uvicorn environment
 # and is incompatible with the 'uvloop' used by uvicorn.
@@ -826,7 +827,8 @@ async def run_full_analysis(ticker: str, expiration_date: date, r_current: float
         use_web_search = 'web' in methodology
         # NOTE: Using "gpt-5" as the model for both GPT methodologies.
         # This can be changed if a different model is desired for the non-web version.
-        model_to_use = "gpt-5"
+        # Use the model from .env file, fallback to the previous hardcoded value.
+        model_to_use = os.getenv("LLM_MODEL", "gpt-5")
 
         # Sanitize the analysis payload before sending it to the LLM.
         sanitized_analysis_result = _sanitize_for_json(response_data)
