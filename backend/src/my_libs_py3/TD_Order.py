@@ -61,7 +61,7 @@ class IBTrader:
         try:
             await self.connect()
             # Use accountSummaryAsync to avoid blocking the event loop
-            summary = await self.client.accountSummaryAsync()
+            summary = self.client.accountSummary()
             return float(list(filter(lambda x: x.tag == "AvailableFunds", summary))[0].value)
         except Exception as e:
             raise Exception(e)
@@ -70,14 +70,14 @@ class IBTrader:
         """Fetches the account summary."""
         try:
             await self.connect()
-            return await self.client.accountSummaryAsync()
+            return self.client.accountSummary()
         except Exception as e:
             raise Exception(f"Error fetching account summary: {e}")
 
     async def get_position_by_symbol(self, symbol) -> float:
         try:
             await self.connect()
-            positions = await self.client.positionsAsync()
+            positions = self.client.positions()
             position_list = list(filter(lambda x: x.contract.symbol == symbol, positions))
             if len(position_list) == 0:
                 return 0
@@ -91,7 +91,7 @@ class IBTrader:
             await self.connect()
             order = MarketOrder('BUY' if size >= 0 else "SELL", abs(size))
             contract = Forex(symbol)
-            await self.client.qualifyContractsAsync(contract)
+            self.client.qualifyContracts(contract)
             trade = self.client.placeOrder(contract, order)
             await asyncio.sleep(1)  # Allow ib_insync to process and send the order
             return trade
@@ -103,7 +103,7 @@ class IBTrader:
             await self.connect()
             order = MarketOrder('BUY' if size >= 0 else "SELL", abs(size))
             contract = Stock(symbol, "SMART", "USD")
-            await self.client.qualifyContractsAsync(contract)
+            self.client.qualifyContracts(contract)
             trade = self.client.placeOrder(contract, order)
             await asyncio.sleep(1)  # Allow ib_insync to process and send the order
             return trade
@@ -116,7 +116,7 @@ class IBTrader:
             action = 'BUY' if size > 0 else 'SELL'
             order = LimitOrder(action, abs(size), limit_price)
             contract = Stock(symbol, "SMART", "USD")
-            await self.client.qualifyContractsAsync(contract)
+            self.client.qualifyContracts(contract)
             trade = self.client.placeOrder(contract, order)
             await asyncio.sleep(1)  # Allow ib_insync to process and send the order
             return trade
@@ -153,7 +153,7 @@ class IBTrader:
                 raise ValueError("Invalid order type or missing limit price for LMT order.")
 
             contract = Option(symbol, expiry_date, strike, right, exchange, tradingClass=symbol)
-            await self.client.qualifyContractsAsync(contract)
+            self.client.qualifyContracts(contract)
             
             trade = self.client.placeOrder(contract, order)
             await asyncio.sleep(1)  # Allow ib_insync to process and send the order
@@ -200,7 +200,7 @@ class IBTrader:
                     tradingClass=symbol
                 )
                 print(f"DEBUG: Qualifying leg: {leg_contract}")
-                await self.client.qualifyContractsAsync(leg_contract)
+                self.client.qualifyContracts(leg_contract)
                 print(f"DEBUG: Leg qualified: {leg_contract.localSymbol}, conId: {leg_contract.conId}")
                 
                 # Create a ComboLeg for the Bag contract
@@ -245,7 +245,7 @@ class IBTrader:
 
         while not trade.isDone():
             if time.time() - start_time > timeout:
-                await self.client.cancelOrderAsync(trade.order)
+                self.client.cancelOrder(trade.order)
                 break
             await asyncio.sleep(1)  # Use asyncio.sleep for non-blocking wait
 
@@ -254,7 +254,7 @@ class IBTrader:
     async def open_positions_symbol(self):
         try:
             await self.connect()
-            positions = await self.client.positionsAsync()
+            positions = self.client.positions()
             return [x.contract.symbol for x in positions]
         except Exception as e:
             raise Exception(e)
@@ -296,10 +296,10 @@ class IBTrader:
         try:
             await self.connect()
             contract = Stock(symbol, 'SMART', 'USD')
-            await self.client.qualifyContractsAsync(contract)
+            self.client.qualifyContracts(contract)
             
             # This request returns a list of chain parameters.
-            chains = await self.client.reqSecDefOptParamsAsync(
+            chains = self.client.reqSecDefOptParams(
                 underlyingSymbol=contract.symbol,
                 futFopExchange='',
                 underlyingSecType=contract.secType,
@@ -351,7 +351,7 @@ class IBTrader:
         try:
             await self.connect() # Ensure connection
             contract = Option(symbol, expiry_date, strike, right, exchange, tradingClass=symbol)
-            await self.client.qualifyContractsAsync(contract)
+            self.client.qualifyContracts(contract)
             
             ticker = self.client.reqMktData(contract, '', False, False)
             await asyncio.sleep(2) # Allow time for data to arrive, adjust as needed
@@ -361,7 +361,7 @@ class IBTrader:
                 return ticker
             else:
                 # Attempt to get historical data if live tick fails or is empty
-                hist_data = await self.client.reqHistoricalDataAsync(
+                hist_data = self.client.reqHistoricalData(
                     contract,
                     endDateTime='',
                     durationStr='1 D', # Get data for 1 day
@@ -421,7 +421,7 @@ class IBTrader:
             await self.connect()
             if trade.orderStatus.status not in ["Filled", "Cancelled", "ApiCancelled", "Inactive"]:
                 # Send cancel request
-                await self.client.cancelOrderAsync(trade.order)
+                self.client.cancelOrder(trade.order)
                 
                 # Wait briefly to ensure the cancel request is processed
                 await asyncio.sleep(1)
