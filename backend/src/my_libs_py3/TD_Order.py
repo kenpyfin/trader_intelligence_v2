@@ -77,7 +77,7 @@ class IBTrader:
     async def get_position_by_symbol(self, symbol) -> float:
         try:
             await self.connect()
-            positions = self.client.positions()
+            positions = await self.client.reqPositions()
             position_list = list(filter(lambda x: x.contract.symbol == symbol, positions))
             if len(position_list) == 0:
                 return 0
@@ -254,7 +254,7 @@ class IBTrader:
     async def open_positions_symbol(self):
         try:
             await self.connect()
-            positions = self.client.positions()
+            positions = await self.client.reqPositions()
             return [x.contract.symbol for x in positions]
         except Exception as e:
             raise Exception(e)
@@ -262,7 +262,7 @@ class IBTrader:
     async def open_positions(self):
         try:
             await self.connect()
-            data = await self.client.positions()
+            data = await self.client.reqPositions()
             unpacked_data = []
 
             for pos in data:
