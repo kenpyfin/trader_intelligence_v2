@@ -12,7 +12,7 @@ import os
 
 from src.my_libs_py3.my_data import PriceDataFetcher
 from src.my_libs_py3.fmp import FMPClient
-from src.my_libs_py3.TD_Order import IBTrader
+from .connection_manager import connection_manager
 import plotly.graph_objects as go
 from src.analytics.sabr import calibrate_sabr, sabr_iv
 from src.analytics.analysis import _parse_finviz_iv_string
@@ -25,7 +25,7 @@ async def get_option_expirations(ticker: str):
     """
     Fetches the next 10 available option expiration dates for a given ticker.
     """
-    trader = IBTrader()
+    trader = await connection_manager.get_trader()
     # This will require a new method in IBTrader
     expirations = await trader.get_option_expirations(ticker)
     

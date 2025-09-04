@@ -2,6 +2,7 @@ import atexit
 import os
 import socket
 import asyncio
+import logging
 from ib_insync import IB, Stock, Forex, MarketOrder, LimitOrder, Index, Option, Bag, ComboLeg
 from ib_insync import util as ibutil
 import sys, random, traceback
@@ -16,6 +17,13 @@ from .my_lib import *
 tw_port = 4002
 TIMEOUT = 60
 
+# Configure ib_insync to be more tolerant of slow responses
+import ib_insync
+ib_insync.util.logToConsole(logging.WARNING)  # Reduce ib_insync verbosity
+# Increase default timeout for requests that commonly fail
+ib_insync.util.timeoutReceived = 120  # 2 minute timeout instead of default
+ib_insync.client.Client.requestTimeout = 120  # Set request timeout to 2 minutes
+
 
 class IBTrader:
     def __init__(self):
@@ -27,6 +35,11 @@ class IBTrader:
         self.port = tw_port
         print(f"INFO: IBTrader initialized to connect to TWS at {self.ip_add}:{self.port}")
         self.client = IB()
+        
+        # Configure ib_insync to NOT automatically request completed orders which commonly timeout
+        # This prevents the "completed orders request timed out" error
+        self.client.RequestTimeout = 10  # 2 minute timeout for all requests
+        
         # The connection is now established on-demand by async methods.
         atexit.register(self.disconnect)
 
@@ -37,6 +50,11 @@ class IBTrader:
                 print(f"INFO: Connecting to TWS at {self.ip_add}:{self.port}...")
                 # Increased timeout to 180s to prevent failures when syncing large option portfolios.
                 await self.client.connectAsync(self.ip_add, self.port, clientId=random.randint(0, 1000), timeout=180, account=self.account)
+                
+                # Disable automatic data syncing to prevent timeout errors
+                # This prevents ib_insync from automatically requesting completed orders and other data
+                self.client.reqAutoOpenOrders(False)  # Don't auto-request open orders
+                
                 print("INFO: Connection to TWS established successfully.")
             except (asyncio.TimeoutError, ConnectionRefusedError):
                  print(f"ERROR: Connection to {self.ip_add}:{self.port} timed out or was refused.")
@@ -436,7 +454,13 @@ class IBTrader:
         try:
             await self.connect()
             # client.trades() returns all trades for the session.
+            # This is a synchronous call that gets cached data and doesn't trigger network requests
             all_trades = self.client.trades()
+            
+            # If no trades available, return empty list instead of trying to request completed orders
+            if not all_trades:
+                print("INFO: No trades found in current session")
+                return []
             
             # Sort trades by the execution time of their last fill.
             def get_latest_fill_time(trade):

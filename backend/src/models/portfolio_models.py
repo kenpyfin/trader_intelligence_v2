@@ -15,3 +15,8 @@ class PositionLeg(BaseModel):
 class CloseStrategyRequest(BaseModel):
     """The request model for the close-strategy endpoint."""
     legs: List[PositionLeg]
+
+class CloseStockPositionRequest(BaseModel):
+    """The request model for closing a stock position."""
+    symbol: str
+    quantity: int  # The quantity to close (should be negative of current position)

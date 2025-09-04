@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException
 import traceback
 
 from ..services import portfolio_service
-from ..models.portfolio_models import CloseStrategyRequest
+from ..models.portfolio_models import CloseStrategyRequest, CloseStockPositionRequest
 
 router = APIRouter(
     prefix="/portfolio",
@@ -28,6 +28,16 @@ async def close_open_strategy(request: CloseStrategyRequest):
     except Exception as e:
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to close strategy: {e}")
+
+@router.post("/close-stock-position")
+async def close_stock_position(request: CloseStockPositionRequest):
+    """Endpoint to close a stock position by placing an opposing market order."""
+    try:
+        result = await portfolio_service.close_stock_position(request)
+        return result
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to close stock position: {e}")
 
 @router.get("/recent-orders")
 async def get_recent_orders():

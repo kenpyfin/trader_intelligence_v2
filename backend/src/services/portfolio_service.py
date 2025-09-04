@@ -3,8 +3,8 @@ import asyncio
 import pandas as pd
 import numpy as np
 
-from ..my_libs_py3.TD_Order import IBTrader
-from ..models.portfolio_models import CloseStrategyRequest
+from ..models.portfolio_models import CloseStrategyRequest, CloseStockPositionRequest
+from .connection_manager import connection_manager
 
 def _sanitize_for_json(item):
     """
@@ -47,9 +47,31 @@ async def get_grouped_open_positions():
     Fetches all open positions from the broker, calculates portfolio summary metrics,
     and groups positions by contract type. Options are further grouped by underlying symbol.
     """
-    trader = IBTrader()
-    positions_df = await trader.open_positions()
-    account_summary_list = await trader.get_account_summary()
+    try:
+        trader = await connection_manager.get_trader()
+        
+        # Add timeout wrapper for the TWS API calls that commonly timeout
+        try:
+            positions_df = await asyncio.wait_for(trader.open_positions(), timeout=45.0)
+        except asyncio.TimeoutError:
+            print("WARN: Positions request timed out, resetting connection and retrying...")
+            await connection_manager.reset_connection()
+            trader = await connection_manager.get_trader()
+            positions_df = await asyncio.wait_for(trader.open_positions(), timeout=30.0)
+        
+        try:
+            account_summary_list = await asyncio.wait_for(trader.get_account_summary(), timeout=30.0)
+        except asyncio.TimeoutError:
+            print("WARN: Account summary request timed out, using empty summary")
+            account_summary_list = []
+            
+    except Exception as e:
+        print(f"ERROR: Failed to fetch positions data: {e}")
+        # Return empty data structure instead of failing completely
+        return {
+            "summary": {"market_value": 0, "unrealized_pnl": 0},
+            "positions": {"options": {}, "stocks": [], "others": []}
+        }
 
     if positions_df.empty:
         return {
@@ -116,17 +138,36 @@ async def get_recent_orders_service():
     """
     Fetches the 10 most recent orders from the broker.
     """
-    trader = IBTrader()
-    recent_orders = await trader.get_recent_orders(count=10)
-    # The data is already sanitized in the trader method by creating dicts,
-    # but an extra _sanitize_for_json call ensures full compliance.
-    return _sanitize_for_json(recent_orders)
+    try:
+        trader = await connection_manager.get_trader()
+        
+        # Add timeout wrapper for the recent orders call
+        try:
+            recent_orders = await asyncio.wait_for(trader.get_recent_orders(count=10), timeout=30.0)
+        except asyncio.TimeoutError:
+            print("WARN: Recent orders request timed out, returning empty list")
+            recent_orders = []
+        except Exception as e:
+            # Handle ib_insync internal errors like "completed orders request timed out"
+            if "completed orders" in str(e).lower() or "timeout" in str(e).lower():
+                print(f"WARN: ib_insync internal timeout ({e}), returning empty orders list")
+                recent_orders = []
+            else:
+                raise
+        
+        # The data is already sanitized in the trader method by creating dicts,
+        # but an extra _sanitize_for_json call ensures full compliance.
+        return _sanitize_for_json(recent_orders)
+        
+    except Exception as e:
+        print(f"ERROR: Failed to fetch recent orders: {e}")
+        return _sanitize_for_json([])
 
 async def close_strategy(request: CloseStrategyRequest):
     """
     Closes a strategy by placing opposing market orders for each of its legs concurrently.
     """
-    trader = IBTrader()
+    trader = await connection_manager.get_trader()
     closing_trades = []
     
     tasks = []
@@ -168,3 +209,37 @@ async def close_strategy(request: CloseStrategyRequest):
             })
             
     return _sanitize_for_json({"status": "submitted", "trades": closing_trades})
+
+async def close_stock_position(request: CloseStockPositionRequest):
+    """
+    Closes a stock position by placing a market order for the opposing quantity.
+    """
+    trader = await connection_manager.get_trader()
+    
+    try:
+        # The size to close is the negative of the current position quantity
+        closing_size = -request.quantity
+        
+        # Place the stock market order
+        result = await trader.place_stock_market_order(request.symbol, closing_size)
+        
+        # Wait for the trade to get a status update, but with a short timeout
+        await trader.wait_for_order_fill(result, timeout=5)
+        
+        response_data = {
+            "status": "submitted",
+            "symbol": request.symbol,
+            "quantity_closed": abs(closing_size),
+            "order_status": result.orderStatus.status,
+            "filled": result.orderStatus.filled,
+            "remaining": result.orderStatus.remaining,
+        }
+        
+        return _sanitize_for_json(response_data)
+        
+    except Exception as e:
+        return _sanitize_for_json({
+            "status": "error",
+            "symbol": request.symbol,
+            "message": str(e)
+        })

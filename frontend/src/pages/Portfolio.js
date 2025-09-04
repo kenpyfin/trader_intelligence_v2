@@ -72,6 +72,7 @@ const PortfolioPage = () => {
   const [loadingOrders, setLoadingOrders] = useState(true);
   const [error, setError] = useState('');
   const [closingStatus, setClosingStatus] = useState({});
+  const [stockClosingStatus, setStockClosingStatus] = useState({});
 
   useEffect(() => {
     const fetchOpenPositions = async () => {
@@ -120,6 +121,21 @@ const PortfolioPage = () => {
     } catch (err) {
         const errorMessage = err.response?.data?.detail || 'Failed to submit closing order.';
         setClosingStatus(prev => ({ ...prev, [symbol]: { inProgress: false, error: errorMessage } }));
+    }
+  };
+
+  const handleCloseStockPosition = async (symbol, quantity) => {
+    setStockClosingStatus(prev => ({ ...prev, [symbol]: { inProgress: true } }));
+    
+    try {
+        const response = await axios.post('/api/portfolio/close-stock-position', {
+            symbol: symbol,
+            quantity: quantity
+        });
+        setStockClosingStatus(prev => ({ ...prev, [symbol]: { inProgress: false, data: response.data } }));
+    } catch (err) {
+        const errorMessage = err.response?.data?.detail || 'Failed to submit stock closing order.';
+        setStockClosingStatus(prev => ({ ...prev, [symbol]: { inProgress: false, error: errorMessage } }));
     }
   };
 
@@ -223,15 +239,52 @@ const PortfolioPage = () => {
               <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Symbol</th>
               <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Quantity</th>
               <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Avg Cost/Share</th>
+              <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Actions</th>
             </tr>
           </thead>
           <tbody>
             {stocks.map((stock, index) => {
+              const status = stockClosingStatus[stock.symbol];
+              const isClosing = status?.inProgress;
+              const positionColor = stock.position > 0 ? 'green' : stock.position < 0 ? 'red' : 'black';
+              
               return (
                 <tr key={index}>
                   <td style={{ padding: '8px', border: '1px solid #ddd', fontWeight: 'bold' }}>{stock.symbol}</td>
-                  <td style={{ padding: '8px', border: '1px solid #ddd' }}>{stock.position}</td>
-                  <td style={{ padding: '8px', border: '1px solid #ddd' }}>${formatCurrency(stock.position !== 0 ? (stock.avgCost / stock.position) : 0)}</td>
+                  <td style={{ padding: '8px', border: '1px solid #ddd', color: positionColor, fontWeight: 'bold' }}>
+                    {stock.position > 0 ? `+${stock.position}` : stock.position}
+                  </td>
+                  <td style={{ padding: '8px', border: '1px solid #ddd' }}>
+                    ${formatCurrency(stock.position !== 0 ? (stock.avgCost / stock.position) : 0)}
+                  </td>
+                  <td style={{ padding: '8px', border: '1px solid #ddd' }}>
+                    <button 
+                      onClick={() => handleCloseStockPosition(stock.symbol, stock.position)} 
+                      disabled={isClosing || stock.position === 0}
+                      style={{
+                        backgroundColor: stock.position === 0 ? '#ccc' : '#dc3545',
+                        color: 'white',
+                        border: 'none',
+                        padding: '6px 12px',
+                        borderRadius: '4px',
+                        cursor: stock.position === 0 ? 'not-allowed' : 'pointer',
+                        fontSize: '0.9em'
+                      }}
+                    >
+                      {isClosing ? 'Closing...' : 'Close Position'}
+                    </button>
+                    {status?.data && (
+                      <div style={{marginTop: '8px', padding: '6px', background: '#e8f5e9', borderRadius: '4px', fontSize: '0.8em'}}>
+                        <strong>Order Status:</strong> {status.data.status}
+                        <br />Filled: {status.data.filled}/{status.data.quantity_closed}
+                      </div>
+                    )}
+                    {status?.error && (
+                      <div style={{marginTop: '8px', padding: '6px', background: '#f8d7da', borderRadius: '4px', color: '#721c24', fontSize: '0.8em'}}>
+                        <strong>Error:</strong> {status.error}
+                      </div>
+                    )}
+                  </td>
                 </tr>
               );
             })}

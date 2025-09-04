@@ -1,15 +1,14 @@
 import asyncio
 import traceback
-from src.my_libs_py3.TD_Order import IBTrader
 from src.models.order_models import StrategyOrderRequest
+from .connection_manager import connection_manager
 
 async def place_strategy_order(order_request: StrategyOrderRequest):
     """
     Connects to IB and places a complex strategy order.
     """
-    trader = None
     try:
-        trader = IBTrader() # This connects on init
+        trader = await connection_manager.get_trader()
         
         # IBTrader's place_strategy_order expects YYYYMMDD format
         expiry_date_ib_format = order_request.expiration_date.replace('-', '')
@@ -49,6 +48,3 @@ async def place_strategy_order(order_request: StrategyOrderRequest):
     except Exception as e:
         print(traceback.format_exc())
         return {"status": "error", "message": str(e)}
-    finally:
-        if trader:
-            trader.disconnect()
