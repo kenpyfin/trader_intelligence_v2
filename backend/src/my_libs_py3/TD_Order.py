@@ -23,6 +23,7 @@ class IBTrader:
         # For Docker on Mac/Windows, 'host.docker.internal' is preferred.
         # For Docker on Linux, the host's network IP is needed.
         self.ip_add = os.getenv('TWS_HOST', '10.0.1.22')
+        self.account= os.getenv("TWS_ACCOUNT")
         self.port = tw_port
         print(f"INFO: IBTrader initialized to connect to TWS at {self.ip_add}:{self.port}")
         self.client = IB()
@@ -34,12 +35,12 @@ class IBTrader:
         if not self.client.isConnected():
             try:
                 print(f"INFO: Connecting to TWS at {self.ip_add}:{self.port}...")
-                await self.client.connectAsync(self.ip_add, self.port, clientId=random.randint(0, 1000), timeout=10)
+                await self.client.connectAsync(self.ip_add, self.port, clientId=random.randint(0, 1000), timeout=10,account=self.account)
                 print("INFO: Connection to TWS established successfully.")
             except (asyncio.TimeoutError, ConnectionRefusedError):
                  print(f"ERROR: Connection to {self.ip_add}:{self.port} timed out or was refused.")
                  print("HINT: Ensure TWS/Gateway is running, API connections are enabled, and the IP is whitelisted.")
-                 self.client.connect(self.ip_add, self.port, clientId=random.randint(0, 1000) + 1)
+                 self.client.connect(self.ip_add, self.port, clientId=random.randint(0, 1000) + 1, account=self.account)
                  # Consider if a retry is needed here or if the exception should propagate.
                  # For now, we let it propagate to the caller.
                  raise
