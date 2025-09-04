@@ -35,14 +35,14 @@ class IBTrader:
         if not self.client.isConnected():
             try:
                 print(f"INFO: Connecting to TWS at {self.ip_add}:{self.port}...")
-                await self.client.connectAsync(self.ip_add, self.port, clientId=random.randint(0, 1000), timeout=10,account=self.account)
+                # Increased timeout to 180s to prevent failures when syncing large option portfolios.
+                await self.client.connectAsync(self.ip_add, self.port, clientId=random.randint(0, 1000), timeout=180, account=self.account)
                 print("INFO: Connection to TWS established successfully.")
             except (asyncio.TimeoutError, ConnectionRefusedError):
                  print(f"ERROR: Connection to {self.ip_add}:{self.port} timed out or was refused.")
                  print("HINT: Ensure TWS/Gateway is running, API connections are enabled, and the IP is whitelisted.")
-                 self.client.connect(self.ip_add, self.port, clientId=random.randint(0, 1000) + 1, account=self.account)
-                 # Consider if a retry is needed here or if the exception should propagate.
-                 # For now, we let it propagate to the caller.
+                 # The synchronous self.client.connect is removed as it blocks the event loop in an async context.
+                 # The exception is allowed to propagate to the caller.
                  raise
             except socket.gaierror:
                 print(f"ERROR: Hostname '{self.ip_add}' could not be resolved. This is a DNS lookup failure.")
@@ -61,7 +61,7 @@ class IBTrader:
         try:
             await self.connect()
             # Use accountSummaryAsync to avoid blocking the event loop
-            summary = self.client.accountSummary()
+            summary = await self.client.accountSummaryAsync()
             return float(list(filter(lambda x: x.tag == "AvailableFunds", summary))[0].value)
         except Exception as e:
             raise Exception(e)
@@ -70,14 +70,14 @@ class IBTrader:
         """Fetches the account summary."""
         try:
             await self.connect()
-            return self.client.accountSummary()
+            return await self.client.accountSummaryAsync()
         except Exception as e:
             raise Exception(f"Error fetching account summary: {e}")
 
     async def get_position_by_symbol(self, symbol) -> float:
         try:
             await self.connect()
-            positions = await self.client.reqPositions()
+            positions = await self.client.reqPositionsAsync()
             position_list = list(filter(lambda x: x.contract.symbol == symbol, positions))
             if len(position_list) == 0:
                 return 0
@@ -91,7 +91,7 @@ class IBTrader:
             await self.connect()
             order = MarketOrder('BUY' if size >= 0 else "SELL", abs(size))
             contract = Forex(symbol)
-            self.client.qualifyContracts(contract)
+            await self.client.qualifyContractsAsync(contract)
             trade = self.client.placeOrder(contract, order)
             await asyncio.sleep(1)  # Allow ib_insync to process and send the order
             return trade
@@ -103,7 +103,7 @@ class IBTrader:
             await self.connect()
             order = MarketOrder('BUY' if size >= 0 else "SELL", abs(size))
             contract = Stock(symbol, "SMART", "USD")
-            self.client.qualifyContracts(contract)
+            await self.client.qualifyContractsAsync(contract)
             trade = self.client.placeOrder(contract, order)
             await asyncio.sleep(1)  # Allow ib_insync to process and send the order
             return trade
@@ -116,7 +116,7 @@ class IBTrader:
             action = 'BUY' if size > 0 else 'SELL'
             order = LimitOrder(action, abs(size), limit_price)
             contract = Stock(symbol, "SMART", "USD")
-            self.client.qualifyContracts(contract)
+            await self.client.qualifyContractsAsync(contract)
             trade = self.client.placeOrder(contract, order)
             await asyncio.sleep(1)  # Allow ib_insync to process and send the order
             return trade
@@ -153,7 +153,7 @@ class IBTrader:
                 raise ValueError("Invalid order type or missing limit price for LMT order.")
 
             contract = Option(symbol, expiry_date, strike, right, exchange, tradingClass=symbol)
-            self.client.qualifyContracts(contract)
+            await self.client.qualifyContractsAsync(contract)
             
             trade = self.client.placeOrder(contract, order)
             await asyncio.sleep(1)  # Allow ib_insync to process and send the order
@@ -200,7 +200,7 @@ class IBTrader:
                     tradingClass=symbol
                 )
                 print(f"DEBUG: Qualifying leg: {leg_contract}")
-                self.client.qualifyContracts(leg_contract)
+                await self.client.qualifyContractsAsync(leg_contract)
                 print(f"DEBUG: Leg qualified: {leg_contract.localSymbol}, conId: {leg_contract.conId}")
                 
                 # Create a ComboLeg for the Bag contract
@@ -254,7 +254,7 @@ class IBTrader:
     async def open_positions_symbol(self):
         try:
             await self.connect()
-            positions = await self.client.reqPositions()
+            positions = await self.client.reqPositionsAsync()
             return [x.contract.symbol for x in positions]
         except Exception as e:
             raise Exception(e)
@@ -262,7 +262,7 @@ class IBTrader:
     async def open_positions(self):
         try:
             await self.connect()
-            data = await self.client.reqPositions()
+            data = await self.client.reqPositionsAsync()
             unpacked_data = []
 
             for pos in data:
@@ -296,10 +296,10 @@ class IBTrader:
         try:
             await self.connect()
             contract = Stock(symbol, 'SMART', 'USD')
-            self.client.qualifyContracts(contract)
+            await self.client.qualifyContractsAsync(contract)
             
             # This request returns a list of chain parameters.
-            chains = self.client.reqSecDefOptParams(
+            chains = await self.client.reqSecDefOptParamsAsync(
                 underlyingSymbol=contract.symbol,
                 futFopExchange='',
                 underlyingSecType=contract.secType,
@@ -351,7 +351,7 @@ class IBTrader:
         try:
             await self.connect() # Ensure connection
             contract = Option(symbol, expiry_date, strike, right, exchange, tradingClass=symbol)
-            self.client.qualifyContracts(contract)
+            await self.client.qualifyContractsAsync(contract)
             
             ticker = self.client.reqMktData(contract, '', False, False)
             await asyncio.sleep(2) # Allow time for data to arrive, adjust as needed
@@ -361,7 +361,7 @@ class IBTrader:
                 return ticker
             else:
                 # Attempt to get historical data if live tick fails or is empty
-                hist_data = self.client.reqHistoricalData(
+                hist_data = await self.client.reqHistoricalDataAsync(
                     contract,
                     endDateTime='',
                     durationStr='1 D', # Get data for 1 day
