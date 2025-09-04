@@ -262,7 +262,7 @@ class IBTrader:
     async def open_positions(self):
         try:
             await self.connect()
-            data = await self.client.positionsAsync()
+            data = await self.client.positions()
             unpacked_data = []
 
             for pos in data:
