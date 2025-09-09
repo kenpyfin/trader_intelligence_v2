@@ -165,50 +165,113 @@ async def get_recent_orders_service():
 
 async def close_strategy(request: CloseStrategyRequest):
     """
-    Closes a strategy by placing opposing market orders for each of its legs concurrently.
+    Closes a strategy by placing a single combo order to close all legs atomically.
+    This ensures all legs are filled together, preventing partial hedged positions.
     """
     trader = await connection_manager.get_trader()
-    closing_trades = []
     
-    tasks = []
-    for leg in request.legs:
-        # The size to close is the negative of the current position quantity.
-        closing_size = -leg.quantity
+    if not request.legs:
+        return _sanitize_for_json({"status": "error", "message": "No legs provided for strategy closure"})
+    
+    try:
+        # Get the underlying symbol from the first leg (all legs should have same symbol)
+        underlying_symbol = request.legs[0].symbol
         
-        task = trader.place_option_order(
-            symbol=leg.symbol,
-            size=closing_size,
-            expiry_date=leg.expiry,
-            strike=leg.strike,
-            right=leg.right,
+        # Prepare legs data for the strategy order
+        # Each leg action should be OPPOSITE of current position to close it
+        legs_data = []
+        for leg in request.legs:
+            # Determine the closing action - opposite of current position
+            closing_action = "SELL" if leg.quantity > 0 else "BUY"
+            
+            legs_data.append({
+                'action': closing_action,
+                'quantity': 1,  # Ratio within the strategy (always 1:1 for basic strategies)
+                'expiry_date': leg.expiry.replace('-', ''),  # Convert YYYY-MM-DD to YYYYMMDD
+                'strike': leg.strike,
+                'right': leg.right
+            })
+        
+        # The size is the absolute quantity of the strategy to close
+        # Use the minimum absolute position as the strategy size
+        strategy_size = min(abs(leg.quantity) for leg in request.legs)
+        
+        print(f"DEBUG: Closing strategy {underlying_symbol} with size {strategy_size}")
+        print(f"DEBUG: Strategy legs: {legs_data}")
+        
+        # Place the strategy order to close the entire position atomically
+        result = await trader.place_strategy_order(
+            symbol=underlying_symbol,
+            legs_data=legs_data,
+            size=strategy_size,  # Positive size since action is already set in legs
             order_type='MKT'
         )
-        tasks.append(task)
-    
-    # Execute all closing orders concurrently.
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    
-    # Process results.
-    for i, result in enumerate(results):
-        leg = request.legs[i]
-        if isinstance(result, Exception):
-            closing_trades.append({
-                "leg": f"{leg.symbol} {leg.expiry} {leg.strike} {leg.right}",
-                "status": "error",
-                "message": str(result)
-            })
-        else:
-            # Wait for the trade to get a status update, but with a short timeout.
-            await trader.wait_for_order_fill(result, timeout=5)
-            closing_trades.append({
-                "leg": f"{leg.symbol} {leg.expiry} {leg.strike} {leg.right}",
-                "status": "success",
-                "order_status": result.orderStatus.status,
-                "filled": result.orderStatus.filled,
-                "remaining": result.orderStatus.remaining,
-            })
+        
+        # Wait for the trade to get a status update, but with a short timeout
+        await trader.wait_for_order_fill(result, timeout=5)
+        
+        # Create response with strategy-level information
+        strategy_summary = {
+            "strategy": f"{underlying_symbol} {len(request.legs)}-leg strategy",
+            "status": "success",
+            "order_status": result.orderStatus.status,
+            "filled": result.orderStatus.filled,
+            "remaining": result.orderStatus.remaining,
+            "strategy_size": strategy_size,
+            "legs_closed": len(request.legs)
+        }
+        
+        return _sanitize_for_json({"status": "submitted", "trade": strategy_summary})
+        
+    except Exception as e:
+        print(f"ERROR: Failed to close strategy for {underlying_symbol}: {e}")
+        # Fallback: If combo order fails, fall back to individual leg orders
+        print("INFO: Falling back to individual leg closure...")
+        
+        closing_trades = []
+        tasks = []
+        for leg in request.legs:
+            # The size to close is the negative of the current position quantity.
+            closing_size = -leg.quantity
             
-    return _sanitize_for_json({"status": "submitted", "trades": closing_trades})
+            task = trader.place_option_order(
+                symbol=leg.symbol,
+                size=closing_size,
+                expiry_date=leg.expiry,
+                strike=leg.strike,
+                right=leg.right,
+                order_type='MKT'
+            )
+            tasks.append(task)
+        
+        # Execute all closing orders concurrently as fallback
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Process results
+        for i, result in enumerate(results):
+            leg = request.legs[i]
+            if isinstance(result, Exception):
+                closing_trades.append({
+                    "leg": f"{leg.symbol} {leg.expiry} {leg.strike} {leg.right}",
+                    "status": "error",
+                    "message": str(result)
+                })
+            else:
+                # Wait for the trade to get a status update, but with a short timeout
+                await trader.wait_for_order_fill(result, timeout=5)
+                closing_trades.append({
+                    "leg": f"{leg.symbol} {leg.expiry} {leg.strike} {leg.right}",
+                    "status": "success",
+                    "order_status": result.orderStatus.status,
+                    "filled": result.orderStatus.filled,
+                    "remaining": result.orderStatus.remaining,
+                })
+                
+        return _sanitize_for_json({
+            "status": "submitted", 
+            "trades": closing_trades,
+            "note": "Strategy closed using individual leg orders as fallback"
+        })
 
 async def close_stock_position(request: CloseStockPositionRequest):
     """

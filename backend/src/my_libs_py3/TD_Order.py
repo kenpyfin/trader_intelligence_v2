@@ -21,8 +21,8 @@ TIMEOUT = 60
 import ib_insync
 ib_insync.util.logToConsole(logging.WARNING)  # Reduce ib_insync verbosity
 # Increase default timeout for requests that commonly fail
-ib_insync.util.timeoutReceived = 120  # 2 minute timeout instead of default
-ib_insync.client.Client.requestTimeout = 120  # Set request timeout to 2 minutes
+ib_insync.util.timeoutReceived = 30  # 2 minute timeout instead of default
+ib_insync.client.Client.requestTimeout = 30  # Set request timeout to 2 minutes
 
 
 class IBTrader:
@@ -38,7 +38,7 @@ class IBTrader:
         
         # Configure ib_insync to NOT automatically request completed orders which commonly timeout
         # This prevents the "completed orders request timed out" error
-        self.client.RequestTimeout = 10  # 2 minute timeout for all requests
+        self.client.RequestTimeout = 30  # 2 minute timeout for all requests
         
         # The connection is now established on-demand by async methods.
         atexit.register(self.disconnect)
@@ -117,9 +117,27 @@ class IBTrader:
             raise Exception(e)
 
     async def place_stock_market_order(self, symbol, size):
+        """
+        Places a stock order using limit price at current market price.
+        This ensures orders can be placed outside market hours and will remain active.
+        """
         try:
             await self.connect()
-            order = MarketOrder('BUY' if size >= 0 else "SELL", abs(size))
+            action = 'BUY' if size >= 0 else "SELL"
+            quantity = abs(size)
+            
+            # Get current market price to use as limit price
+            current_price = await self.get_current_price(symbol, 'STK')
+            if current_price is None:
+                # Fallback to market order if price can't be determined
+                print(f"WARN: Could not fetch price for {symbol}, using market order")
+                order = MarketOrder(action, quantity)
+            else:
+                # Use limit order at exact market price
+                limit_price = round(current_price, 2)
+                order = LimitOrder(action, quantity, limit_price)
+                print(f"INFO: Placing {action} limit order for {quantity} {symbol} at ${limit_price}")
+            
             contract = Stock(symbol, "SMART", "USD")
             await self.client.qualifyContractsAsync(contract)
             trade = self.client.placeOrder(contract, order)
@@ -143,7 +161,8 @@ class IBTrader:
 
     async def place_option_order(self, symbol: str, size: int, expiry_date: str, strike: float, right: str, order_type: str = 'MKT', limit_price: float = None, exchange: str = 'SMART'):
         """
-        Places an option order asynchronously.
+        Places an option order asynchronously. For MKT orders, automatically converts to LMT
+        orders using current market price to ensure orders can be placed outside market hours.
 
         Args:
             symbol (str): The underlying symbol.
@@ -164,7 +183,18 @@ class IBTrader:
             quantity = abs(size)
 
             if order_type.upper() == 'MKT':
-                order = MarketOrder(action, quantity)
+                # Convert market order to limit order using current market price
+                current_price = await self.get_current_price(symbol, 'OPT', expiry_date, strike, right, exchange)
+                if current_price is None:
+                    # Fallback to market order if price can't be determined
+                    print(f"WARN: Could not fetch price for {symbol} {expiry_date} {strike} {right}, using market order")
+                    order = MarketOrder(action, quantity)
+                else:
+                    # Use limit order at exact market price
+                    calculated_limit_price = round(current_price, 2)
+                    order = LimitOrder(action, quantity, calculated_limit_price)
+                    print(f"INFO: Placing {action} limit order for {quantity} {symbol} {expiry_date} {strike}{right} at ${calculated_limit_price:.2f}")
+                    
             elif order_type.upper() == 'LMT' and limit_price is not None:
                 order = LimitOrder(action, quantity, limit_price)
             else:
@@ -181,7 +211,9 @@ class IBTrader:
 
     async def place_strategy_order(self, symbol: str, legs_data: list, size: int, order_type: str = 'MKT', limit_price: float = None, exchange: str = 'SMART'):
         """
-        Places a multi-leg option strategy order asynchronously.
+        Places a multi-leg option strategy order asynchronously. For MKT orders, attempts to 
+        calculate strategy limit price based on individual leg prices to ensure orders can
+        be placed outside market hours.
 
         Args:
             symbol (str): The underlying symbol.
@@ -207,6 +239,8 @@ class IBTrader:
             contract.exchange = exchange
             
             combo_legs = []
+            strategy_estimated_price = 0.0
+            
             for leg_info in legs_data:
                 # Qualify each leg to get its conId
                 leg_contract = Option(
@@ -221,6 +255,18 @@ class IBTrader:
                 await self.client.qualifyContractsAsync(leg_contract)
                 print(f"DEBUG: Leg qualified: {leg_contract.localSymbol}, conId: {leg_contract.conId}")
                 
+                # For MKT orders, try to get leg price for strategy pricing
+                if order_type.upper() == 'MKT' and limit_price is None:
+                    leg_price = await self.get_current_price(symbol, 'OPT', leg_info['expiry_date'], leg_info['strike'], leg_info['right'], exchange)
+                    if leg_price is not None:
+                        # Add/subtract based on whether we're buying or selling this leg
+                        leg_contribution = leg_price * leg_info['quantity']
+                        if leg_info['action'] == 'BUY':
+                            strategy_estimated_price += leg_contribution
+                        else:  # SELL
+                            strategy_estimated_price -= leg_contribution
+                        print(f"DEBUG: Leg {leg_info['strike']}{leg_info['right']} price: ${leg_price:.2f}, contribution: ${leg_contribution:.2f}")
+                
                 # Create a ComboLeg for the Bag contract
                 combo_leg = ComboLeg()
                 combo_leg.conId = leg_contract.conId
@@ -230,9 +276,6 @@ class IBTrader:
                 combo_legs.append(combo_leg)
                 
             contract.comboLegs = combo_legs
-            # A 'Bag' contract for a combo strategy is defined by its legs and is not qualified directly.
-            # Each individual leg has already been qualified above to get its conId.
-            # Attempting to qualify the Bag contract results in the API error you observed.
             print("DEBUG: Combo contract constructed from qualified legs.")
 
             # Create the order for the whole strategy
@@ -240,7 +283,24 @@ class IBTrader:
             quantity = abs(size)
 
             if order_type.upper() == 'MKT':
-                order = MarketOrder(strategy_action, quantity)
+                # Try to use calculated strategy limit price for execution outside market hours
+                if strategy_estimated_price != 0.0:
+                    # Use exact estimated strategy price without buffer
+                    calculated_limit_price = round(strategy_estimated_price, 2)
+                    
+                    # Ensure the limit price is positive for buy orders and reasonable for sell orders
+                    if strategy_action == 'BUY' and calculated_limit_price > 0:
+                        order = LimitOrder(strategy_action, quantity, calculated_limit_price)
+                        print(f"INFO: Converting MKT to LMT order at ${calculated_limit_price:.2f}")
+                    elif strategy_action == 'SELL' and calculated_limit_price > 0:
+                        order = LimitOrder(strategy_action, quantity, calculated_limit_price)
+                        print(f"INFO: Converting MKT to LMT order at ${calculated_limit_price:.2f}")
+                    else:
+                        print("WARN: Could not calculate reasonable strategy limit price, using market order")
+                        order = MarketOrder(strategy_action, quantity)
+                else:
+                    print("WARN: Could not estimate strategy price, using market order")
+                    order = MarketOrder(strategy_action, quantity)
             elif order_type.upper() == 'LMT' and limit_price is not None:
                 order = LimitOrder(strategy_action, quantity, limit_price)
             else:
@@ -351,6 +411,77 @@ class IBTrader:
             return None
         except Exception as e:
             raise Exception(e)
+
+    async def get_current_price(self, symbol: str, contract_type: str = 'STK', expiry_date: str = None, strike: float = None, right: str = None, exchange: str = 'SMART'):
+        """
+        Gets current market price (or last close price if market closed) for any instrument.
+        
+        Args:
+            symbol (str): The symbol
+            contract_type (str): 'STK' for stock, 'OPT' for option
+            expiry_date (str): Option expiry in YYYYMMDD format (for options only)
+            strike (float): Strike price (for options only)  
+            right (str): 'C' or 'P' (for options only)
+            exchange (str): Exchange, defaults to 'SMART'
+            
+        Returns:
+            float: Current market price or last close price, None if unable to fetch
+        """
+        try:
+            await self.connect()
+            
+            if contract_type.upper() == 'STK':
+                contract = Stock(symbol, exchange, 'USD')
+            elif contract_type.upper() == 'OPT':
+                contract = Option(symbol, expiry_date, strike, right, exchange, tradingClass=symbol)
+            else:
+                raise ValueError(f"Unsupported contract type: {contract_type}")
+                
+            await self.client.qualifyContractsAsync(contract)
+            
+            # Try to get live market data first
+            ticker = self.client.reqMktData(contract, '', False, False)
+            await asyncio.sleep(2)  # Allow time for data to arrive
+            
+            # Check for live prices (bid/ask/last)
+            if ticker and hasattr(ticker, 'last') and ticker.last is not None and not pd.isna(ticker.last) and ticker.last > 0:
+                self.client.cancelMktData(contract)
+                return float(ticker.last)
+            elif ticker and hasattr(ticker, 'close') and ticker.close is not None and not pd.isna(ticker.close) and ticker.close > 0:
+                self.client.cancelMktData(contract)
+                return float(ticker.close)
+            elif ticker and hasattr(ticker, 'bid') and hasattr(ticker, 'ask') and ticker.bid is not None and ticker.ask is not None:
+                if not pd.isna(ticker.bid) and not pd.isna(ticker.ask) and ticker.bid > 0 and ticker.ask > 0:
+                    mid_price = (float(ticker.bid) + float(ticker.ask)) / 2.0
+                    self.client.cancelMktData(contract)
+                    return mid_price
+                    
+            # If live data fails, get historical data
+            self.client.cancelMktData(contract)
+            print(f"INFO: No live data available for {symbol}, fetching historical close price")
+            
+            hist_data = await self.client.reqHistoricalDataAsync(
+                contract,
+                endDateTime='',
+                durationStr='5 D',  # Get last 5 days of data
+                barSizeSetting='1 day',
+                whatToShow='MIDPOINT',
+                useRTH=True,
+                formatDate=1
+            )
+            
+            if hist_data and len(hist_data) > 0:
+                # Return the most recent close price
+                last_bar = hist_data[-1]
+                if hasattr(last_bar, 'close') and last_bar.close is not None and last_bar.close > 0:
+                    return float(last_bar.close)
+                    
+            print(f"WARN: Unable to fetch price for {symbol} {contract_type}")
+            return None
+            
+        except Exception as e:
+            print(f"ERROR: Failed to fetch price for {symbol}: {e}")
+            return None
 
     async def get_option_market_data(self, symbol: str, expiry_date: str, strike: float, right: str, exchange: str = 'SMART'):
         """

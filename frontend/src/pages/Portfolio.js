@@ -209,11 +209,32 @@ const PortfolioPage = () => {
         {status?.data && (
             <div style={{marginTop: '10px', padding: '10px', background: '#e8f5e9', borderRadius: '5px'}}>
                 <strong>Closing Order Status:</strong> {status.data.status}
-                <ul>
-                    {status.data.trades.map((trade, i) => (
-                        <li key={i}>{trade.leg}: {trade.order_status} (Filled: {trade.filled})</li>
-                    ))}
-                </ul>
+                
+                {/* Handle new single strategy order response */}
+                {status.data.trade && (
+                    <div style={{marginTop: '8px'}}>
+                        <div><strong>Strategy:</strong> {status.data.trade.strategy}</div>
+                        <div><strong>Order Status:</strong> {status.data.trade.order_status}</div>
+                        <div><strong>Filled:</strong> {status.data.trade.filled} / {status.data.trade.strategy_size}</div>
+                        <div><strong>Remaining:</strong> {status.data.trade.remaining}</div>
+                    </div>
+                )}
+                
+                {/* Handle fallback individual leg orders response */}
+                {status.data.trades && (
+                    <div>
+                        {status.data.note && (
+                            <div style={{fontSize: '0.9em', color: '#856404', marginBottom: '8px'}}>
+                                <em>{status.data.note}</em>
+                            </div>
+                        )}
+                        <ul>
+                            {status.data.trades.map((trade, i) => (
+                                <li key={i}>{trade.leg}: {trade.order_status} (Filled: {trade.filled})</li>
+                            ))}
+                        </ul>
+                    </div>
+                )}
             </div>
         )}
         {status?.error && (
