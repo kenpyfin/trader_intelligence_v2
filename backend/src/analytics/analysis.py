@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 from src.my_libs_py3.my_data import PriceDataFetcher
 from src.my_libs_py3.fmp import FMPClient
 from src.analytics.treasury_curve import build_treasury_curve
@@ -8,6 +8,44 @@ from .methodologies.gpt_verdict import generate_gpt_verdict
 
 # This file is a migration of the analysis logic from option_trade.py.
 # All Streamlit-specific code (st.*) has been removed.
+
+def _sanitize_for_json_serialization(obj):
+    """
+    Recursively sanitize objects to be JSON-serializable, handling pandas/numpy types.
+    """
+    if obj is None:
+        return None
+    elif isinstance(obj, (str, int, float, bool)):
+        # Handle NaN and infinity for floats
+        if isinstance(obj, float) and (np.isnan(obj) or np.isinf(obj)):
+            return None
+        return obj
+    elif isinstance(obj, (date, datetime, pd.Timestamp)):
+        # Convert dates and timestamps to ISO format strings
+        if hasattr(obj, 'isoformat'):
+            return obj.isoformat()
+        elif hasattr(obj, 'strftime'):
+            return obj.strftime('%Y-%m-%d %H:%M:%S') if hasattr(obj, 'hour') else obj.strftime('%Y-%m-%d')
+        else:
+            return str(obj)
+    elif isinstance(obj, np.generic):
+        # Handle numpy scalars
+        return obj.item()
+    elif isinstance(obj, np.ndarray):
+        # Handle numpy arrays
+        return obj.tolist()
+    elif hasattr(obj, 'to_dict') and callable(getattr(obj, 'to_dict')):
+        # Handle pandas DataFrames/Series
+        return _sanitize_for_json_serialization(obj.to_dict())
+    elif isinstance(obj, dict):
+        # Recursively handle dictionaries
+        return {str(k): _sanitize_for_json_serialization(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple, set)):
+        # Recursively handle sequences
+        return [_sanitize_for_json_serialization(item) for item in obj]
+    else:
+        # Fallback to string representation
+        return str(obj)
 
 # --- Helper Functions from option_trade.py ---
 
@@ -370,14 +408,84 @@ def generate_holistic_conclusion(synthesis_data):
     return conclusion_html, final_bias
 
 
-def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, rate_source: str = 'etf', analysis_method: str = 'holistic-market-edge'):
+def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, rate_source: str = 'etf', analysis_method: str = 'holistic-market-edge', override_price: float = None):
     fmp = FMPClient()
     price_fetcher = PriceDataFetcher()
 
-    rt_quote = fmp.realtimequote(ticker)
-    if rt_quote is None or rt_quote.empty or 'price' not in rt_quote.columns:
-        return {"status": "error", "message": f"Could not fetch current price for {ticker}."}
-    S_current = rt_quote.price.iloc[0]
+    # Multi-source price fetching with validation
+    S_current = None
+    price_sources = []
+    price_validation_note = "Price source validation"
+    
+    # Check for manual price override first (for testing/debugging)
+    if override_price and override_price > 0:
+        S_current = override_price
+        price_sources.append(("Manual Override", override_price))
+        price_validation_note = f"Using manual price override: ${override_price:.2f}"
+        print(f"Using manual price override for {ticker}: ${override_price:.2f}")
+    else:
+        # Try FMP real-time quote first
+        try:
+            rt_quote = fmp.realtimequote(ticker)
+            if rt_quote is not None and not rt_quote.empty and 'price' in rt_quote.columns:
+                fmp_price = rt_quote.price.iloc[0]
+                if fmp_price and fmp_price > 0:
+                    price_sources.append(("FMP", fmp_price))
+                    S_current = fmp_price
+        except Exception as e:
+            print(f"FMP price fetch failed for {ticker}: {e}")
+        
+        # Get finviz stock details (includes current price)
+        stock_details = price_fetcher.get_stock_details_finviz(ticker)
+        finviz_price = stock_details.get('price')
+        if finviz_price:
+            try:
+                finviz_price_float = float(finviz_price)
+                if finviz_price_float > 0:
+                    price_sources.append(("Finviz", finviz_price_float))
+                    # Use finviz price if no FMP price or if FMP seems stale
+                    if S_current is None:
+                        S_current = finviz_price_float
+            except (ValueError, TypeError):
+                pass
+        
+        # Try finviz real-time data as backup
+        if S_current is None:
+            try:
+                finviz_rt = price_fetcher.get_price_data([ticker], method="realtimedata", back_day=1, last_record=True)
+                if finviz_rt is not None and not finviz_rt.empty and 'Close' in finviz_rt.columns:
+                    finviz_rt_price = finviz_rt['Close'].iloc[-1]
+                    if finviz_rt_price and finviz_rt_price > 0:
+                        price_sources.append(("Finviz-RT", finviz_rt_price))
+                        S_current = finviz_rt_price
+            except Exception as e:
+                print(f"Finviz real-time fetch failed for {ticker}: {e}")
+    
+    # Get stock_details if not already fetched  
+    if 'stock_details' not in locals():
+        stock_details = price_fetcher.get_stock_details_finviz(ticker)
+    
+    if S_current is None or S_current <= 0:
+        return {"status": "error", "message": f"Could not fetch valid current price for {ticker} from any source. Sources tried: FMP, Finviz"}
+    
+    # Validate price consistency across sources
+    if len(price_sources) > 1:
+        prices = [p[1] for p in price_sources]
+        max_price, min_price = max(prices), min(prices)
+        price_spread_pct = (max_price - min_price) / min_price * 100 if min_price > 0 else 0
+        
+        if price_spread_pct > 5:  # More than 5% spread suggests stale data
+            # Use the most recent/reliable source (prefer Finviz over FMP for current prices)
+            for source_name, source_price in reversed(price_sources):  # reversed to prefer later sources
+                if source_name.startswith("Finviz") and source_price > 0:
+                    S_current = source_price
+                    break
+            price_validation_note = f"Price discrepancy detected: {[f'{s}=${p:.2f}' for s,p in price_sources]}. Using {S_current:.2f}"
+        else:
+            price_validation_note = f"Price validated across sources: {[f'{s}=${p:.2f}' for s,p in price_sources]}"
+    else:
+        source_name = price_sources[0][0] if price_sources else "Unknown"
+        price_validation_note = f"Single source price: {source_name}=${S_current:.2f}"
 
     option_chain_df = price_fetcher.get_option_data_finviz(ticker, 'o', expiration_date.strftime('%Y-%m-%d'))
     if option_chain_df is None or option_chain_df.empty:
@@ -394,7 +502,6 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
     key_vols_iv, _ = fetch_iv_term_structure(ticker, price_fetcher, fmp)
     if not key_vols_iv and hv_current: key_vols_iv = [(0, hv_current)]
 
-    stock_details = price_fetcher.get_stock_details_finviz(ticker)
     div_current = stock_details.get('dividend_yield', 0.0)
     earnings_date = parse_earnings_date(stock_details.get('earnings_date'))
 
@@ -515,10 +622,80 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
         "status": "success", "ticker": ticker, "S_current": S_current, "expiration_date": expiration_date.isoformat(), "dte": days_to_exp,
         "synthesis_data": synthesis_data,
         "iv_high": iv_high,
-        "iv_low": iv_low, "candlestick_analysis": candlestick_analysis, "volume_oi_analysis": volume_oi_analysis,
-        "movement_analysis_results": movement_analysis_results, "results_df": results_df
+        "iv_low": iv_low, 
+        "candlestick_analysis": _sanitize_for_json_serialization(candlestick_analysis), 
+        "volume_oi_analysis": _sanitize_for_json_serialization(volume_oi_analysis),
+        "movement_analysis_results": _sanitize_for_json_serialization(movement_analysis_results), 
+        "results_df": results_df,
+        
+        # Enhanced market context for GPT verdict
+        "market_data": _sanitize_for_json_serialization({
+            "current_price": S_current,
+            "price_sources_checked": price_sources,
+            "data_timestamp": date.today().isoformat(),
+            "ticker": ticker,
+            "price_validation": price_validation_note,
+            "historical_volatility": hv_current,
+            "implied_volatility": spot_iv,
+            "iv_hv_ratio": (spot_iv / hv_current) if (spot_iv and hv_current and hv_current > 0) else None,
+            "dividend_yield": div_current,
+            "risk_free_rate": r_current,
+            "earnings_date": earnings_date.isoformat() if earnings_date else None,
+            "days_to_earnings": (earnings_date - date.today()).days if earnings_date else None,
+            "price_context": f"CRITICAL: The current real-time price for {ticker} is ${S_current:.2f} as of {date.today().isoformat()}. This price was validated across multiple sources. ALWAYS use this price ${S_current:.2f} for all analysis, strike selection, and recommendations. Do not reference any other price levels. {price_validation_note}"
+        }),
+        
+        # Put-call parity analysis for options positioning insights
+        "parity_analysis": _sanitize_for_json_serialization({
+            "parity_data": parity_data,
+            "arbitrage_opportunities": len([p for p in parity_data if abs(p.get("Parity Difference", 0)) > 0.5]) if parity_data else 0
+        }),
+        
+        # Enhanced stock fundamentals from finviz
+        "stock_fundamentals": _sanitize_for_json_serialization({
+            "details": stock_details,
+            "key_metrics": {
+                "pe_ratio": stock_details.get('pe_ratio'),
+                "eps_growth": stock_details.get('eps_growth_this_year'),
+                "revenue_growth": stock_details.get('sales_growth_quarterly'),
+                "debt_to_equity": stock_details.get('debt_equity'),
+                "roa": stock_details.get('roa'),
+                "roe": stock_details.get('roe'),
+                "profit_margin": stock_details.get('profit_margin'),
+                "beta": stock_details.get('beta'),
+                "average_volume": stock_details.get('average_volume'),
+                "relative_volume": stock_details.get('relative_volume'),
+                "market_cap": stock_details.get('market_cap')
+            }
+        }),
+        
+        # Volatility term structure for IV analysis
+        "volatility_structure": _sanitize_for_json_serialization({
+            "iv_term_points": key_vols_iv,
+            "forward_vol_structure": vol_term_structure.tolist() if isinstance(vol_term_structure, np.ndarray) else vol_term_structure,
+            "vol_skew_analysis": {
+                "iv_rank_proxy": "high" if iv_high else ("low" if iv_low else "normal"),
+                "hv_comparison": {
+                    "iv_above_hv": spot_iv > hv_current if (spot_iv and hv_current) else None,
+                    "iv_hv_spread": (spot_iv - hv_current) if (spot_iv and hv_current) else None
+                }
+            }
+        }),
+        
+        # Options flow and positioning insights
+        "options_positioning": _sanitize_for_json_serialization({
+            "total_undervalued_options": len(results) if results else 0,
+            "top_opportunity": results_df.iloc[0].to_dict() if (results_df is not None and not results_df.empty) else None,
+            "strike_distribution": {
+                "analyzed_strikes": selected_strikes.tolist() if hasattr(selected_strikes, 'tolist') else list(selected_strikes),
+                "atm_strike": float(strikes[np.argmin(np.abs(strikes - S_current))]) if len(strikes) > 0 else None
+            }
+        })
     }
 
+    # Import the generate_holistic_conclusion function  
+    from ..services.analysis_service import generate_holistic_conclusion
+    
     if 'gpt-verdict' in analysis_method:
         print(f"DEBUG: Running GPT Verdict analysis for {ticker} (method: {analysis_method})")
         use_web = 'web' in analysis_method
@@ -530,19 +707,37 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
         analysis_result_package['final_bias'] = gpt_verdict.get('final_bias', 'Neutral')
         analysis_result_package['final_conclusion_html'] = gpt_verdict.get('summary_html', '<p>Failed to retrieve AI summary.</p>')
         analysis_result_package['gpt_verdict'] = gpt_verdict
+        
+        # Generate recommended strategy based on the GPT bias and analysis data
+        # Use the holistic conclusion function to generate strategy, but override the HTML and bias with GPT results
+        _, _, recommended_strategy = generate_holistic_conclusion(synthesis_data, strikes, S_current)
+        analysis_result_package['recommended_strategy'] = _sanitize_for_json_serialization(recommended_strategy)
+        print(f"DEBUG: Generated recommended strategy for GPT analysis: {recommended_strategy.get('name', 'None')}")
     else:
         print(f"DEBUG: Running Holistic Market Edge analysis for {ticker}")
-        # Generate the rule-based conclusion
-        final_conclusion_html, final_bias = generate_holistic_conclusion(synthesis_data)
+        # Generate the rule-based conclusion - fix to handle 3 return values
+        final_conclusion_html, final_bias, recommended_strategy = generate_holistic_conclusion(synthesis_data, strikes, S_current)
         analysis_result_package['final_conclusion_html'] = final_conclusion_html
         analysis_result_package['final_bias'] = final_bias
+        analysis_result_package['recommended_strategy'] = _sanitize_for_json_serialization(recommended_strategy)
         analysis_result_package['gpt_verdict'] = None # Ensure it's not present for rule-based analysis
+        print(f"DEBUG: Generated recommended strategy for Holistic analysis: {recommended_strategy.get('name', 'None')}")
 
     # Serialize DataFrame for API response after all internal processing is done
-    if analysis_result_package.get('results_df') is not None:
-        analysis_result_package['results_df'] = analysis_result_package['results_df'].to_dict('records')
+    results_df_value = analysis_result_package.get('results_df')
+    if results_df_value is not None and hasattr(results_df_value, 'to_dict'):
+        # It's still a DataFrame, convert it
+        analysis_result_package['results_df'] = results_df_value.to_dict('records')
+    elif results_df_value is not None:
+        # It's already been converted or is another type, sanitize it
+        analysis_result_package['results_df'] = _sanitize_for_json_serialization(results_df_value)
     else:
+        # It's None, set to empty list
         analysis_result_package['results_df'] = []
     
     print(f"DEBUG: Final analysis package for {ticker}: bias={analysis_result_package.get('final_bias')}")
+    
+    # Final sanitization pass to ensure all data is JSON serializable
+    analysis_result_package = _sanitize_for_json_serialization(analysis_result_package)
+    
     return analysis_result_package

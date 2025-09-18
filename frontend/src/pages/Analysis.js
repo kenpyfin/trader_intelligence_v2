@@ -173,9 +173,10 @@ const MacroInsights = ({ onRateCalculated }) => {
   );
 };
 
-const StrategyOrder = ({ strategy, ticker, expirationDate }) => {
+const StrategyOrder = ({ strategy, ticker, expirationDate, gptVerdict }) => {
     const [isOrdering, setIsOrdering] = useState(false);
     const [orderStatus, setOrderStatus] = useState(null);
+    const [showGptInsights, setShowGptInsights] = useState(false);
 
     const handleExecute = async () => {
         setIsOrdering(true);
@@ -187,6 +188,14 @@ const StrategyOrder = ({ strategy, ticker, expirationDate }) => {
                 legs: strategy.legs,
                 is_credit_spread: strategy.is_credit_spread,
                 size: 1, // Default to 1 for now
+                // Include GPT verdict insights for enhanced order context
+                gpt_insights: gptVerdict ? {
+                    final_bias: gptVerdict.final_bias,
+                    actionable_ideas: gptVerdict.actionable_ideas || [],
+                    risk_factors: gptVerdict.risk_factors || [],
+                    rationale: gptVerdict.rationale || '',
+                    sources: gptVerdict.sources || []
+                } : null
             };
             const response = await axios.post('/api/orders/strategy', payload);
             setOrderStatus(response.data);
@@ -211,9 +220,143 @@ const StrategyOrder = ({ strategy, ticker, expirationDate }) => {
             <ul style={{ margin: '5px 0', paddingLeft: '20px' }}>
                 {legDescriptions}
             </ul>
+            
+            {/* GPT Insights Section */}
+            {gptVerdict && (
+                <div style={{ marginBottom: '15px', padding: '10px', border: '1px solid #e0e0e0', borderRadius: '5px', backgroundColor: '#f8f9fa' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                        <strong>🤖 AI Trading Insights</strong>
+                        <button 
+                            onClick={() => setShowGptInsights(!showGptInsights)}
+                            style={{ padding: '2px 8px', fontSize: '12px', cursor: 'pointer' }}
+                        >
+                            {showGptInsights ? 'Hide' : 'Show'} Details
+                        </button>
+                    </div>
+                    
+                    <div><strong>AI Bias:</strong> <span style={{ color: gptVerdict.final_bias?.includes('Bull') ? 'green' : gptVerdict.final_bias?.includes('Bear') ? 'red' : 'gray' }}>{gptVerdict.final_bias}</span></div>
+                    
+                    {showGptInsights && (
+                        <div style={{ marginTop: '10px' }}>
+                            {gptVerdict.execution_recommendations && (
+                                <div style={{ marginBottom: '12px' }}>
+                                    <strong>🎯 Execution Strategy:</strong>
+                                    <div style={{ marginLeft: '10px', fontSize: '14px' }}>
+                                        <div style={{ marginBottom: '6px' }}>
+                                            <strong>Primary:</strong> {gptVerdict.execution_recommendations.primary_strategy?.type} 
+                                            <span style={{ color: gptVerdict.execution_recommendations.primary_strategy?.confidence === 'High' ? 'green' : gptVerdict.execution_recommendations.primary_strategy?.confidence === 'Medium' ? 'orange' : 'red', marginLeft: '5px' }}>
+                                                ({gptVerdict.execution_recommendations.primary_strategy?.confidence})
+                                            </span>
+                                        </div>
+                                        <div style={{ fontSize: '13px', color: '#666', marginBottom: '6px' }}>
+                                            {gptVerdict.execution_recommendations.primary_strategy?.description}
+                                        </div>
+                                        {gptVerdict.execution_recommendations.position_sizing && (
+                                            <div style={{ fontSize: '13px', marginBottom: '6px' }}>
+                                                <strong>Position Size:</strong> {gptVerdict.execution_recommendations.position_sizing.suggested_allocation} 
+                                                <span style={{ color: gptVerdict.execution_recommendations.position_sizing.risk_level === 'Conservative' ? 'green' : gptVerdict.execution_recommendations.position_sizing.risk_level === 'Moderate' ? 'orange' : 'red', marginLeft: '5px' }}>
+                                                    ({gptVerdict.execution_recommendations.position_sizing.risk_level})
+                                                </span>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+                            
+                            {gptVerdict.actionable_ideas?.length > 0 && (
+                                <div style={{ marginBottom: '8px' }}>
+                                    <strong>💡 Key Ideas:</strong>
+                                    <ul style={{ margin: '5px 0', paddingLeft: '20px', fontSize: '14px' }}>
+                                        {gptVerdict.actionable_ideas.slice(0, 3).map((idea, i) => (
+                                            <li key={i}>{idea}</li>
+                                        ))}
+                                    </ul>
+                                </div>
+                            )}
+                            
+                            {gptVerdict.risk_factors?.length > 0 && (
+                                <div style={{ marginBottom: '8px' }}>
+                                    <strong>⚠️ Risk Factors:</strong>
+                                    <ul style={{ margin: '5px 0', paddingLeft: '20px', fontSize: '14px' }}>
+                                        {gptVerdict.risk_factors.slice(0, 3).map((risk, i) => (
+                                            <li key={i}>{risk}</li>
+                                        ))}
+                                    </ul>
+                                </div>
+                            )}
+                        </div>
+                    )}
+                </div>
+            )}
+            
+            {/* Enhanced Execution Options */}
+            {gptVerdict?.execution_recommendations && (
+                <div style={{ marginTop: '15px', padding: '12px', border: '1px solid #dee2e6', borderRadius: '6px', backgroundColor: '#f8f9fa' }}>
+                    <h4 style={{ margin: '0 0 10px 0', fontSize: '16px' }}>🎯 AI-Powered Execution Guidance</h4>
+                    
+                    {/* Entry/Exit Conditions */}
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '10px' }}>
+                        {gptVerdict.execution_recommendations.entry_conditions?.length > 0 && (
+                            <div>
+                                <strong style={{ fontSize: '14px' }}>📈 Entry Signals:</strong>
+                                <ul style={{ margin: '5px 0', paddingLeft: '15px', fontSize: '13px' }}>
+                                    {gptVerdict.execution_recommendations.entry_conditions.slice(0, 3).map((condition, i) => (
+                                        <li key={i}>{condition}</li>
+                                    ))}
+                                </ul>
+                            </div>
+                        )}
+                        
+                        {gptVerdict.execution_recommendations.exit_conditions?.length > 0 && (
+                            <div>
+                                <strong style={{ fontSize: '14px' }}>📉 Exit Signals:</strong>
+                                <ul style={{ margin: '5px 0', paddingLeft: '15px', fontSize: '13px' }}>
+                                    {gptVerdict.execution_recommendations.exit_conditions.slice(0, 3).map((condition, i) => (
+                                        <li key={i}>{condition}</li>
+                                    ))}
+                                </ul>
+                            </div>
+                        )}
+                    </div>
+                    
+                    {/* Risk Management */}
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '10px' }}>
+                        {gptVerdict.execution_recommendations.stop_loss_guidance && (
+                            <div style={{ fontSize: '13px' }}>
+                                <strong>🛡️ Stop Loss:</strong> {gptVerdict.execution_recommendations.stop_loss_guidance}
+                            </div>
+                        )}
+                        
+                        {gptVerdict.execution_recommendations.profit_target_guidance && (
+                            <div style={{ fontSize: '13px' }}>
+                                <strong>🎯 Profit Target:</strong> {gptVerdict.execution_recommendations.profit_target_guidance}
+                            </div>
+                        )}
+                    </div>
+                    
+                    {/* Alternative Strategies */}
+                    {gptVerdict.execution_recommendations.alternative_strategies?.length > 0 && (
+                        <div style={{ marginBottom: '10px' }}>
+                            <strong style={{ fontSize: '14px' }}>🔄 Alternative Strategies:</strong>
+                            <div style={{ fontSize: '13px', marginTop: '5px' }}>
+                                {gptVerdict.execution_recommendations.alternative_strategies.slice(0, 2).map((alt, i) => (
+                                    <div key={i} style={{ marginBottom: '4px' }}>
+                                        • {alt.type} 
+                                        <span style={{ color: alt.confidence === 'High' ? 'green' : alt.confidence === 'Medium' ? 'orange' : 'red', marginLeft: '5px' }}>
+                                            ({alt.confidence})
+                                        </span>
+                                        - {alt.description}
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            )}
+            
             {/* TODO: Add quantity input here */}
             <button onClick={handleExecute} disabled={isOrdering} style={{ padding: '5px 15px', cursor: 'pointer' }}>
-                {isOrdering ? 'Placing Order...' : `Execute ${strategy.name}`}
+                {isOrdering ? 'Placing Order...' : `Execute ${strategy.name}${gptVerdict ? ' (with AI insights)' : ''}`}
             </button>
             {orderStatus && (
                 <div style={{ marginTop: '10px', padding: '10px', borderRadius: '5px', background: orderStatus.status === 'error' ? '#ffdddd' : '#e8f5e9' }}>
@@ -296,7 +439,12 @@ const AnalysisDetails = ({ data }) => {
 
       {data.gpt_verdict && <GptVerdictCard verdict={data.gpt_verdict} />}
       
-      <StrategyOrder strategy={data.recommended_strategy} ticker={data.ticker} expirationDate={data.expiration_date} />
+      <StrategyOrder 
+        strategy={data.recommended_strategy} 
+        ticker={data.ticker} 
+        expirationDate={data.expiration_date}
+        gptVerdict={data.gpt_verdict}
+      />
       
       { !isGptResult &&
         <>
@@ -453,6 +601,44 @@ const AnalysisPage = () => {
   const [analysisResult, setAnalysisResult] = useStickyState(null, 'analysisResult');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  
+  // GPT Model selection state
+  const [availableModels, setAvailableModels] = useState([]);
+  const [selectedModel, setSelectedModel] = useStickyState('gpt-5', 'selectedGptModel');
+  const [fetchingModels, setFetchingModels] = useState(false);
+
+  // Fetch available GPT models
+  const fetchGptModels = async () => {
+    setFetchingModels(true);
+    try {
+      const response = await axios.get('/api/gpt-models');
+      if (response.data.status === 'success') {
+        setAvailableModels(response.data.models);
+        // Set default model if current selection is not available
+        if (!response.data.models.some(model => model.id === selectedModel)) {
+          setSelectedModel(response.data.default || 'gpt-5');
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch GPT models:', error);
+      console.error('Error details:', error.response?.data || error.message);
+      // Fallback to default models if API fails
+      setAvailableModels([
+        { id: 'gpt-5', name: 'GPT-5 (Fallback)' },
+        { id: 'gpt-4o', name: 'GPT-4o (Fallback)' },
+        { id: 'claude-3.5-sonnet', name: 'Claude 3.5 Sonnet (Fallback)' }
+      ]);
+    } finally {
+      setFetchingModels(false);
+    }
+  };
+
+  // Load GPT models when analysis method is GPT-based
+  useEffect(() => {
+    if (analysisMethod.includes('gpt') && availableModels.length === 0) {
+      fetchGptModels();
+    }
+  }, [analysisMethod]);
 
   const handleFetchExpirations = async () => {
     if (!ticker) {
@@ -495,6 +681,7 @@ const AnalysisPage = () => {
         expiration_date: selectedExpiration, // Send as YYYYMMDD
         risk_free_rate: riskFreeRate,
         analysis_method: analysisMethod,
+        gpt_model: selectedModel, // Include selected GPT model
       });
       const result = response.data;
       // The ResultsDisplay component expects an array. If the API returns a single object,
@@ -533,6 +720,45 @@ const AnalysisPage = () => {
                     <option value="gpt-5-web-verdict">GPT-5 Web Verdict</option>
                 </select>
               </div>
+              
+              {/* Show GPT model selector only for GPT-based methodologies */}
+              {analysisMethod.includes('gpt') && (
+                <div>
+                  <label>GPT Model:</label><br/>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <select 
+                      value={selectedModel} 
+                      onChange={e => setSelectedModel(e.target.value)} 
+                      style={{ padding: '4px', height: '29px', flex: 1 }}
+                      disabled={fetchingModels}
+                    >
+                      {fetchingModels ? (
+                        <option>Loading models...</option>
+                      ) : (
+                        availableModels.map(model => (
+                          <option key={model.id} value={model.id}>
+                            {model.name}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                    <button 
+                      onClick={fetchGptModels}
+                      disabled={fetchingModels}
+                      style={{ padding: '4px 8px', fontSize: '12px', cursor: 'pointer' }}
+                      title="Refresh models list"
+                    >
+                      🔄
+                    </button>
+                  </div>
+                  {fetchingModels && <div style={{ fontSize: '0.8em', color: '#666' }}>Fetching available models...</div>}
+                  {availableModels.some(m => m.name.includes('Fallback')) && (
+                    <div style={{ fontSize: '0.8em', color: '#ff6600' }}>
+                      ⚠️ Using fallback models - click 🔄 to retry loading from server
+                    </div>
+                  )}
+                </div>
+              )}
 
               <button type="button" onClick={handleFetchExpirations} disabled={fetchingExpirations || !ticker.trim()} style={{ padding: '5px 15px', cursor: 'pointer', height: 'fit-content' }}>
                 {fetchingExpirations ? 'Fetching...' : '1. Fetch Expirations'}

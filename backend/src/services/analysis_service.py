@@ -542,6 +542,16 @@ def generate_holistic_conclusion(synthesis_data, strikes, S_current):
                         {'action': 'BUY', 'strike': otm_calls[1], 'right': 'C'}
                     ]
                 }
+            else:
+                # Fallback when insufficient strikes for Iron Condor
+                recommended_strategy = {
+                    "name": "Short Straddle",
+                    "is_credit_spread": False,
+                    "legs": [
+                        {'action': 'SELL', 'strike': atm_strike, 'right': 'C'},
+                        {'action': 'SELL', 'strike': atm_strike, 'right': 'P'}
+                    ]
+                }
         elif iv_sentiment == 'low_vol':
             strategy_rec += "<p><b>Buy Premium (Low IV) - Long Straddle.</b> The analysis is neutral but a large move is possible, especially if a catalyst is near. A Long Straddle profits from a significant price move in either direction and benefits from the currently cheap option premiums.</p>"
             recommended_strategy = {
@@ -554,6 +564,14 @@ def generate_holistic_conclusion(synthesis_data, strikes, S_current):
             }
         else:
             strategy_rec += "<p><b>Wait for a clearer signal.</b> The directional bias is neutral and IV is not at an extreme. It may be prudent to wait for a better entry point or a clearer market sentiment before committing capital.</p>"
+            # Provide a basic watch strategy so execution section appears
+            recommended_strategy = {
+                "name": "Watch and Wait",
+                "is_credit_spread": False,
+                "legs": [
+                    {'action': 'WATCH', 'strike': atm_strike, 'right': 'SIGNAL'}
+                ]
+            }
     elif "Bullish" in final_bias:
         if iv_sentiment == 'high_vol':
             strategy_rec += "<p><b>Defined-Risk Bullish (High IV) - Bull Put Spread.</b> With a bullish bias and high IV, selling a credit spread is advantageous. A Bull Put Spread profits if the stock moves up, sideways, or even slightly down. It benefits from time decay and high premiums, while defining your maximum risk.</p>"
@@ -566,6 +584,15 @@ def generate_holistic_conclusion(synthesis_data, strikes, S_current):
                         {'action': 'BUY', 'strike': otm_puts[-2], 'right': 'P'}
                     ]
                 }
+            else:
+                # Fallback when insufficient strikes for spread
+                recommended_strategy = {
+                    "name": "Cash Secured Put",
+                    "is_credit_spread": False,
+                    "legs": [
+                        {'action': 'SELL', 'strike': atm_strike * 0.95, 'right': 'P'}
+                    ]
+                }
         else:
             strategy_rec += "<p><b>Defined-Risk Bullish (Low/Mid IV) - Bull Call Spread.</b> With a bullish bias and cheaper premiums, a debit spread is attractive. A Bull Call Spread profits from a rise in the stock price with a lower cost and less time decay sensitivity than buying a call outright. Your risk and reward are both capped.</p>"
             if len(itm_calls) >= 1 and len(otm_calls) >= 1:
@@ -575,6 +602,15 @@ def generate_holistic_conclusion(synthesis_data, strikes, S_current):
                     "legs": [
                         {'action': 'BUY', 'strike': itm_calls[-1], 'right': 'C'},
                         {'action': 'SELL', 'strike': otm_calls[0], 'right': 'C'}
+                    ]
+                }
+            else:
+                # Fallback when insufficient strikes for spread
+                recommended_strategy = {
+                    "name": "Long Call",
+                    "is_credit_spread": False,
+                    "legs": [
+                        {'action': 'BUY', 'strike': atm_strike, 'right': 'C'}
                     ]
                 }
     elif "Bearish" in final_bias:
@@ -589,6 +625,15 @@ def generate_holistic_conclusion(synthesis_data, strikes, S_current):
                         {'action': 'BUY', 'strike': otm_calls[1], 'right': 'C'}
                     ]
                 }
+            else:
+                # Fallback when insufficient strikes for spread
+                recommended_strategy = {
+                    "name": "Short Call",
+                    "is_credit_spread": False,
+                    "legs": [
+                        {'action': 'SELL', 'strike': atm_strike * 1.05, 'right': 'C'}
+                    ]
+                }
         else:
             strategy_rec += "<p><b>Defined-Risk Bearish (Low/Mid IV) - Bear Put Spread.</b> With a bearish bias and low IV, a debit spread is a good way to express a directional view. A Bear Put Spread profits from a fall in the stock price while having a lower cost and defined risk compared to buying a put.</p>"
             if len(itm_puts) >= 1 and len(otm_puts) >= 1:
@@ -600,6 +645,45 @@ def generate_holistic_conclusion(synthesis_data, strikes, S_current):
                         {'action': 'SELL', 'strike': otm_puts[-1], 'right': 'P'}
                     ]
                 }
+            else:
+                # Fallback when insufficient strikes for spread
+                recommended_strategy = {
+                    "name": "Long Put",
+                    "is_credit_spread": False,
+                    "legs": [
+                        {'action': 'BUY', 'strike': atm_strike, 'right': 'P'}
+                    ]
+                }
+    
+    # Final safety check - ensure we always have a valid strategy for execution section
+    if recommended_strategy["name"] == "None" or len(recommended_strategy["legs"]) == 0:
+        # Provide a basic directional strategy as ultimate fallback
+        if "Bullish" in final_bias:
+            recommended_strategy = {
+                "name": "Long Call (Basic)",
+                "is_credit_spread": False,
+                "legs": [
+                    {'action': 'BUY', 'strike': atm_strike, 'right': 'C'}
+                ]
+            }
+        elif "Bearish" in final_bias:
+            recommended_strategy = {
+                "name": "Long Put (Basic)",
+                "is_credit_spread": False,
+                "legs": [
+                    {'action': 'BUY', 'strike': atm_strike, 'right': 'P'}
+                ]
+            }
+        else:
+            # Neutral fallback
+            recommended_strategy = {
+                "name": "Long Straddle (Basic)",
+                "is_credit_spread": False,
+                "legs": [
+                    {'action': 'BUY', 'strike': atm_strike, 'right': 'C'},
+                    {'action': 'BUY', 'strike': atm_strike, 'right': 'P'}
+                ]
+            }
     
     conclusion_html += strategy_rec
     return conclusion_html, final_bias, recommended_strategy
@@ -627,223 +711,21 @@ def _sanitize_for_json(item):
         return None
     return item
 
-async def run_full_analysis(ticker: str, expiration_date: date, r_current: float = 0.045, rate_source: str = 'etf', methodology: str = 'holistic-market-edge'):
+async def run_full_analysis(ticker: str, expiration_date: date, r_current: float = 0.045, rate_source: str = 'etf', methodology: str = 'holistic-market-edge', gpt_model: str = 'gpt-5', override_price: float = None):
     """
     Performs all calculations for the option screener, fully implementing Key Feature 1.
+    Now uses the improved run_analysis function with multi-source price validation.
     """
-    fmp = FMPClient()
-    price_fetcher = PriceDataFetcher()
-
-    rt_quote = fmp.realtimequote(ticker)
-    if rt_quote is None or rt_quote.empty or 'price' not in rt_quote.columns:
-        return {"status": "error", "message": f"Could not fetch current price for {ticker}."}
-    S_current = rt_quote.price.iloc[0]
-
-    # Determine risk-free input: constant vs Treasury curve
-    if rate_source == 'treasury':
-        curve = build_treasury_curve(fmp)
-        r_param = curve['rate_fn']
-    else:
-        r_param = r_current
-
-    # --- Fetch Option Chain with fallback to nearest date ---
-    option_chain_df = None
-    # Search for an available option chain up to 7 days from the target expiration date.
-    # This makes the analysis more robust if the target DTE falls on a non-trading day.
-    for i in range(8): # Search from D-0 to D+7
-        search_date = expiration_date + timedelta(days=i)
-        search_date_str = search_date.strftime('%Y-%m-%d')
-        option_chain_df = price_fetcher.get_option_data_finviz(ticker, 'o', search_date_str)
-        if option_chain_df is not None and not option_chain_df.empty:
-            if i > 0: # If we found a date other than the target, update expiration_date
-                expiration_date = search_date
-            break # Found a valid chain, exit the loop
+    from src.analytics.analysis import run_analysis
     
-    if option_chain_df is None or option_chain_df.empty:
-        return {"status": "error", "message": f"Could not fetch any option chain for {ticker} near {expiration_date.strftime('%Y-%m-%d')}."}
-
-    option_chain_df['Strike'] = pd.to_numeric(option_chain_df['Strike'], errors='coerce')
-    option_chain_df.dropna(subset=['Strike'], inplace=True)
-    option_chain_df.sort_values('Strike', inplace=True)
-    strikes = option_chain_df['Strike'].unique()
+    # Use the improved analysis function with multi-source price validation
+    analysis_result = run_analysis(
+        ticker=ticker,
+        expiration_date=expiration_date, 
+        r_current=r_current,
+        rate_source=rate_source,
+        analysis_method=methodology,
+        override_price=override_price
+    )
     
-    historical_prices_df = price_fetcher.get_price_data([ticker], method="td_data", back_day=350)
-    hv_current = calculate_historical_volatility(historical_prices_df['Close'].tolist()) if historical_prices_df is not None and not historical_prices_df.empty else None
-
-    key_vols_iv, iv_logs = fetch_iv_term_structure(ticker, price_fetcher, fmp)
-    iv_available = bool(key_vols_iv)
-    if not iv_available and hv_current: key_vols_iv = [(0, hv_current)]
-
-    stock_details = price_fetcher.get_stock_details_finviz(ticker)
-    div_current = stock_details.get('dividend_yield', 0.0)
-    earnings_date = parse_earnings_date(stock_details.get('earnings_date'))
-
-    # --- Run All Analyses ---
-    candlestick_analysis = analyze_candlestick_patterns(historical_prices_df)
-    volume_oi_analysis = analyze_volume_and_oi_signals(option_chain_df, S_current)
-    movement_analysis = analyze_high_movement_expectation(S_current, option_chain_df, historical_prices_df, earnings_date=earnings_date, expiration_date=expiration_date)
-    
-    # --- Quantitative Valuation ---
-    days_to_exp = (expiration_date - date.today()).days
-    vol_term_structure = generate_forward_vol_structure(days_to_exp, key_vols_iv)
-
-    # --- SABR calibration (per-expiration) ---
-    sabr_surface_info = None
-    iv_residual_outliers = []
-    try:
-        if days_to_exp > 0 and 'IV' in option_chain_df.columns:
-            iv_series = option_chain_df[['Strike', 'IV']].copy()
-            iv_series['Strike'] = pd.to_numeric(iv_series['Strike'], errors='coerce')
-            iv_series = iv_series.dropna(subset=['Strike', 'IV'])
-            iv_series['IV'] = iv_series['IV'].apply(_parse_finviz_iv_string)
-            iv_series = iv_series.dropna(subset=['IV'])
-            grouped = iv_series.groupby('Strike')['IV'].median().reset_index()
-            if len(grouped) >= 5:
-                T = days_to_exp / 365.0
-                div_yield = div_current
-                F = S_current * np.exp((r_current - div_yield) * T)
-                Ks = grouped['Strike'].values
-                mkt_ivs = grouped['IV'].values
-                params = calibrate_sabr(F, Ks, mkt_ivs, T)
-                fitted_ivs = np.array([sabr_iv(F, k, T, *params) for k in Ks])
-                residuals = mkt_ivs - fitted_ivs
-                rmse = float(np.sqrt(np.mean((residuals) ** 2)))
-                order = np.argsort(-np.abs(residuals))
-                top = min(5, len(order))
-                for idx in order[:top]:
-                    iv_residual_outliers.append({
-                        "strike": float(Ks[idx]),
-                        "market_iv": float(mkt_ivs[idx]),
-                        "fitted_iv": float(fitted_ivs[idx]),
-                        "residual": float(residuals[idx])
-                    })
-                sabr_surface_info = {
-                    "params": {
-                        "alpha": float(params[0]),
-                        "beta": float(params[1]),
-                        "rho": float(params[2]),
-                        "nu": float(params[3])
-                    },
-                    "rmse": rmse
-                }
-    except Exception as _:
-        sabr_surface_info = None
-        iv_residual_outliers = []
-
-    undervalued_results = []
-    parity_data = []
-    
-    selected_strikes = strikes[(strikes > S_current * 0.8) & (strikes < S_current * 1.2)]
-    for K in selected_strikes:
-        call_market_price = _get_market_price_from_finviz_df(option_chain_df, K, 'C')
-        put_market_price = _get_market_price_from_finviz_df(option_chain_df, K, 'P')
-        if call_market_price and put_market_price and days_to_exp > 0:
-            T = (days_to_exp/365.0)
-            r_T = r_param(T) if callable(r_param) else r_param
-            parity_diff = (call_market_price - put_market_price) - (S_current - K * np.exp(-r_T * T))
-            parity_data.append({"Strike": K, "Parity Difference": parity_diff})
-
-        for opt_type, market_price in [('call', call_market_price), ('put', put_market_price)]:
-            if market_price is None: continue
-            model_price, _, _, _ = universal_binomial_pricer(S_current, K, expiration_date, r_param, vol_term_structure, model='crr', option_type=opt_type, div=div_current, historical_vol=hv_current)
-            if model_price > market_price * 1.2: # Find options undervalued by at least 20%
-                undervalued_results.append({"Strike": K, "Type": opt_type.capitalize(), "Market Price": market_price, "Model Price": model_price})
-    
-    # --- Holistic Synthesis ---
-    synthesis_data = {}
-    if candlestick_analysis and "context" in candlestick_analysis and not candlestick_analysis.get("error"):
-        context = candlestick_analysis["context"]
-        synthesis_data['trend'] = {'sentiment': 'bullish' if context['primary_trend'] == "Uptrend" else 'bearish', 'weight': 1.5, 'summary': f"The primary trend is **{context['primary_trend']}** (vs 200d MA) and the secondary trend is **{context['secondary_trend']}** (vs 50d MA)."}
-        patterns = candlestick_analysis.get("patterns", [])
-        if patterns:
-            bullish_patterns = [p for p in patterns if "Bullish" in p['name']]
-            bearish_patterns = [p for p in patterns if "Bearish" in p['name']]
-            candlestick_sentiment = 'neutral'
-            if bullish_patterns and not bearish_patterns: candlestick_sentiment = 'bullish'
-            elif bearish_patterns and not bullish_patterns: candlestick_sentiment = 'bearish'
-            strongest_pattern = sorted(patterns, key=lambda p: {"Strong": 0, "Moderate": 1, "Weak": 2}.get(p.get('strength', 'Weak'), 99))[0]
-            synthesis_data['candlestick'] = {'sentiment': candlestick_sentiment, 'summary': f"A **'{strongest_pattern['name']}'** pattern was identified with **{strongest_pattern['strength']}** strength."}
-        else:
-            synthesis_data['candlestick'] = {'sentiment': 'neutral', 'summary': "No significant candlestick patterns were found in recent periods."}
-    if parity_data:
-        avg_parity_diff_pct = np.mean([p['Parity Difference'] for p in parity_data]) / S_current * 100
-        parity_sentiment = 'neutral'
-        if avg_parity_diff_pct > 0.15: parity_sentiment = 'bullish'
-        elif avg_parity_diff_pct < -0.15: parity_sentiment = 'bearish'
-        synthesis_data['parity'] = {'sentiment': parity_sentiment, 'summary': f"Put-Call Parity shows calls are relatively {'expensive' if parity_sentiment == 'bullish' else 'cheap' if parity_sentiment == 'bearish' else 'fairly priced'} (avg deviation: {avg_parity_diff_pct:+.2f}%)."}
-        # Persist rolling metrics: P/C ratio and parity deviation
-        try:
-            pc_ratio_val = volume_oi_analysis.get('pc_ratio') if volume_oi_analysis else None
-            if pc_ratio_val is not None:
-                metrics = pd.DataFrame([
-                    {"Ticker": ticker.upper(), "Date": date.today(), "Metric": "PC_RATIO", "Value": float(pc_ratio_val)},
-                    {"Ticker": ticker.upper(), "Date": date.today(), "Metric": "PARITY_DEV_PCT", "Value": float(avg_parity_diff_pct)}
-                ])
-                mongo("rolling_metrics").frame_to_mongo(metrics)
-        except Exception as _:
-            # Best-effort persistence; do not break analysis
-            pass
-    if volume_oi_analysis and not volume_oi_analysis.get("error"):
-        bull_signals, bear_signals = len(volume_oi_analysis.get('uoa_calls', [])), len(volume_oi_analysis.get('uoa_puts', []))
-        pc_ratio = volume_oi_analysis.get('pc_ratio')
-        vol_sentiment = 'neutral'
-        if pc_ratio is not None:
-            if pc_ratio > 1.0: bear_signals += 1
-            if pc_ratio < 0.7: bull_signals += 1
-        if bull_signals > bear_signals: vol_sentiment = 'bullish'
-        elif bear_signals > bull_signals: vol_sentiment = 'bearish'
-        synthesis_data['volume_oi'] = {'sentiment': vol_sentiment, 'summary': f"Volume analysis shows a P/C ratio of {pc_ratio:.2f} and {bull_signals} bullish vs {bear_signals} bearish UOA signals."}
-    if undervalued_results:
-        synthesis_data['undervalued'] = {'sentiment': 'bullish' if any(r['Type'] == 'Call' for r in undervalued_results) else 'bearish', 'summary': f"Valuation model identified **{len(undervalued_results)} potentially undervalued options**."}
-    
-    spot_iv = key_vols_iv[0][1] if key_vols_iv else None
-    iv_high = spot_iv and hv_current and spot_iv > hv_current * 1.2
-    iv_low = spot_iv and hv_current and spot_iv < hv_current * 0.8
-    iv_summary = "IV is in line with HV."
-    if iv_high: iv_summary = "IV is **high** relative to HV, suggesting option premiums are expensive and favoring premium-selling (credit) strategies."
-    elif iv_low: iv_summary = "IV is **low** relative to HV, suggesting option premiums are cheap and favoring premium-buying (debit) strategies."
-    synthesis_data['iv_hv'] = {'sentiment': 'high_vol' if iv_high else 'low_vol' if iv_low else 'neutral_vol', 'summary': iv_summary}
-    
-    if movement_analysis:
-        if movement_analysis.get('expected_move_pct'):
-            synthesis_data['movement'] = {'summary': f"The options market is pricing in a **{movement_analysis['expected_move_pct']:.2f}%** move by expiration."}
-        if movement_analysis.get('earnings_note'):
-            synthesis_data['earnings'] = {'sentiment': 'event', 'summary': movement_analysis['earnings_note']}
-
-    final_conclusion_html, final_bias, recommended_strategy = generate_holistic_conclusion(synthesis_data, strikes, S_current)
-
-    response_data = {
-        "status": "success", "ticker": ticker, "S_current": S_current, "expiration_date": expiration_date.isoformat(),
-        "final_conclusion_html": final_conclusion_html, "final_bias": final_bias,
-        "recommended_strategy": recommended_strategy,
-        "candlestick_analysis": candlestick_analysis, "volume_oi_analysis": volume_oi_analysis,
-        "movement_analysis": movement_analysis, "results_df": undervalued_results,
-        "iv_surface": sabr_surface_info, "iv_residual_outliers": iv_residual_outliers,
-        "rate_source": rate_source, "methodology": methodology
-    }
-    
-    # --- GPT Verdict (if requested) ---
-    if methodology in ['gpt-verdict', 'gpt-5-web-verdict']:
-        use_web_search = 'web' in methodology
-        # NOTE: Using "gpt-5" as the model for both GPT methodologies.
-        # This can be changed if a different model is desired for the non-web version.
-        # Use the model from .env file, fallback to the previous hardcoded value.
-        model_to_use = os.getenv("LLM_MODEL", "gpt-5")
-
-        # Sanitize the analysis payload before sending it to the LLM.
-        sanitized_analysis_result = _sanitize_for_json(response_data)
-
-        # Call the GPT service with the standard analysis results as context.
-        gpt_verdict = generate_gpt_verdict(
-            ticker=ticker,
-            analysis_result=sanitized_analysis_result,
-            model=model_to_use,
-            use_web_search=use_web_search
-        )
-        response_data['gpt_verdict'] = gpt_verdict
-        
-        # Overwrite the rule-based conclusion with the AI's verdict for consistency.
-        response_data['final_bias'] = gpt_verdict.get('final_bias', response_data['final_bias'])
-        response_data['final_conclusion_html'] = gpt_verdict.get('summary_html', response_data['final_conclusion_html'])
-
-    return _sanitize_for_json(response_data)
+    return analysis_result

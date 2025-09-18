@@ -6,8 +6,19 @@ from .connection_manager import connection_manager
 async def place_strategy_order(order_request: StrategyOrderRequest):
     """
     Connects to IB and places a complex strategy order.
+    Enhanced with GPT verdict insights for better trade context.
     """
     try:
+        # Log GPT insights if available
+        if order_request.gpt_insights:
+            print(f"DEBUG: Executing strategy with GPT insights:")
+            print(f"  - AI Bias: {order_request.gpt_insights.get('final_bias', 'Unknown')}")
+            print(f"  - Actionable Ideas: {len(order_request.gpt_insights.get('actionable_ideas', []))} items")
+            print(f"  - Risk Factors: {len(order_request.gpt_insights.get('risk_factors', []))} items")
+            print(f"  - Rationale: {order_request.gpt_insights.get('rationale', '')[:100]}...")
+        else:
+            print(f"DEBUG: Executing strategy without GPT insights (model-based analysis)")
+            
         trader = await connection_manager.get_trader()
         
         # IBTrader's place_strategy_order expects YYYYMMDD format
@@ -35,12 +46,19 @@ async def place_strategy_order(order_request: StrategyOrderRequest):
         )
 
         if trade and hasattr(trade, 'orderStatus') and trade.orderStatus:
-             return {
+            # Include GPT context in success message
+            gpt_context = ""
+            if order_request.gpt_insights:
+                bias = order_request.gpt_insights.get('final_bias', 'Unknown')
+                gpt_context = f" (AI Bias: {bias})"
+                
+            return {
                 "status": "success",
-                "message": f"Order for {order_request.size} {order_request.ticker} strategy sent.",
+                "message": f"Order for {order_request.size} {order_request.ticker} strategy sent{gpt_context}.",
                 "order_status": trade.orderStatus.status,
                 "filled": trade.orderStatus.filled,
                 "remaining": trade.orderStatus.remaining,
+                "gpt_insights_included": bool(order_request.gpt_insights)
             }
         else:
             return {"status": "error", "message": "Failed to place order or get status from broker."}

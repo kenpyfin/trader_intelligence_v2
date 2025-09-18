@@ -15,6 +15,8 @@ from .my_libs_py3.fmp import FMPClient
 from .analytics.methodologies.gpt_verdict import generate_gpt_verdict
 import numpy as np
 import math
+import os
+import requests
 
 
 app = FastAPI(
@@ -31,6 +33,7 @@ def read_root():
     return {"message": "Welcome to the Trader Intelligence API"}
 
 @app.get("/macro-data")
+@app.get("/api/macro-data")  # Alias for nginx proxy compatibility
 def get_macro_data():
     """Endpoint to fetch macro economic data (futures). Falls back to Finviz if the primary service fails."""
     def _df_to_mapping(df):
@@ -144,6 +147,7 @@ async def get_yield_curve(source: str = "treasury", tickers: str = "SPY, QQQ, IW
         raise HTTPException(status_code=500, detail=f"Failed to build yield curve: {e}")
 
 @app.post("/calculate-risk-free-rate")
+@app.post("/api/calculate-risk-free-rate")  # Alias for nginx proxy compatibility
 async def get_risk_free_rate(request: RiskFreeRateRequest):
     """Calculates the market-implied risk-free rate from a basket of ETFs."""
     try:
@@ -175,7 +179,9 @@ async def analyze_stock_with_gpt(request: AnalysisRequest):
             ticker=request.ticker.upper(),
             expiration_date=expiration_date,
             r_current=request.risk_free_rate,
-            methodology='gpt-verdict'  # Use the gpt-verdict methodology
+            methodology='gpt-verdict',  # Use the gpt-verdict methodology
+            gpt_model=request.gpt_model,
+            override_price=request.override_price
         )
 
         if base_result.get("status") != "success":
@@ -221,6 +227,7 @@ async def analyze_stock_with_gpt(request: AnalysisRequest):
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
 
 @app.post("/orders/strategy")
+@app.post("/api/orders/strategy")  # Alias for nginx proxy compatibility
 async def create_strategy_order(request: StrategyOrderRequest):
     """
     Places a multi-leg strategy order via the connected broker.
@@ -237,6 +244,7 @@ async def create_strategy_order(request: StrategyOrderRequest):
 
 
 @app.get("/analysis/expirations/{ticker}")
+@app.get("/api/analysis/expirations/{ticker}")  # Alias for nginx proxy compatibility
 async def fetch_expirations(ticker: str):
     """Fetches available option expiration dates for a given ticker."""
     try:
@@ -247,8 +255,64 @@ async def fetch_expirations(ticker: str):
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
 
+@app.get("/api/gpt-models")
+@app.get("/gpt-models")  # Alias for Docker/proxy compatibility
+async def get_available_gpt_models():
+    """Fetches available models from OpenWebUI API for GPT verdict analysis."""
+    try:
+        base_url = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1").rstrip("/")
+        api_key = os.getenv("OPENAI_API_KEY")
+        
+        if not api_key:
+            raise HTTPException(status_code=500, detail="OpenAI API key not configured")
+        
+        # Fetch models from OpenWebUI API
+        response = requests.get(
+            f"{base_url}/models",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            },
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            raise HTTPException(status_code=500, detail=f"Failed to fetch models: {response.status_code}")
+        
+        models_data = response.json()
+        
+        # Extract model list from OpenAI API response format
+        if "data" in models_data:
+            models = [
+                {
+                    "id": model["id"],
+                    "name": model.get("id", model["id"]),  # Use id as display name if no name field
+                    "created": model.get("created", 0)
+                }
+                for model in models_data["data"]
+            ]
+        else:
+            models = []
+        
+        # Sort models by name for better UX
+        models.sort(key=lambda x: x["name"])
+        
+        return {
+            "status": "success",
+            "models": models,
+            "default": "gpt-5"  # Default model to select
+        }
+        
+    except requests.RequestException as e:
+        print(f"Error fetching models: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to connect to model service: {e}")
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
+
 
 @app.post("/analysis/stock")
+@app.post("/api/analysis/stock")  # Alias for nginx proxy compatibility
 async def analyze_stock(request: AnalysisRequest):
     """
     Runs a full stock and option analysis for a single, user-selected expiration date.
@@ -267,7 +331,9 @@ async def analyze_stock(request: AnalysisRequest):
             ticker=request.ticker.upper(),
             expiration_date=expiration_date,
             r_current=request.risk_free_rate,
-            methodology=request.analysis_method
+            methodology=request.analysis_method,
+            gpt_model=request.gpt_model,
+            override_price=request.override_price
         )
 
         # Check if the single analysis was successful

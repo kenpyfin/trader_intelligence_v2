@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional, Dict, Any
 
 class OrderLeg(BaseModel):
     action: str  # 'BUY' or 'SELL'
@@ -12,3 +12,4 @@ class StrategyOrderRequest(BaseModel):
     legs: List[OrderLeg]
     size: int = 1
     is_credit_spread: bool = False
+    gpt_insights: Optional[Dict[str, Any]] = None  # GPT verdict insights for enhanced order context
