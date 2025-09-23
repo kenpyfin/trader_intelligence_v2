@@ -20,4 +20,5 @@ ENV PYTHONPATH=/app
 # The command to run the application using uvicorn.
 # It will listen on the port specified by the BACKEND_PORT environment variable from .env
 # We use the shell form of CMD to allow environment variable substitution.
-CMD uvicorn src.main:app --host 0.0.0.0 --port ${BACKEND_PORT:-8511}
+# Force asyncio event loop to avoid uvloop incompatibilities with ib_insync
+CMD uvicorn src.main:app --host 0.0.0.0 --port ${BACKEND_PORT:-8511} --loop asyncio

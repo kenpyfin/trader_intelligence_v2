@@ -1,6 +1,7 @@
 import asyncio
 import traceback
 from src.models.order_models import StrategyOrderRequest
+from .order_tracking_service import record_strategy_execution
 from .connection_manager import connection_manager
 
 async def place_strategy_order(order_request: StrategyOrderRequest):
@@ -52,13 +53,43 @@ async def place_strategy_order(order_request: StrategyOrderRequest):
                 bias = order_request.gpt_insights.get('final_bias', 'Unknown')
                 gpt_context = f" (AI Bias: {bias})"
                 
+            # Try to extract identifiers from the IB trade object
+            ib_order_id = None
+            ib_perm_id = None
+            try:
+                ib_order_id = getattr(getattr(trade, 'order', None), 'orderId', None)
+                ib_perm_id = getattr(getattr(trade, 'order', None), 'permId', None)
+            except Exception:
+                pass
+
+            # Persist a tracked-order record linking execution to guidance snapshot
+            try:
+                tracking = record_strategy_execution(
+                    order_request=order_request,
+                    trade_info={
+                        'order_status': trade.orderStatus.status,
+                        'filled': trade.orderStatus.filled,
+                        'remaining': trade.orderStatus.remaining,
+                        'message': f"Order for {order_request.size} {order_request.ticker} strategy sent{gpt_context}.",
+                    },
+                    ib_order_id=ib_order_id,
+                    ib_perm_id=ib_perm_id,
+                )
+                tracking_id = tracking.get('id')
+            except Exception as _e:
+                print(f"WARN: Failed to record tracked order: {_e}")
+                tracking_id = None
+
             return {
                 "status": "success",
                 "message": f"Order for {order_request.size} {order_request.ticker} strategy sent{gpt_context}.",
                 "order_status": trade.orderStatus.status,
                 "filled": trade.orderStatus.filled,
                 "remaining": trade.orderStatus.remaining,
-                "gpt_insights_included": bool(order_request.gpt_insights)
+                "gpt_insights_included": bool(order_request.gpt_insights),
+                "tracking_id": tracking_id,
+                "ib_order_id": ib_order_id,
+                "ib_perm_id": ib_perm_id,
             }
         else:
             return {"status": "error", "message": "Failed to place order or get status from broker."}

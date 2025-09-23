@@ -3,7 +3,7 @@ import traceback
 import asyncio
 from datetime import date, timedelta
 
-from .models.analysis_models import AnalysisRequest, RiskFreeRateRequest
+from .models.analysis_models import AnalysisRequest, RiskFreeRateRequest, SaveVerdictRequest
 from .models.order_models import StrategyOrderRequest
 from .services.analysis_service import run_full_analysis, get_option_expirations
 from .services.macro_service import get_macro_futures_data, calculate_market_implied_risk_free_rate
@@ -13,6 +13,7 @@ from .my_libs_py3.my_data import PriceDataFetcher
 from .analytics.treasury_curve import build_treasury_curve
 from .my_libs_py3.fmp import FMPClient
 from .analytics.methodologies.gpt_verdict import generate_gpt_verdict
+from .services.verdict_service import save_verdict_document, list_verdicts, get_verdict_by_id
 import numpy as np
 import math
 import os
@@ -159,6 +160,42 @@ async def get_risk_free_rate(request: RiskFreeRateRequest):
     except Exception as e:
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
+
+@app.post("/analysis/verdicts")
+@app.post("/api/analysis/verdicts")
+async def save_verdict(request: SaveVerdictRequest):
+    """Save an analysis verdict snapshot for later retrieval/compare."""
+    try:
+        result = save_verdict_document(request.verdict, request.label)
+        return result
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to save verdict: {e}")
+
+@app.get("/analysis/verdicts/{ticker}")
+@app.get("/api/analysis/verdicts/{ticker}")
+async def list_saved_verdicts(ticker: str, limit: int = 25):
+    """List saved verdicts for a ticker (most recent first)."""
+    try:
+        return {"status": "success", "items": list_verdicts(ticker.upper(), limit)}
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to list verdicts: {e}")
+
+@app.get("/analysis/verdicts/id/{doc_id}")
+@app.get("/api/analysis/verdicts/id/{doc_id}")
+async def get_saved_verdict(doc_id: str):
+    """Fetch a saved verdict by its ID."""
+    try:
+        doc = get_verdict_by_id(doc_id)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Verdict not found")
+        return {"status": "success", "item": doc}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to fetch verdict: {e}")
 
 @app.post("/analysis/stock-gpt")
 async def analyze_stock_with_gpt(request: AnalysisRequest):

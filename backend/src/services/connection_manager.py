@@ -11,19 +11,39 @@ class IBConnectionManager:
     """Singleton connection manager for IBTrader to prevent multiple TWS connections."""
     
     _instance: Optional['IBConnectionManager'] = None
-    _lock = asyncio.Lock()
+    _lock = None
     
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._trader = None
-            cls._instance._connection_lock = asyncio.Lock()
+            cls._instance._connection_lock = None
             cls._instance._last_error_time = 0
             cls._instance._connection_retry_delay = 30  # 30 second cooldown after connection errors
+            cls._instance._loop = None  # Track the event loop that owns current resources
         return cls._instance
+
+    def _ensure_lock(self):
+        """Ensure the connection lock exists for the current running event loop.
+        If the loop changes (e.g., dev reloads), recreate lock and invalidate trader.
+        """
+        current_loop = asyncio.get_running_loop()
+        if self._loop is None or self._loop is not current_loop:
+            # Event loop changed: drop existing trader to avoid cross-loop use
+            if self._trader is not None:
+                try:
+                    self._trader.disconnect()
+                except Exception:
+                    pass
+                self._trader = None
+            # Create a new lock bound to current loop
+            self._connection_lock = asyncio.Lock()
+            self._loop = current_loop
     
     async def get_trader(self) -> IBTrader:
         """Get or create the shared IBTrader instance with connection health check."""
+        # Ensure lock and resources are bound to current loop
+        self._ensure_lock()
         async with self._connection_lock:
             current_time = time.time()
             
@@ -55,6 +75,7 @@ class IBConnectionManager:
                         self._trader.disconnect()
                     except:
                         pass
+                    # Create new trader instance (IBTrader handles loop binding internally)
                     self._trader = IBTrader()
                     await self._trader.connect()
                     
@@ -62,6 +83,7 @@ class IBConnectionManager:
     
     async def disconnect(self):
         """Disconnect the shared trader instance."""
+        self._ensure_lock()
         async with self._connection_lock:
             if self._trader is not None:
                 try:
@@ -74,6 +96,7 @@ class IBConnectionManager:
     
     async def reset_connection(self):
         """Force reset the connection (useful after timeouts)."""
+        self._ensure_lock()
         async with self._connection_lock:
             if self._trader is not None:
                 try:

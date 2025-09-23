@@ -1,14 +1,14 @@
 fastapi
 uvicorn[standard]
 pydantic
-motor
+motor<3
 numpy
 pandas
 ib_insync
 python-dotenv
 requests
-# pymongo might be needed by my_lib.py for synchronous DB access
-pymongo
+# Pin for compatibility with MongoDB 3.6 server (wire version 6)
+pymongo<4
 
 # Dependencies from my_lib.py
 pytz

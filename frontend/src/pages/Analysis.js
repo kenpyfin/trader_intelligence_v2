@@ -373,7 +373,23 @@ const GptVerdictCard = ({ verdict }) => {
 
   return (
     <AnalysisCard title="GPT-Powered Verdict & Rationale">
-      {verdict.rationale && <p><strong>Rationale:</strong> {verdict.rationale}</p>}
+      {verdict.key_reasoning_points && verdict.key_reasoning_points.length > 0 && (
+        <>
+          <h5>Key Analysis Points</h5>
+          <ul style={{ backgroundColor: '#f8f9fa', padding: '10px', borderRadius: '4px', marginBottom: '15px' }}>
+            {verdict.key_reasoning_points.map((point, i) => <li key={i} style={{ marginBottom: '5px' }}><strong>{point}</strong></li>)}
+          </ul>
+        </>
+      )}
+      
+      {verdict.rationale && (
+        <>
+          <h5>Detailed Reasoning</h5>
+          <p style={{ lineHeight: '1.6', backgroundColor: '#fff', padding: '12px', border: '1px solid #e9ecef', borderRadius: '4px' }}>
+            {verdict.rationale}
+          </p>
+        </>
+      )}
       
       {verdict.actionable_ideas && verdict.actionable_ideas.length > 0 && (
         <>
@@ -527,13 +543,131 @@ const ResultsDisplay = ({ analysisResult }) => {
     <div style={{ marginTop: '20px' }}>
       <h2>Analysis for {commonData.ticker?.toUpperCase()}</h2>
       <p>Current Price: <strong>{typeof commonData.S_current === 'number' ? `$${commonData.S_current.toFixed(2)}` : 'N/A'}</strong></p>
-      
+
       {analysisResult.map((result, index) => (
-         <div key={index} style={{ borderTop: index > 0 ? '3px solid #007bff' : 'none', paddingTop: index > 0 ? '20px' : '0', marginTop: index > 0 ? '20px' : '0' }}>
-            <AnalysisDetails data={result} />
-         </div>
+        <div key={index} style={{ borderTop: index > 0 ? '3px solid #007bff' : 'none', paddingTop: index > 0 ? '20px' : '0', marginTop: index > 0 ? '20px' : '0' }}>
+          <AnalysisDetails data={result} />
+        </div>
       ))}
+
+      <SavedVerdictsControls currentResult={analysisResult[0]} />
     </div>
+  );
+};
+
+const SavedVerdictsControls = ({ currentResult }) => {
+  const [saving, setSaving] = useState(false);
+  const [saveLabel, setSaveLabel] = useState('');
+  const [saveMsg, setSaveMsg] = useState('');
+
+  const [listLoading, setListLoading] = useState(false);
+  const [savedList, setSavedList] = useState([]);
+  const [selectedId, setSelectedId] = useState('');
+  const [selectedDoc, setSelectedDoc] = useState(null);
+
+  const ticker = currentResult?.ticker || '';
+
+  const loadList = async () => {
+    if (!ticker) return;
+    setListLoading(true);
+    try {
+      const resp = await axios.get(`/api/analysis/verdicts/${encodeURIComponent(ticker)}`);
+      setSavedList(resp.data?.items || []);
+    } catch (e) {
+      console.error('Failed to load saved verdicts', e);
+    } finally {
+      setListLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    setSavedList([]);
+    setSelectedDoc(null);
+    setSelectedId('');
+    if (ticker) loadList();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ticker]);
+
+  const handleSave = async () => {
+    setSaving(true);
+    setSaveMsg('');
+    try {
+      const resp = await axios.post('/api/analysis/verdicts', {
+        verdict: currentResult,
+        label: saveLabel || undefined,
+      });
+      setSaveMsg(`Saved (id: ${resp.data?.id || 'unknown'})`);
+      await loadList();
+    } catch (e) {
+      setSaveMsg(`Save failed: ${e.response?.data?.detail || e.message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleSelect = async (id) => {
+    setSelectedId(id);
+    if (!id) {
+      setSelectedDoc(null);
+      return;
+    }
+    try {
+      const resp = await axios.get(`/api/analysis/verdicts/id/${encodeURIComponent(id)}`);
+      setSelectedDoc(resp.data?.item || null);
+    } catch (e) {
+      console.error('Failed to fetch saved verdict', e);
+      setSelectedDoc(null);
+    }
+  };
+
+  const currentBias = currentResult?.final_bias || '';
+  const previousBias = selectedDoc?.final_bias || '';
+  const biasChanged = previousBias && currentBias && previousBias !== currentBias;
+
+  return (
+    <AnalysisCard title="Saved Verdicts">
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+        <div>
+          <h4>Save Current Verdict</h4>
+          <div style={{ marginBottom: '8px' }}>
+            <label>Label (optional):</label><br/>
+            <input type="text" value={saveLabel} onChange={e => setSaveLabel(e.target.value)} placeholder="e.g., Before Earnings" style={{ width: '95%' }} />
+          </div>
+          <button onClick={handleSave} disabled={saving || !ticker} style={{ padding: '6px 12px' }}>
+            {saving ? 'Saving...' : 'Save Verdict'}
+          </button>
+          {saveMsg && <div style={{ marginTop: '8px', fontSize: '0.9em' }}>{saveMsg}</div>}
+        </div>
+
+        <div>
+          <h4>Load Previous Verdict</h4>
+          {listLoading ? (
+            <p>Loading saved verdicts...</p>
+          ) : (
+            <select value={selectedId} onChange={e => handleSelect(e.target.value)} style={{ width: '100%', padding: '6px' }}>
+              <option value="">Select a saved verdict...</option>
+              {savedList.map(item => (
+                <option key={item.id} value={item.id}>
+                  {`${item.created_at?.slice(0, 19).replace('T',' ')} | ${item.label || ''} | ${item.final_bias || ''}`}
+                </option>
+              ))}
+            </select>
+          )}
+          {selectedDoc && (
+            <div style={{ marginTop: '12px' }}>
+              <div><strong>Saved Bias:</strong> {previousBias || 'N/A'}</div>
+              {biasChanged && (
+                <div style={{ color: '#d9534f' }}><strong>Changed vs Current:</strong> {currentBias || 'N/A'}</div>
+              )}
+              <div style={{ marginTop: '8px' }}>
+                <strong>Saved Summary</strong>
+                <div dangerouslySetInnerHTML={{ __html: selectedDoc?.data?.final_conclusion_html || '<p>No saved summary.</p>' }} />
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </AnalysisCard>
   );
 };
 
