@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from datetime import date
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 class AnalysisRequest(BaseModel):
     ticker: str
@@ -12,3 +12,9 @@ class AnalysisRequest(BaseModel):
 
 class RiskFreeRateRequest(BaseModel):
     tickers: List[str]
+
+
+class SaveVerdictRequest(BaseModel):
+    """Payload to save an analysis verdict snapshot for later comparison."""
+    verdict: Dict[str, Any]
+    label: Optional[str] = None

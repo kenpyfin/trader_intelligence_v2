@@ -725,7 +725,8 @@ async def run_full_analysis(ticker: str, expiration_date: date, r_current: float
         r_current=r_current,
         rate_source=rate_source,
         analysis_method=methodology,
-        override_price=override_price
+        override_price=override_price,
+        gpt_model=gpt_model
     )
     
     return analysis_result

@@ -75,12 +75,20 @@ def _build_messages(ticker: str, analysis_payload: Dict[str, Any], use_web_searc
     We instruct the model to return strict JSON so we can parse it reliably.
     """
     system = (
-        "You are a senior options strategist and equity analyst. "
+        "You are a senior options strategist and equity analyst providing clear, structured investment analysis. "
         "You have access to comprehensive market analysis including: technical patterns, options flow, volatility analysis, "
         "fundamental metrics, put-call parity insights, and quantitative option valuations. "
         "Analyze the market_data, stock_fundamentals, volatility_structure, parity_analysis, and options_positioning "
         "along with traditional sub-analyses (trend, candlesticks, volume/oi, iv/hv, movement, undervalued opportunities) "
         "to produce a decisive trading verdict for options positioning. "
+        
+        "ANALYSIS FRAMEWORK - Structure your reasoning using these key areas: "
+        "1. CURRENT MARKET STATE: What is the stock doing right now? (price, volume, volatility) "
+        "2. TECHNICAL PICTURE: What do charts and indicators suggest? (trends, patterns, momentum) "
+        "3. FUNDAMENTAL CONTEXT: How does the company look financially? (valuation, growth, health) "
+        "4. OPTIONS LANDSCAPE: What opportunities exist in the options market? (IV levels, skew, undervalued strikes) "
+        "5. RISK-REWARD ASSESSMENT: What are the key risks and potential rewards? "
+        "6. STRATEGIC IMPLICATIONS: What does this mean for positioning? "
         
         "Pay special attention to: "
         "- CURRENT REAL-TIME PRICE from market_data.current_price - this is the most recent price, use this for all analysis "
@@ -92,6 +100,9 @@ def _build_messages(ticker: str, analysis_payload: Dict[str, Any], use_web_searc
         
         "CRITICAL: Always reference the current_price from market_data for price levels, support/resistance, and strike selection. "
         "Do not use outdated price information from other sources. "
+        
+        "REASONING CLARITY: In your rationale, walk through your thought process step-by-step. "
+        "Connect each piece of evidence to your conclusion. Explain WHY each factor matters and HOW it influences your verdict. "
     )
 
     if use_web_search:
@@ -108,11 +119,20 @@ def _build_messages(ticker: str, analysis_payload: Dict[str, Any], use_web_searc
     system += (
         "\n\nIMPORTANT: You MUST return your response as valid JSON ONLY. Do not include any text before or after the JSON. "
         "Do not use markdown code blocks or any other formatting. Return raw JSON that can be parsed directly. "
+        "\n\nFor the summary_html field, create a well-structured HTML with clear visual hierarchy using these guidelines:\n"
+        "- Use <h4> for main sections (e.g., 'Market Analysis', 'Technical Overview', 'Fundamental Assessment')\n"
+        "- Use <h5> for subsections (e.g., 'Price Action', 'Volume Profile', 'Volatility Environment')\n"
+        "- Use bulleted lists (<ul><li>) for key points and findings\n"
+        "- Use colored badges for important metrics: <span class='badge bg-success'>Bullish Signal</span>\n"
+        "- Use alert boxes for critical insights: <div class='alert alert-info'><strong>Key Insight:</strong> Your insight here</div>\n"
+        "- Organize information logically: Current State → Analysis → Implications → Recommendations\n"
+        "- Keep each section concise but comprehensive\n"
         "\n\nRequired JSON structure:\n"
         "{\n"
         "  \"final_bias\": \"Bullish|Slightly Bullish|Neutral|Slightly Bearish|Bearish\",\n"
-        "  \"summary_html\": \"string (concise HTML with headings and bullet points)\",\n"
-        "  \"rationale\": \"string (plain text, 10-20 sentences)\",\n"
+        "  \"summary_html\": \"string (well-structured HTML with clear hierarchy and visual organization)\",\n"
+        "  \"rationale\": \"string (detailed reasoning with clear logical flow, 15-25 sentences)\",\n"
+        "  \"key_reasoning_points\": [\"Main analytical point 1\", \"Main analytical point 2\", \"Main analytical point 3\"],\n"
         "  \"actionable_ideas\": [\"string1\", \"string2\", ...],\n"
         "  \"risk_factors\": [\"string1\", \"string2\", ...],\n"
         "  \"execution_recommendations\": {\n"
@@ -212,12 +232,52 @@ def _openai_chat_completion(messages, model: str = "gpt-5", temperature: float =
             print(f"ERROR: No choices in OpenAI response: {data}")
             raise RuntimeError(f"No choices in OpenAI response")
             
-        content = data["choices"][0]["text"].strip()
+        # Prefer text, but some proxies may return message-style payloads even on /completions
+        choice0 = data["choices"][0]
+        content = (choice0.get("text") or "").strip()
+        if not content and isinstance(choice0, dict) and "message" in choice0:
+            msg = choice0.get("message") or {}
+            content = (msg.get("content") or "").strip()
+            # Some non-standard providers return content as a list of blocks
+            if not content and isinstance(msg.get("content"), list):
+                try:
+                    blocks = msg.get("content")
+                    parts = []
+                    for b in blocks:
+                        if isinstance(b, dict) and b.get("type") == "text":
+                            parts.append(b.get("text") or "")
+                        elif isinstance(b, str):
+                            parts.append(b)
+                    content = "\n".join([p for p in parts if p]).strip()
+                except Exception:
+                    content = ""
+            # Function/tool-call fallbacks
+            if not content:
+                # tool_calls (OpenAI tool calling)
+                tool_calls = msg.get("tool_calls")
+                if isinstance(tool_calls, list) and tool_calls:
+                    try:
+                        fn = tool_calls[0].get("function", {})
+                        args = fn.get("arguments")
+                        if isinstance(args, (dict, list)):
+                            content = json.dumps(args)
+                        elif isinstance(args, str):
+                            content = args
+                    except Exception:
+                        pass
+                # legacy function_call
+                if not content and isinstance(msg.get("function_call"), dict):
+                    args = msg["function_call"].get("arguments")
+                    if isinstance(args, (dict, list)):
+                        content = json.dumps(args)
+                    elif isinstance(args, str):
+                        content = args
         
         # Check for empty content
         if not content:
-            print(f"ERROR: Empty content in OpenAI response. Full response: {data}")
-            raise RuntimeError("OpenAI returned empty content")
+            print(f"WARNING: Empty content in OpenAI response (completions). Full response: {data}")
+            # Do not raise here; allow downstream fallback to handle gracefully
+            content = ""
     else:
         url = f"{base}/chat/completions"
         payload = {
@@ -253,20 +313,58 @@ def _openai_chat_completion(messages, model: str = "gpt-5", temperature: float =
             print(f"ERROR: No choices in OpenAI response: {data}")
             raise RuntimeError(f"No choices in OpenAI response")
             
-        # Check for missing message content
+        # Robustly extract content from the first choice
         choice = data["choices"][0]
-        if "message" not in choice or "content" not in choice["message"]:
-            print(f"ERROR: No message content in OpenAI response: {data}")
-            raise RuntimeError("No message content in OpenAI response")
-            
-        content = choice["message"]["content"]
-        
-        # Check for empty content
-        if not content or not content.strip():
-            print(f"ERROR: Empty content in OpenAI response. Full response: {data}")
-            raise RuntimeError("OpenAI returned empty content")
-        
-        content = content.strip()
+
+        def _extract_choice_content(ch: dict) -> str:
+            try:
+                msg = ch.get("message", {}) if isinstance(ch, dict) else {}
+                content_val = msg.get("content")
+                # Some providers (or the Responses API) may return a list of blocks
+                if isinstance(content_val, list):
+                    parts = []
+                    for item in content_val:
+                        if isinstance(item, dict) and item.get("type") == "text":
+                            parts.append(item.get("text") or "")
+                        elif isinstance(item, str):
+                            parts.append(item)
+                    content_str = "\n".join([p for p in parts if p]).strip()
+                    if content_str:
+                        return content_str
+                # Standard string content
+                if isinstance(content_val, str) and content_val.strip():
+                    return content_val.strip()
+                # Tool/function call fallback
+                tool_calls = msg.get("tool_calls")
+                if isinstance(tool_calls, list) and tool_calls:
+                    fn = tool_calls[0].get("function", {})
+                    args = fn.get("arguments")
+                    if isinstance(args, (dict, list)):
+                        return json.dumps(args)
+                    if isinstance(args, str) and args.strip():
+                        return args.strip()
+                if isinstance(msg.get("function_call"), dict):
+                    args = msg["function_call"].get("arguments")
+                    if isinstance(args, (dict, list)):
+                        return json.dumps(args)
+                    if isinstance(args, str) and args.strip():
+                        return args.strip()
+                # Some proxies may put text directly at choice["text"]
+                if isinstance(ch.get("text"), str) and ch["text"].strip():
+                    return ch["text"].strip()
+                # Another non-standard field used by some bridges
+                if isinstance(ch.get("response"), str) and ch["response"].strip():
+                    return ch["response"].strip()
+            except Exception as ex:
+                print(f"WARNING: Exception while extracting content: {ex}")
+            return ""
+
+        content = _extract_choice_content(choice)
+
+        # If still empty, do not raise; allow downstream fallback to handle gracefully
+        if not content:
+            print(f"WARNING: Empty content in OpenAI response (chat). Full response: {data}")
+            content = ""
     
     def _extract_json_from_response(text: str) -> dict:
         """Extract JSON from potentially malformed response text."""
@@ -356,6 +454,8 @@ def _openai_chat_completion(messages, model: str = "gpt-5", temperature: float =
             parsed_json['summary_html'] = '<p>GPT did not provide summary</p>'
         if 'rationale' not in parsed_json:
             parsed_json['rationale'] = 'GPT did not provide rationale'
+        if 'key_reasoning_points' not in parsed_json:
+            parsed_json['key_reasoning_points'] = []
         if 'actionable_ideas' not in parsed_json:
             parsed_json['actionable_ideas'] = []
         if 'risk_factors' not in parsed_json:
@@ -365,6 +465,9 @@ def _openai_chat_completion(messages, model: str = "gpt-5", temperature: float =
         if 'sources' not in parsed_json:
             parsed_json['sources'] = []
         
+        # Attach model info so downstream save includes it
+        if isinstance(parsed_json, dict):
+            parsed_json.setdefault('model', model)
         print(f"DEBUG: Final GPT verdict contains execution_recommendations: {bool(parsed_json.get('execution_recommendations'))}")
         return parsed_json
     
@@ -383,6 +486,7 @@ def _openai_chat_completion(messages, model: str = "gpt-5", temperature: float =
         "final_bias": "Neutral",
         "summary_html": summary_html,
         "rationale": rationale,
+        "key_reasoning_points": [],
         "actionable_ideas": [],
         "risk_factors": [],
         "execution_recommendations": {
@@ -395,7 +499,8 @@ def _openai_chat_completion(messages, model: str = "gpt-5", temperature: float =
             "profit_target_guidance": "Use standard profit targets"
         },
         "search_performed": False,
-        "sources": []
+        "sources": [],
+        "model": model
     }
 
 
@@ -404,10 +509,12 @@ def generate_gpt_verdict(ticker: str, analysis_result: Dict[str, Any], model: st
     Compose a prompt from the existing sub-analyses and call the LLM to obtain a final verdict.
     Returns a dict with keys:
       - final_bias
-      - summary_html
-      - rationale
+      - summary_html (enhanced with structured HTML formatting)
+      - rationale (detailed step-by-step reasoning)
+      - key_reasoning_points (main analytical points in bullet format)
       - actionable_ideas
       - risk_factors
+      - execution_recommendations (comprehensive trading strategy guidance)
       - search_performed
       - sources
     """
@@ -467,6 +574,7 @@ def generate_gpt_verdict(ticker: str, analysis_result: Dict[str, Any], model: st
                 "final_bias": model_bias,
                 "summary_html": f"<h5>Model-Based Verdict (GPT Fallback)</h5><div style='background: #fff3cd; padding: 10px; border-radius: 4px; margin-bottom: 10px;'><strong>⚠️ Note:</strong> {timeout_error}. Showing model-based analysis instead.</div>{model_html}",
                 "rationale": f"AI service issue: {timeout_error}. Displaying model-based analysis instead.",
+                "key_reasoning_points": [],
                 "actionable_ideas": [],
                 "risk_factors": [],
                 "execution_recommendations": {
@@ -487,6 +595,7 @@ def generate_gpt_verdict(ticker: str, analysis_result: Dict[str, Any], model: st
                 "final_bias": "Neutral",
                 "summary_html": f"<h5>Analysis Unavailable</h5><div style='background: #f8d7da; padding: 10px; border-radius: 4px;'><strong>⚠️ Error:</strong> {timeout_error} and insufficient data for model-based analysis.</div>",
                 "rationale": f"Both AI service and model-based analysis unavailable: {timeout_error}",
+                "key_reasoning_points": [],
                 "actionable_ideas": [],
                 "risk_factors": [],
                 "execution_recommendations": {
@@ -509,6 +618,7 @@ def generate_gpt_verdict(ticker: str, analysis_result: Dict[str, Any], model: st
             "final_bias": "Neutral",
             "summary_html": f"<h5>Analysis Unavailable</h5><div style='background: #f8d7da; padding: 10px; border-radius: 4px;'><strong>⚠️ Error:</strong> Both GPT service and fallback analysis unavailable.</div><p>GPT Error: {timeout_error}</p><p>Fallback Error: {str(import_error)}</p>",
             "rationale": f"Complete analysis failure - GPT: {timeout_error}, Fallback: {str(import_error)}",
+            "key_reasoning_points": [],
             "actionable_ideas": [],
             "risk_factors": [],
             "execution_recommendations": {

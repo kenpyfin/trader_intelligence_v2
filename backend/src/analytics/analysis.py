@@ -342,7 +342,7 @@ def analyze_candlestick_patterns(df):
     required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
     if df is None or not all(col in df.columns for col in required_cols):
         return {"error": f"DataFrame is missing one or more required columns: {required_cols}", "context": {}}
-    
+
     if len(df) < 51:
         return {"error": "Not enough historical data for analysis (need at least 51 periods).", "context": {}}
 
@@ -350,30 +350,82 @@ def analyze_candlestick_patterns(df):
     for col in required_cols:
         df[col] = pd.to_numeric(df[col], errors='coerce')
     df.dropna(subset=required_cols, inplace=True)
-    if len(df) < 51: return {"error": "Not enough valid data points after cleaning.", "context": {}}
+    if len(df) < 51:
+        return {"error": "Not enough valid data points after cleaning.", "context": {}}
 
+    # Core indicators for MA context
     df['SMA50'] = df['Close'].rolling(window=50).mean()
     df['SMA200'] = df['Close'].rolling(window=200).mean()
-    df['AvgVol10'] = df['Volume'].rolling(window=10).mean()
-    
-    if len(df) < 4: return {"error": "Not enough data after calculating indicators.", "context": {}}
+    # Shift AvgVol10 by 1 to compare today's volume vs prior average
+    df['AvgVol10'] = df['Volume'].rolling(window=10).mean().shift(1)
+
+    if len(df) < 4:
+        return {"error": "Not enough data after calculating indicators.", "context": {}}
 
     last_row = df.iloc[-1]
     C0, SMA50_val, SMA200_val = last_row['Close'], last_row['SMA50'], last_row.get('SMA200')
-    primary_trend = "Uptrend" if pd.notna(SMA200_val) and C0 > SMA200_val else "Downtrend" if pd.notna(SMA200_val) else "Undetermined"
+    primary_trend = (
+        "Uptrend" if pd.notna(SMA200_val) and C0 > SMA200_val
+        else "Downtrend" if pd.notna(SMA200_val)
+        else "Undetermined"
+    )
     secondary_trend = "Uptrend" if C0 > SMA50_val else "Downtrend"
 
     market_context = {
         "primary_trend": primary_trend,
         "secondary_trend": secondary_trend
     }
-    
-    # Simplified pattern logic for brevity. Full logic can be migrated if needed.
-    found_patterns = []
-    # In a real implementation, the detailed pattern recognition logic from option_trade.py would go here.
-    # For now, this is a placeholder.
 
-    return {"patterns": found_patterns, "context": market_context, "plot_df": df}
+    # Basic pattern recognition with volume-aware strength
+    found_patterns = []
+    max_lookback = min(4, len(df))
+    get_iloc = lambda col, i: df[col].iloc[-1 - i]
+    O = {i: get_iloc('Open', i) for i in range(max_lookback)}
+    H = {i: get_iloc('High', i) for i in range(max_lookback)}
+    L = {i: get_iloc('Low', i) for i in range(max_lookback)}
+    C = {i: get_iloc('Close', i) for i in range(max_lookback)}
+    V = {i: get_iloc('Volume', i) for i in range(max_lookback)}
+    AV10 = {i: get_iloc('AvgVol10', i) for i in range(max_lookback)}
+
+    def Body(x): return abs(O.get(x, 0) - C.get(x, 0))
+    def UpperShadow(x): return H.get(x, 0) - max(O.get(x, 0), C.get(x, 0))
+    def LowerShadow(x): return min(O.get(x, 0), C.get(x, 0)) - L.get(x, 0)
+
+    is_downtrend = secondary_trend == "Downtrend" or (C.get(0, 0) < C.get(1, 0) < C.get(2, 0))
+    is_uptrend = secondary_trend == "Uptrend" or (C.get(0, 0) > C.get(1, 0) > C.get(2, 0))
+
+    def build_interpretation(base_interp, vol_idx, name):
+        is_high_vol = V.get(vol_idx, 0) > (AV10.get(vol_idx, 0) or 0) * 1.2 if AV10.get(vol_idx, None) is not None else False
+        vol_msg = "on high volume, strengthening the signal." if is_high_vol else "on average volume."
+        strength = "Strong" if is_high_vol and "Engulfing" in name else ("Moderate" if is_high_vol else "Weak")
+        return f"{base_interp} It appeared {vol_msg}", strength
+
+    # Bullish reversal
+    if is_downtrend:
+        if LowerShadow(0) > (2 * Body(0)) and UpperShadow(0) < (0.1 * (H.get(0, 0) - L.get(0, 0))):
+            interp, strength = build_interpretation("Sellers were rejected after a decline.", 0, "Hammer")
+            found_patterns.append({"name": "Hammer (Bullish Reversal)", "interpretation": interp, "strength": strength})
+        if Body(0) > 0 and C.get(1, C.get(0, 0)) < O.get(1, C.get(0, 0)) and C.get(0, 0) > O.get(1, C.get(0, 0)) and O.get(0, 0) < C.get(1, C.get(0, 0)):
+            interp, strength = build_interpretation("A powerful momentum shift where buyers overwhelmed sellers.", 0, "Bullish Engulfing")
+            found_patterns.append({"name": "Bullish Engulfing", "interpretation": interp, "strength": strength})
+
+    # Bearish reversal
+    if is_uptrend:
+        if UpperShadow(0) > (2 * Body(0)) and LowerShadow(0) < (0.1 * (H.get(0, 0) - L.get(0, 0))):
+            interp, strength = build_interpretation("Buyers were rejected after a rally.", 0, "Shooting Star")
+            found_patterns.append({"name": "Shooting Star (Bearish Reversal)", "interpretation": interp, "strength": strength})
+        if Body(0) > 0 and C.get(1, C.get(0, 0)) > O.get(1, C.get(0, 0)) and C.get(0, 0) < O.get(1, C.get(0, 0)) and O.get(0, 0) > C.get(1, C.get(0, 0)):
+            interp, strength = build_interpretation("A powerful momentum shift where sellers overwhelmed buyers.", 0, "Bearish Engulfing")
+            found_patterns.append({"name": "Bearish Engulfing", "interpretation": interp, "strength": strength})
+
+    # Prepare plotly-friendly data in 'split' orientation, last ~250 bars
+    plot_df = df.tail(250)
+    plot_data = plot_df.to_dict('split')
+    # Ensure index (dates) are stringified for the frontend
+    if 'index' in plot_data and len(plot_data['index']) > 0 and hasattr(plot_data['index'][0], 'strftime'):
+        plot_data['index'] = [ts.strftime('%Y-%m-%d') for ts in plot_data['index']]
+
+    return {"patterns": found_patterns, "context": market_context, "plot_data": plot_data}
 
 
 def generate_holistic_conclusion(synthesis_data):
@@ -408,7 +460,7 @@ def generate_holistic_conclusion(synthesis_data):
     return conclusion_html, final_bias
 
 
-def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, rate_source: str = 'etf', analysis_method: str = 'holistic-market-edge', override_price: float = None):
+def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, rate_source: str = 'etf', analysis_method: str = 'holistic-market-edge', override_price: float = None, gpt_model: str = 'gpt-5'):
     fmp = FMPClient()
     price_fetcher = PriceDataFetcher()
 
@@ -620,6 +672,8 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
     # This is the base package of sub-analyses
     analysis_result_package = {
         "status": "success", "ticker": ticker, "S_current": S_current, "expiration_date": expiration_date.isoformat(), "dte": days_to_exp,
+        "analysis_method": analysis_method,
+        "gpt_model": gpt_model if 'gpt' in analysis_method else None,
         "synthesis_data": synthesis_data,
         "iv_high": iv_high,
         "iv_low": iv_low, 
@@ -696,11 +750,11 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
     # Import the generate_holistic_conclusion function  
     from ..services.analysis_service import generate_holistic_conclusion
     
-    if 'gpt-verdict' in analysis_method:
+    if (('gpt' in analysis_method) and ('verdict' in analysis_method)) or ('gpt-verdict' in analysis_method):
         print(f"DEBUG: Running GPT Verdict analysis for {ticker} (method: {analysis_method})")
         use_web = 'web' in analysis_method
         # Pass the sub-analyses to the AI
-        gpt_verdict = generate_gpt_verdict(ticker, analysis_result_package, model="gpt-5", use_web_search=use_web)
+        gpt_verdict = generate_gpt_verdict(ticker, analysis_result_package, model=gpt_model or 'gpt-5', use_web_search=use_web)
         print(f"DEBUG: GPT Verdict response received: {gpt_verdict}")
 
         # Populate the package with AI results

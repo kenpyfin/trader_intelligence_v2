@@ -45,8 +45,10 @@ const CandlestickChart = ({ plotData, ticker }) => {
   const { index: dates, columns, data } = plotData;
   const findCol = (name) => columns.indexOf(name);
 
-  // Map data arrays to named properties for Plotly
-  const trace = {
+  const traces = [];
+
+  // Candlestick base
+  traces.push({
     x: dates,
     close: data.map(row => row[findCol('Close')]),
     high: data.map(row => row[findCol('High')]),
@@ -54,17 +56,43 @@ const CandlestickChart = ({ plotData, ticker }) => {
     open: data.map(row => row[findCol('Open')]),
     type: 'candlestick',
     name: ticker,
-  };
-  
+  });
+
+  // Overlay SMA50 and SMA200 if available
+  const sma50Idx = findCol('SMA50');
+  if (sma50Idx !== -1) {
+    traces.push({
+      x: dates,
+      y: data.map(row => row[sma50Idx]),
+      type: 'scatter',
+      mode: 'lines',
+      name: 'SMA 50',
+      line: { color: '#1f77b4', width: 1.5 },
+    });
+  }
+
+  const sma200Idx = findCol('SMA200');
+  if (sma200Idx !== -1) {
+    traces.push({
+      x: dates,
+      y: data.map(row => row[sma200Idx]),
+      type: 'scatter',
+      mode: 'lines',
+      name: 'SMA 200',
+      line: { color: '#d62728', width: 1.5 },
+    });
+  }
+
   const layout = {
     title: `${ticker} Price Chart`,
     xaxis: { rangeslider: { visible: false } },
     yaxis: { title: 'Price' },
     margin: { t: 40, b: 40, l: 50, r: 20 },
-    height: 400,
+    height: 420,
+    legend: { orientation: 'h' },
   };
 
-  return <Plot data={[trace]} layout={layout} style={{ width: '100%' }} />;
+  return <Plot data={traces} layout={layout} style={{ width: '100%' }} />;
 };
 
 const MacroInsights = ({ onRateCalculated }) => {
@@ -454,6 +482,15 @@ const AnalysisDetails = ({ data }) => {
       </AnalysisCard>
 
       {data.gpt_verdict && <GptVerdictCard verdict={data.gpt_verdict} />}
+
+      <AnalysisCard title="Price Chart (Candlesticks + MAs)">
+        {data.candlestick_analysis?.plot_data ? 
+          <CandlestickChart plotData={data.candlestick_analysis.plot_data} ticker={data.ticker} /> :
+          <p>{data.candlestick_analysis?.error || "No chart data."}</p>
+        }
+        <p><strong>Primary Trend:</strong> {data.candlestick_analysis?.context?.primary_trend}</p>
+        <p><strong>Secondary Trend:</strong> {data.candlestick_analysis?.context?.secondary_trend}</p>
+      </AnalysisCard>
       
       <StrategyOrder 
         strategy={data.recommended_strategy} 
@@ -464,16 +501,9 @@ const AnalysisDetails = ({ data }) => {
       
       { !isGptResult &&
         <>
-          <AnalysisCard title="1. Price Trend & Candlestick Analysis">
-            {data.candlestick_analysis?.plot_data ? 
-              <CandlestickChart plotData={data.candlestick_analysis.plot_data} ticker={data.ticker} /> :
-              <p>{data.candlestick_analysis?.error || "No chart data."}</p>
-            }
-            <p><strong>Primary Trend:</strong> {data.candlestick_analysis?.context?.primary_trend}</p>
-            <p><strong>Secondary Trend:</strong> {data.candlestick_analysis?.context?.secondary_trend}</p>
-            
+          <AnalysisCard title="1. Candlestick Patterns (Context)">
             {data.candlestick_analysis?.patterns && data.candlestick_analysis.patterns.length > 0 ? (
-              <div style={{marginTop: '15px'}}>
+              <div style={{marginTop: '5px'}}>
                 <strong>Recent Patterns Identified:</strong>
                 <ul style={{ margin: '5px 0', paddingLeft: '20px' }}>
                   {data.candlestick_analysis.patterns.map((p, i) => (
@@ -484,7 +514,7 @@ const AnalysisDetails = ({ data }) => {
                 </ul>
               </div>
             ) : (
-              <p style={{marginTop: '15px'}}><strong>Patterns:</strong> No significant candlestick patterns identified in the last few periods.</p>
+              <p style={{marginTop: '5px'}}><strong>Patterns:</strong> No significant candlestick patterns identified in the last few periods.</p>
             )}
           </AnalysisCard>
 
