@@ -347,6 +347,15 @@ def analyze_candlestick_patterns(df):
         return {"error": "Not enough historical data for analysis (need at least 51 periods).", "context": {}}
 
     df = df.copy()
+    # Ensure we have a datetime index for proper date handling on the frontend
+    if 'TimeStamp' in df.columns:
+        try:
+            df['TimeStamp'] = pd.to_datetime(df['TimeStamp'], errors='coerce')
+            df.sort_values('TimeStamp', inplace=True)
+            df.set_index('TimeStamp', inplace=True)
+        except Exception:
+            # If any issue occurs, proceed without changing index
+            pass
     for col in required_cols:
         df[col] = pd.to_numeric(df[col], errors='coerce')
     df.dropna(subset=required_cols, inplace=True)
@@ -354,7 +363,11 @@ def analyze_candlestick_patterns(df):
         return {"error": "Not enough valid data points after cleaning.", "context": {}}
 
     # Core indicators for MA context
+    # Add more SMAs for richer context
+    df['SMA10'] = df['Close'].rolling(window=10).mean()
+    df['SMA20'] = df['Close'].rolling(window=20).mean()
     df['SMA50'] = df['Close'].rolling(window=50).mean()
+    df['SMA100'] = df['Close'].rolling(window=100).mean()
     df['SMA200'] = df['Close'].rolling(window=200).mean()
     # Shift AvgVol10 by 1 to compare today's volume vs prior average
     df['AvgVol10'] = df['Volume'].rolling(window=10).mean().shift(1)
@@ -418,8 +431,18 @@ def analyze_candlestick_patterns(df):
             interp, strength = build_interpretation("A powerful momentum shift where sellers overwhelmed buyers.", 0, "Bearish Engulfing")
             found_patterns.append({"name": "Bearish Engulfing", "interpretation": interp, "strength": strength})
 
-    # Prepare plotly-friendly data in 'split' orientation, last ~250 bars
-    plot_df = df.tail(250)
+    # Prepare plotly-friendly data in 'split' orientation
+    # Show data from the beginning of last year until now
+    try:
+        start_of_last_year = date(date.today().year - 1, 1, 1)
+        end_dt = pd.Timestamp(datetime.now())
+        start_dt = pd.Timestamp(start_of_last_year)
+        if isinstance(df.index, pd.DatetimeIndex):
+            plot_df = df.loc[(df.index >= start_dt) & (df.index <= end_dt)]
+        else:
+            plot_df = df
+    except Exception:
+        plot_df = df
     plot_data = plot_df.to_dict('split')
     # Ensure index (dates) are stringified for the frontend
     if 'index' in plot_data and len(plot_data['index']) > 0 and hasattr(plot_data['index'][0], 'strftime'):
@@ -548,7 +571,10 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
     option_chain_df.sort_values('Strike', inplace=True)
     strikes = option_chain_df['Strike'].unique()
     
-    historical_prices_df = price_fetcher.get_price_data([ticker], method="td_data", back_day=350)
+    # Fetch enough historical data: from the start of last year to today
+    start_dt = datetime(date.today().year - 1, 1, 1)
+    end_dt = datetime.now()
+    historical_prices_df = price_fetcher.get_price_data([ticker], method="td_data", start_date=start_dt, end_date=end_dt)
     hv_current = calculate_historical_volatility(historical_prices_df['Close'].tolist()) if historical_prices_df is not None and not historical_prices_df.empty else None
 
     key_vols_iv, _ = fetch_iv_term_structure(ticker, price_fetcher, fmp)

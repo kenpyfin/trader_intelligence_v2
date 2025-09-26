@@ -33,21 +33,55 @@ class IBTrader:
         self.ip_add = os.getenv('TWS_HOST', '10.0.1.22')
         self.account= os.getenv("TWS_ACCOUNT")
         self.port = tw_port
-        print(f"INFO: IBTrader initialized to connect to TWS at {self.ip_add}:{self.port}")
-        self.client = IB()
-        
-        # Configure ib_insync to NOT automatically request completed orders which commonly timeout
-        # This prevents the "completed orders request timed out" error
-        self.client.RequestTimeout = 30  # 2 minute timeout for all requests
+        print(f"INFO: IBTrader initializing for TWS at {self.ip_add}:{self.port}")
+        # Defer creating IB client until connect() to ensure loop-bound creation
+        self.client = None
+        self._loop = None
         
         # The connection is now established on-demand by async methods.
         atexit.register(self.disconnect)
 
     async def connect(self):
-        """Establishes connection to TWS/Gateway asynchronously if not already connected."""
+        """Establishes connection to TWS/Gateway asynchronously if not already connected.
+        Ensures the IB client is created in the current event loop.
+        """
+        loop = asyncio.get_running_loop()
+        # Align ib_insync with the currently running asyncio loop
+        try:
+            ib_insync.util.useAsyncio()  # instruct ib_insync to use asyncio integration
+        except Exception:
+            pass
+        # Ensure the default loop getter returns this running loop in this thread
+        try:
+            asyncio.set_event_loop(loop)
+        except Exception:
+            pass
+        # (Re)create client if missing or loop changed
+        if self.client is None or self._loop is not loop:
+            try:
+                if self.client is not None and getattr(self.client, 'isConnected', lambda: False)():
+                    self.client.disconnect()
+            except Exception:
+                pass
+            self.client = IB()
+            self._loop = loop
+            print(f"INFO: IBTrader client bound to loop id={id(loop)}")
+            # Configure request timeout if available
+            try:
+                self.client.RequestTimeout = 30
+            except Exception:
+                pass
+
         if not self.client.isConnected():
             try:
-                print(f"INFO: Connecting to TWS at {self.ip_add}:{self.port}...")
+                try:
+                    util_loop = ib_insync.util.getLoop()
+                except Exception:
+                    util_loop = None
+                print(
+                    f"INFO: Connecting to TWS at {self.ip_add}:{self.port} on loop id={id(loop)}"
+                    + (f", util_loop id={id(util_loop)} ({type(util_loop).__name__})" if util_loop else ", util_loop unknown")
+                )
                 # Increased timeout to 180s to prevent failures when syncing large option portfolios.
                 await self.client.connectAsync(self.ip_add, self.port, clientId=random.randint(0, 1000), timeout=180, account=self.account)
                 
@@ -72,8 +106,11 @@ class IBTrader:
                 raise
 
     def disconnect(self):
-        if self.client.isConnected():
-            self.client.disconnect()
+        try:
+            if self.client is not None and getattr(self.client, 'isConnected', lambda: False)():
+                self.client.disconnect()
+        except Exception:
+            pass
 
     async def get_available_fund(self):
         try:
@@ -318,14 +355,26 @@ class IBTrader:
             print("-----------------------------")
             raise Exception(f"Error placing strategy order for {symbol}: {str(e)}")
 
-    async def wait_for_order_fill(self, trade, timeout=TIMEOUT):
+    async def wait_for_order_fill(self, trade, timeout=TIMEOUT, cancel_on_timeout: bool = False):
+        """
+        Polls for order completion up to `timeout` seconds without blocking the event loop.
+        By default this does NOT cancel the order when the timeout elapses; it simply returns
+        the latest known status (e.g., Submitted/PreSubmitted). If `cancel_on_timeout` is True,
+        the order will be explicitly cancelled when the timeout is reached.
+
+        Returns the current `trade.orderStatus.status` at exit.
+        """
         start_time = time.time()
 
         while not trade.isDone():
             if time.time() - start_time > timeout:
-                self.client.cancelOrder(trade.order)
+                if cancel_on_timeout:
+                    try:
+                        self.client.cancelOrder(trade.order)
+                    except Exception:
+                        pass
                 break
-            await asyncio.sleep(1)  # Use asyncio.sleep for non-blocking wait
+            await asyncio.sleep(1)  # Non-blocking wait
 
         return trade.orderStatus.status
 
@@ -636,7 +685,9 @@ class IBTrader:
                     'filled': status.filled,
                     'avgFillPrice': status.avgFillPrice,
                     'lastFillTime': get_latest_fill_time(trade).isoformat() if status.status == 'Filled' else None,
-                    'description': ''
+                    'description': '',
+                    'orderId': getattr(order, 'orderId', None),
+                    'permId': getattr(order, 'permId', None),
                 }
 
                 if isinstance(contract, Option):

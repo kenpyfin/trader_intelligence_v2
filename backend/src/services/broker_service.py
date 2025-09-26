@@ -1,6 +1,7 @@
 import asyncio
 import traceback
 from src.models.order_models import StrategyOrderRequest
+from . import verdict_service
 from .order_tracking_service import record_strategy_execution
 from .connection_manager import connection_manager
 
@@ -36,6 +37,27 @@ async def place_strategy_order(order_request: StrategyOrderRequest):
                 'quantity': 1 # Ratio within the spread is 1:1
             })
 
+        # If no AI guidance provided, pull the latest saved verdict for this ticker/expiration
+        insights_to_store = order_request.gpt_insights
+        if not insights_to_store:
+            latest_verdict = verdict_service.get_latest_verdict_for(
+                order_request.ticker, order_request.expiration_date
+            )
+            if latest_verdict and isinstance(latest_verdict.get('data'), dict):
+                data = latest_verdict['data']
+                gv = data.get('gpt_verdict') or {}
+                # Build a compact snapshot structure expected by tracking service
+                insights_to_store = {
+                    'final_bias': data.get('final_bias') or gv.get('final_bias'),
+                    'summary_html': gv.get('summary_html'),
+                    'execution_recommendations': gv.get('execution_recommendations'),
+                    'rationale': gv.get('rationale'),
+                    'sources': gv.get('sources'),
+                }
+                # If everything is None, treat as no insights
+                if not any(v is not None for v in insights_to_store.values()):
+                    insights_to_store = None
+
         # For credit spreads, the order size must be negative (to SELL the spread)
         order_size = -order_request.size if order_request.is_credit_spread else order_request.size
 
@@ -64,8 +86,10 @@ async def place_strategy_order(order_request: StrategyOrderRequest):
 
             # Persist a tracked-order record linking execution to guidance snapshot
             try:
+                # Ensure guidance snapshot is carried into the tracked record
+                enriched_request = order_request.copy(update={'gpt_insights': insights_to_store})
                 tracking = record_strategy_execution(
-                    order_request=order_request,
+                    order_request=enriched_request,
                     trade_info={
                         'order_status': trade.orderStatus.status,
                         'filled': trade.orderStatus.filled,
@@ -86,7 +110,7 @@ async def place_strategy_order(order_request: StrategyOrderRequest):
                 "order_status": trade.orderStatus.status,
                 "filled": trade.orderStatus.filled,
                 "remaining": trade.orderStatus.remaining,
-                "gpt_insights_included": bool(order_request.gpt_insights),
+                "gpt_insights_included": bool(insights_to_store),
                 "tracking_id": tracking_id,
                 "ib_order_id": ib_order_id,
                 "ib_perm_id": ib_perm_id,

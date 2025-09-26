@@ -174,10 +174,12 @@ async def save_verdict(request: SaveVerdictRequest):
 
 @app.get("/analysis/verdicts/{ticker}")
 @app.get("/api/analysis/verdicts/{ticker}")
-async def list_saved_verdicts(ticker: str, limit: int = 25):
-    """List saved verdicts for a ticker (most recent first)."""
+async def list_saved_verdicts(ticker: str, page: int = 1, page_size: int = 25):
+    """List saved verdicts for a ticker with pagination (most recent first)."""
     try:
-        return {"status": "success", "items": list_verdicts(ticker.upper(), limit)}
+        data = list_verdicts(ticker.upper(), page=page, page_size=page_size)
+        data['status'] = 'success'
+        return data
     except Exception as e:
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to list verdicts: {e}")
@@ -255,6 +257,12 @@ async def analyze_stock_with_gpt(request: AnalysisRequest):
             "sources": sources,
         }
         result['dte'] = (expiration_date - date.today()).days
+
+        # Auto-save verdict history (best-effort)
+        try:
+            save_verdict_document(result, None)
+        except Exception as _e:
+            print(f"WARNING: Autosave of GPT verdict failed: {_e}")
 
         return [result]
     except Exception as e:
@@ -381,6 +389,14 @@ async def analyze_stock(request: AnalysisRequest):
         # The frontend expects an array of results, so we wrap the single result in a list.
         # We also calculate and add the DTE (days to expiration) for display purposes.
         analysis_result['dte'] = (expiration_date - date.today()).days
+
+        # Auto-save verdict history (best-effort)
+        try:
+            save_verdict_document(analysis_result, None)
+        except Exception as _e:
+            # Do not fail the request if autosave fails
+            print(f"WARNING: Autosave of verdict failed: {_e}")
+
         return [analysis_result]
 
     except Exception as e:

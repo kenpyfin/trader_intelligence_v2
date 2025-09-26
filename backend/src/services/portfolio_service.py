@@ -207,7 +207,7 @@ async def close_strategy(request: CloseStrategyRequest):
             order_type='MKT'
         )
         
-        # Wait for the trade to get a status update, but with a short timeout
+        # Briefly poll for a status update without cancelling on timeout
         await trader.wait_for_order_fill(result, timeout=5)
         
         # Create response with strategy-level information
@@ -218,7 +218,9 @@ async def close_strategy(request: CloseStrategyRequest):
             "filled": result.orderStatus.filled,
             "remaining": result.orderStatus.remaining,
             "strategy_size": strategy_size,
-            "legs_closed": len(request.legs)
+            "legs_closed": len(request.legs),
+            "order_id": getattr(getattr(result, 'order', None), 'orderId', None),
+            "perm_id": getattr(getattr(result, 'order', None), 'permId', None)
         }
         
         return _sanitize_for_json({"status": "submitted", "trade": strategy_summary})
@@ -257,7 +259,7 @@ async def close_strategy(request: CloseStrategyRequest):
                     "message": str(result)
                 })
             else:
-                # Wait for the trade to get a status update, but with a short timeout
+                # Briefly poll for a status update without cancelling on timeout
                 await trader.wait_for_order_fill(result, timeout=5)
                 closing_trades.append({
                     "leg": f"{leg.symbol} {leg.expiry} {leg.strike} {leg.right}",
@@ -265,6 +267,8 @@ async def close_strategy(request: CloseStrategyRequest):
                     "order_status": result.orderStatus.status,
                     "filled": result.orderStatus.filled,
                     "remaining": result.orderStatus.remaining,
+                    "order_id": getattr(getattr(result, 'order', None), 'orderId', None),
+                    "perm_id": getattr(getattr(result, 'order', None), 'permId', None),
                 })
                 
         return _sanitize_for_json({
@@ -286,7 +290,7 @@ async def close_stock_position(request: CloseStockPositionRequest):
         # Place the stock market order
         result = await trader.place_stock_market_order(request.symbol, closing_size)
         
-        # Wait for the trade to get a status update, but with a short timeout
+        # Briefly poll for a status update without cancelling on timeout
         await trader.wait_for_order_fill(result, timeout=5)
         
         response_data = {
@@ -296,6 +300,8 @@ async def close_stock_position(request: CloseStockPositionRequest):
             "order_status": result.orderStatus.status,
             "filled": result.orderStatus.filled,
             "remaining": result.orderStatus.remaining,
+            "order_id": getattr(getattr(result, 'order', None), 'orderId', None),
+            "perm_id": getattr(getattr(result, 'order', None), 'permId', None),
         }
         
         return _sanitize_for_json(response_data)

@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import requests
 from datetime import date
 from typing import Any, Dict
@@ -286,10 +287,14 @@ def _openai_chat_completion(messages, model: str = "gpt-5", temperature: float =
             "max_tokens": 4000,
             "stream": False
         }
-        
+        # Prefer structured JSON output if the provider supports it
+        payload_with_json_mode = dict(payload)
+        payload_with_json_mode["response_format"] = {"type": "json_object"}
+
         # Add temperature only for models that support it
         if not model.startswith("gpt-5") and not model.startswith("o3"):
             payload["temperature"] = temperature
+            payload_with_json_mode["temperature"] = temperature
             
         headers = {
             "Authorization": f"Bearer {key}",
@@ -297,15 +302,32 @@ def _openai_chat_completion(messages, model: str = "gpt-5", temperature: float =
         }
         
         print(f"DEBUG: Making chat completions request to {url}")
-        print(f"DEBUG: Payload keys: {list(payload.keys())}")
+        print(f"DEBUG: Payload keys (json mode): {list(payload_with_json_mode.keys())}")
         print(f"DEBUG: Model in payload: {payload.get('model')}")
         print(f"DEBUG: Messages count: {len(messages)}")
+
+        # Try JSON mode first, then gracefully fall back if the provider/model doesn't support it
+        try:
+            resp = requests.post(url, headers=headers, data=json.dumps(payload_with_json_mode), timeout=timeout)
+            print(f"DEBUG: Response status (json mode): {resp.status_code}")
+            resp.raise_for_status()
+            data = resp.json()
+        except requests.exceptions.HTTPError as http_err:
+            body = getattr(http_err, 'response', None)
+            body_text = body.text if body is not None else ''
+            print(f"WARNING: Chat API JSON mode failed ({getattr(body, 'status_code', 'NA')}): {body_text[:200]}")
+            # Retry without response_format
+            resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=timeout)
+            print(f"DEBUG: Response status (fallback): {resp.status_code}")
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            print(f"WARNING: Chat API request error in JSON mode: {e}")
+            resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=timeout)
+            print(f"DEBUG: Response status (fallback): {resp.status_code}")
+            resp.raise_for_status()
+            data = resp.json()
         
-        resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=timeout)
-        print(f"DEBUG: Response status: {resp.status_code}")
-        
-        resp.raise_for_status()
-        data = resp.json()
         print(f"DEBUG: Response keys: {list(data.keys())}")
         
         # Check for empty response or missing choices
@@ -367,39 +389,95 @@ def _openai_chat_completion(messages, model: str = "gpt-5", temperature: float =
             content = ""
     
     def _extract_json_from_response(text: str) -> dict:
-        """Extract JSON from potentially malformed response text."""
-        # First try direct parsing
-        try:
-            return json.loads(text.strip())
-        except json.JSONDecodeError:
-            pass
-        
-        # Try to find JSON within the text (common with models that add explanations)
-        import re
-        
-        # Look for JSON block between curly braces
-        json_match = re.search(r'\{.*\}', text, re.DOTALL)
-        if json_match:
+        """Extract JSON from potentially malformed response text with robust fallbacks."""
+        def _clean_json_like(s: str) -> str:
+            # Normalize smart quotes to plain quotes
+            s = s.replace('“', '"').replace('”', '"').replace('‘', "'").replace('’', "'")
+            # Remove comments
+            s = re.sub(r"//.*?$", "", s, flags=re.MULTILINE)
+            s = re.sub(r"/\*.*?\*/", "", s, flags=re.DOTALL)
+            # Replace Python/JS literals
+            s = re.sub(r"\bTrue\b", "true", s)
+            s = re.sub(r"\bFalse\b", "false", s)
+            s = re.sub(r"\bNone\b", "null", s)
+            s = re.sub(r"\bNaN\b", "null", s)
+            s = re.sub(r"\bInfinity\b", "null", s)
+            # Remove trailing commas before } or ]
+            s = re.sub(r",\s*([}\]])", r"\1", s)
+            return s.strip()
+
+        def _try_parse(s: str):
             try:
-                return json.loads(json_match.group(0))
+                return json.loads(s)
             except json.JSONDecodeError:
                 pass
-        
-        # Try to extract from markdown code blocks
-        code_block_patterns = [
-            r'```json\s*(.*?)\s*```',
-            r'```\s*(.*?)\s*```'
-        ]
-        
+            # Try cleaning and parse again
+            cleaned = _clean_json_like(s)
+            try:
+                return json.loads(cleaned)
+            except json.JSONDecodeError:
+                return None
+
+        # 1) Direct parse
+        res = _try_parse(text.strip())
+        if isinstance(res, dict):
+            return res
+
+        # 2) Code blocks first (json-marked then generic)
+        code_block_patterns = [r"```json\s*(.*?)\s*```", r"```\s*(.*?)\s*```"]
         for pattern in code_block_patterns:
             matches = re.findall(pattern, text, re.DOTALL | re.IGNORECASE)
             for match in matches:
-                try:
-                    return json.loads(match.strip())
-                except json.JSONDecodeError:
+                res = _try_parse(match)
+                if isinstance(res, dict):
+                    return res
+
+        # 3) Balanced brace scan to extract candidate JSON objects
+        def _balanced_object_candidates(s: str):
+            in_string = False
+            escape = False
+            depth = 0
+            start_idx = None
+            for i, ch in enumerate(s):
+                if in_string:
+                    if escape:
+                        escape = False
+                    elif ch == '\\':
+                        escape = True
+                    elif ch == '"':
+                        in_string = False
                     continue
+                else:
+                    if ch == '"':
+                        in_string = True
+                        continue
+                    if ch == '{':
+                        if depth == 0:
+                            start_idx = i
+                        depth += 1
+                        continue
+                    if ch == '}':
+                        if depth > 0:
+                            depth -= 1
+                            if depth == 0 and start_idx is not None:
+                                yield s[start_idx:i+1]
+                                start_idx = None
+                        continue
+            return
+
+        for candidate in _balanced_object_candidates(text):
+            res = _try_parse(candidate)
+            if isinstance(res, dict):
+                return res
+
+        # 4) Fallback: greedy first/last braces (as a last resort)
+        greedy = re.search(r"\{.*\}", text, re.DOTALL)
+        if greedy:
+            res = _try_parse(greedy.group(0))
+            if isinstance(res, dict):
+                return res
         
-        # If all extraction attempts fail, return None
+        # No valid JSON found
         return None
     
     # Try to extract valid JSON from the response

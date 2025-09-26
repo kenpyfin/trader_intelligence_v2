@@ -401,6 +401,14 @@ def analyze_candlestick_patterns(df):
         return {"error": "Not enough historical data for contextual candlestick analysis (need at least 51 periods).", "context": {}}
 
     df = df.copy()
+    # Ensure datetime index for date-aware plotting
+    if 'TimeStamp' in df.columns:
+        try:
+            df['TimeStamp'] = pd.to_datetime(df['TimeStamp'], errors='coerce')
+            df.sort_values('TimeStamp', inplace=True)
+            df.set_index('TimeStamp', inplace=True)
+        except Exception:
+            pass
     for col in required_cols:
         df[col] = pd.to_numeric(df[col], errors='coerce')
     df.dropna(subset=required_cols, inplace=True)
@@ -408,7 +416,10 @@ def analyze_candlestick_patterns(df):
         return {"error": "Not enough valid data points after cleaning.", "context": {}}
 
     # --- Calculate Indicators for Context ---
+    df['SMA10'] = df['Close'].rolling(window=10).mean()
+    df['SMA20'] = df['Close'].rolling(window=20).mean()
     df['SMA50'] = df['Close'].rolling(window=50).mean()
+    df['SMA100'] = df['Close'].rolling(window=100).mean()
     df['SMA200'] = df['Close'].rolling(window=200).mean()
     df['AvgVol10'] = df['Volume'].rolling(window=10).mean().shift(1) # Shift to get prior 10 day avg vol
 
@@ -455,7 +466,16 @@ def analyze_candlestick_patterns(df):
             interp, strength = build_interpretation("A powerful momentum shift where sellers overwhelmed buyers.", 0, "Bearish Engulfing")
             found_patterns.append({"name": "Bearish Engulfing", "interpretation": interp, "strength": strength})
 
-    plot_data_dict = df.tail(250).to_dict('split')
+    # Use last-year-to-date range when possible
+    try:
+        from datetime import date as _date, datetime as _datetime
+        start_of_last_year = _date(_date.today().year - 1, 1, 1)
+        end_dt = pd.Timestamp(_datetime.now())
+        start_dt = pd.Timestamp(start_of_last_year)
+        plot_df = df.loc[(df.index >= start_dt) & (df.index <= end_dt)] if isinstance(df.index, pd.DatetimeIndex) else df
+    except Exception:
+        plot_df = df
+    plot_data_dict = plot_df.to_dict('split')
     if 'index' in plot_data_dict and hasattr(plot_data_dict['index'][0], 'strftime'):
         plot_data_dict['index'] = [ts.strftime('%Y-%m-%d') for ts in plot_data_dict['index']]
 
