@@ -462,6 +462,42 @@ class AlpacaTrader:
         envelopes = [_alpaca_order_to_trade(order) for order in orders]
         return [_trade_to_summary_dict(env) for env in envelopes]
 
+    async def get_option_chain_df(self, symbol: str, expiration_date: str) -> pd.DataFrame:
+        """
+        Fetches the option chain for a specific expiration date from Alpaca
+        and returns it as a pandas DataFrame.
+        """
+        await self.connect()
+        chain = await self.client.get_option_chain(symbol)
+        if not isinstance(chain, dict):
+            return pd.DataFrame()
+
+        rows = []
+        norm_expiration = _normalize_expiry(expiration_date).replace("-", "")
+
+        for occ_symbol, snapshot in chain.items():
+            parsed = _parse_occ_symbol(occ_symbol)
+            if parsed.get("expiry") != norm_expiration:
+                continue
+
+            quote = snapshot.get("latest_quote") or {}
+            trade = snapshot.get("latest_trade") or {}
+
+            row = {
+                "Strike": parsed.get("strike"),
+                "Type": "call" if parsed.get("right") == "C" else "put",
+                "Bid": _maybe_float(quote.get("bid_price")),
+                "Ask": _maybe_float(quote.get("ask_price")),
+                "Last Trade": _maybe_float(trade.get("price")),
+                "option_symbol": occ_symbol,
+            }
+            rows.append(row)
+
+        if not rows:
+            return pd.DataFrame()
+
+        return pd.DataFrame(rows)
+
 
 IBTrader = AlpacaTrader
 

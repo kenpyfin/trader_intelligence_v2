@@ -160,6 +160,109 @@ def universal_binomial_pricer(S, K, expiration_date, r_input, sigma_input, model
     return option_value_tree[0,0], greeks, actionable_alerts, early_exercise_premium_at_t0
 
 
+def _get_market_price_from_alpaca_df(df, strike, option_type_char):
+    """
+    Extracts a market price for a specific option from an Alpaca DataFrame.
+    Tries Bid/Ask midpoint, then Last Trade. Uses spread for liquidity check.
+    """
+    if df is None or df.empty:
+        return None
+
+    type_to_match = 'call' if option_type_char.upper() == 'C' else 'put'
+    option_row_df = df[(df['Strike'] == strike) & (df['Type'].str.lower() == type_to_match)]
+
+    if option_row_df.empty:
+        return None
+
+    option_row = option_row_df.iloc[0]
+
+    bid = pd.to_numeric(option_row.get('Bid'), errors='coerce')
+    ask = pd.to_numeric(option_row.get('Ask'), errors='coerce')
+
+    # Liquidity check based on bid/ask spread
+    if pd.notna(bid) and pd.notna(ask) and ask > 0 and bid > 0 and (ask - bid) / ask < 0.5:
+        return (bid + ask) / 2.0
+
+    # Fallback to Last Trade if midpoint is not liquid enough
+    last_trade = pd.to_numeric(option_row.get('Last Trade'), errors='coerce')
+    if pd.notna(last_trade) and last_trade > 0:
+        return last_trade
+        
+    return None
+
+
+async def calculate_market_implied_risk_free_rate(expiration_date, tickers=['SPY', 'QQQ', 'IWM']):
+    """
+    Calculates an aggregate market-implied risk-free rate from a basket of liquid ETFs
+    for a given expiration date using Alpaca data.
+    """
+    trader = await connection_manager.get_trader()
+    all_valid_rates = []
+    log_messages = [f"Starting market-implied risk-free rate calculation for expiry {expiration_date.strftime('%Y-%m-%d')}..."]
+    
+    days_to_exp = (expiration_date - date.today()).days
+    T = days_to_exp / 365.0
+
+    if T <= 0:
+        log_messages.append("Target expiration date is not in the future. Cannot calculate rate.")
+        return None, log_messages
+
+    for ticker in tickers:
+        log_messages.append(f"--- Processing {ticker} ---")
+        try:
+            # 1. Get current price
+            S_current = await trader.get_current_price(ticker, "STK")
+            if S_current is None:
+                log_messages.append(f"Could not fetch current price for {ticker}. Skipping.")
+                continue
+
+            # 2. Get option chain from Alpaca
+            expiration_date_str = expiration_date.strftime('%Y%m%d')
+            option_chain_df = await trader.get_option_chain_df(ticker, expiration_date_str)
+            if option_chain_df is None or option_chain_df.empty:
+                log_messages.append(f"Could not fetch option chain for {ticker} on {expiration_date_str}. Skipping.")
+                continue
+            
+            # 3. Select near-the-money strikes
+            strikes = option_chain_df['Strike'].unique()
+            atm_strikes = strikes[np.abs(strikes - S_current) < (S_current * 0.05)] # Within 5% of stock price
+            
+            if len(atm_strikes) == 0:
+                log_messages.append("Could not find any near-the-money strikes. Skipping.")
+                continue
+
+            ticker_rates = []
+            for K in atm_strikes:
+                call_price = _get_market_price_from_alpaca_df(option_chain_df, K, 'C')
+                put_price = _get_market_price_from_alpaca_df(option_chain_df, K, 'P')
+
+                if call_price is not None and put_price is not None:
+                    # Put-Call Parity: C - P = S - K*exp(-rT)
+                    synthetic_forward = S_current - call_price + put_price
+                    if synthetic_forward > 0 and K > 0:
+                        implied_r = - (1 / T) * np.log(synthetic_forward / K)
+                        if -0.05 < implied_r < 0.25: # Filter for reasonable rates
+                            ticker_rates.append(implied_r)
+            
+            if ticker_rates:
+                avg_rate_for_ticker = np.mean(ticker_rates)
+                log_messages.append(f"Found {len(ticker_rates)} valid rates. Average for {ticker}: {avg_rate_for_ticker:.3%}")
+                all_valid_rates.append(avg_rate_for_ticker)
+            else:
+                log_messages.append(f"No valid implied rates found for {ticker}.")
+        except Exception as e:
+            log_messages.append(f"An error occurred while processing {ticker}: {e}")
+
+    if all_valid_rates:
+        market_rate = np.mean(all_valid_rates)
+        log_messages.append(f"--- FINAL ---")
+        log_messages.append(f"Overall market-implied risk-free rate: {market_rate:.3%}")
+        return market_rate, log_messages
+    else:
+        log_messages.append("Could not determine market-implied rate from any ticker.")
+        return None, log_messages
+
+
 def _get_market_price_from_finviz_df(df, strike, option_type_char, current_stock_price_for_atm_fallback=None):
     if df is None or df.empty: return None
     if 'Strike' not in df.columns or 'Type' not in df.columns: return None

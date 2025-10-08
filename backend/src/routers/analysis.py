@@ -1,9 +1,13 @@
 import asyncio
 from datetime import datetime
 
+import asyncio
+from datetime import datetime
+from typing import List
+
 from fastapi import APIRouter, HTTPException
 
-from src.models.analysis_models import AnalysisRequest
+from src.models.analysis_models import AnalysisRequest, RiskFreeRateRequest
 from src.services import analysis_service, analysis_history_service
 
 router = APIRouter()
@@ -120,3 +124,29 @@ async def clear_analysis_history(ticker: str):
         print(f"Error clearing analysis history for {ticker}: {e}")
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail="Failed to clear history")
+
+
+@router.post("/calculate-risk-free-rate")
+async def calculate_market_rate(request: RiskFreeRateRequest):
+    """
+    Calculates a market-implied risk-free rate from liquid ETF option chains.
+    """
+    try:
+        # Convert string date from request to date object for the service
+        expiration_date = datetime.strptime(request.expiration_date, '%Y%m%d').date()
+        
+        market_rate, logs = await analysis_service.calculate_market_implied_risk_free_rate(
+            expiration_date=expiration_date,
+            tickers=request.tickers
+        )
+        
+        return {"risk_free_rate": market_rate, "logs": logs}
+    except ValueError as e:
+        # Handle date parsing errors
+        raise HTTPException(status_code=400, detail=f"Invalid date format for expiration_date. Expected YYYYMMDD. Error: {e}")
+    except Exception as e:
+        import traceback
+        print(f"Error in calculate_market_rate endpoint: {e}")
+        print(traceback.format_exc())
+        # Generic error handler for other issues
+        raise HTTPException(status_code=500, detail=str(e))
