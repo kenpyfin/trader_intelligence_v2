@@ -216,11 +216,27 @@ async def calculate_market_implied_risk_free_rate(expiration_date, tickers=['SPY
                 log_messages.append(f"Could not fetch current price for {ticker}. Skipping.")
                 continue
 
-            # 2. Get option chain from Alpaca
-            expiration_date_str = expiration_date.strftime('%Y%m%d')
-            option_chain_df = await trader.get_option_chain_df(ticker, expiration_date_str)
+            # 2. Find closest available expiration and get option chain from Alpaca
+            target_expiration_str = expiration_date.strftime('%Y%m%d')
+            available_expirations = await trader.get_option_expirations(ticker)
+            if not available_expirations:
+                log_messages.append(f"No option expirations found for {ticker}. Skipping.")
+                continue
+
+            target_date_dt = datetime.strptime(target_expiration_str, '%Y%m%d')
+            available_dates_dt = [datetime.strptime(exp, '%Y%m%d') for exp in available_expirations]
+            
+            time_diffs = [abs(target_date_dt - d) for d in available_dates_dt]
+            closest_date_idx = np.argmin(time_diffs)
+            closest_expiration_dt = available_dates_dt[closest_date_idx]
+            expiration_date_to_use = closest_expiration_dt.strftime('%Y%m%d')
+
+            if expiration_date_to_use != target_expiration_str:
+                log_messages.append(f"Target date {expiration_date.strftime('%Y-%m-%d')} not available. Using closest expiration: {closest_expiration_dt.strftime('%Y-%m-%d')}.")
+
+            option_chain_df = await trader.get_option_chain_df(ticker, expiration_date_to_use)
             if option_chain_df is None or option_chain_df.empty:
-                log_messages.append(f"Could not fetch option chain for {ticker} on {expiration_date_str}. Skipping.")
+                log_messages.append(f"Could not fetch option chain for {ticker} on {expiration_date_to_use}. Skipping.")
                 continue
             
             # 3. Select near-the-money strikes
@@ -251,7 +267,9 @@ async def calculate_market_implied_risk_free_rate(expiration_date, tickers=['SPY
             else:
                 log_messages.append(f"No valid implied rates found for {ticker}.")
         except Exception as e:
+            import traceback
             log_messages.append(f"An error occurred while processing {ticker}: {e}")
+            log_messages.append(traceback.format_exc())
 
     if all_valid_rates:
         market_rate = np.mean(all_valid_rates)
