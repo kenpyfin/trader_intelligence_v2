@@ -851,96 +851,18 @@ def _looks_like_occ(symbol: str) -> bool:
 
 
 def _extract_expiration_list(chain: Any) -> Set[str]:
+    """
+    Extracts unique expiration dates (YYYYMMDD) from an Alpaca option chain response.
+    The response is expected to be a dictionary where keys are OCC symbols.
+    """
     expirations: Set[str] = set()
+    if not isinstance(chain, dict):
+        return expirations
 
-    def add_value(value: Any) -> None:
-        if value is None:
-            return
-        if isinstance(value, str):
-            normalized = value.strip()
-            if not normalized:
-                return
-            if _looks_like_occ(normalized):
-                parsed = _parse_occ_symbol(normalized)
-                expiry = parsed.get("expiry")
-                if expiry:
-                    expirations.add(expiry)
-                return
-            if len(normalized) == 10 and normalized[4] == "-":
-                expirations.add(normalized.replace("-", ""))
-                return
-            if len(normalized) == 8 and normalized.isdigit():
-                expirations.add(normalized)
-                return
-            try:
-                # Support ISO strings like '2024-12-20T00:00:00Z'.
-                parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
-            except ValueError:
-                parsed = None
-            if parsed:
-                expirations.add(parsed.strftime("%Y%m%d"))
-                return
-            digits_only = "".join(ch for ch in normalized if ch.isdigit())
-            if len(digits_only) >= 8:
-                candidate = digits_only[:8]
-                try:
-                    datetime.strptime(candidate, "%Y%m%d")
-                except ValueError:
-                    pass
-                else:
-                    expirations.add(candidate)
-                    return
-            return
-        if isinstance(value, date):
-            expirations.add(value.strftime("%Y%m%d"))
-            return
-        if isinstance(value, datetime):
-            expirations.add(value.strftime("%Y%m%d"))
-            return
+    for occ_symbol in chain.keys():
+        parsed = _parse_occ_symbol(occ_symbol)
+        expiry = parsed.get("expiry")
+        if expiry:
+            expirations.add(expiry)
 
-    def visit(obj: Any, key_hint: Optional[str] = None) -> None:
-        if obj is None:
-            return
-        if isinstance(obj, str):
-            add_value(obj)
-            return
-        if isinstance(obj, (list, tuple, set)):
-            for item in obj:
-                visit(item, key_hint)
-            return
-        if isinstance(obj, dict):
-            for key, value in obj.items():
-                if isinstance(key, str) and _looks_like_occ(key.strip()):
-                    parsed = _parse_occ_symbol(key.strip())
-                    expiry = parsed.get("expiry")
-                    if expiry:
-                        expirations.add(expiry)
-                lower_key = key.lower()
-                if any(token in lower_key for token in ("exp", "expiry", "maturity")):
-                    visit(value, lower_key)
-                else:
-                    visit(value, lower_key)
-            return
-
-        # Handle pydantic models / dataclasses with model_dump or dict representations
-        if hasattr(obj, "model_dump") and callable(obj.model_dump):
-            visit(obj.model_dump(), key_hint)
-            return
-        if hasattr(obj, "dict") and callable(obj.dict):
-            visit(obj.dict(), key_hint)
-            return
-        if hasattr(obj, "__dict__"):
-            visit(vars(obj), key_hint)
-            return
-
-        # Pull known attributes lazily
-        for attr in ("expiration_dates", "expiration_date", "expiry", "expiration", "last_trade_date"):
-            if hasattr(obj, attr):
-                visit(getattr(obj, attr), attr)
-
-        # If we reached a scalar and the key hinted at expiration, try to add it
-        if key_hint and any(token in key_hint for token in ("exp", "expiry", "maturity")):
-            add_value(obj)
-
-    visit(chain)
     return expirations
