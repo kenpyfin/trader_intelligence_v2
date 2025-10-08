@@ -348,7 +348,9 @@ class AlpacaTrader:
     async def get_option_expirations(self, symbol: str):
         await self.connect()
         chain = await self.client.get_option_chain(symbol)
+        print(f"DEBUG(TD_Order): get_option_chain for expirations returned object of type {type(chain)}")
         expirations = _extract_expiration_list(chain)
+        print(f"DEBUG(TD_Order): Extracted {len(expirations)} unique expirations for {symbol}.")
         return sorted(expirations)
 
     async def realtimequote(self, ticker):

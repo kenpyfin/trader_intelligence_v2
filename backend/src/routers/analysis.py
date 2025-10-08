@@ -1,8 +1,6 @@
 import asyncio
 from datetime import datetime
-
-import asyncio
-from datetime import datetime
+import numpy as np
 from typing import List
 
 from fastapi import APIRouter, HTTPException
@@ -149,4 +147,25 @@ async def calculate_market_rate(request: RiskFreeRateRequest):
         print(f"Error in calculate_market_rate endpoint: {e}")
         print(traceback.format_exc())
         # Generic error handler for other issues
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/debug-option-chain")
+async def debug_option_chain(ticker: str, expiration_date: str):
+    """
+    Debug endpoint to fetch and return the raw option chain DataFrame from Alpaca.
+    Expiration date should be in YYYYMMDD format.
+    """
+    try:
+        df = await analysis_service.get_raw_option_chain(ticker, expiration_date)
+        if df is None or df.empty:
+            return {"message": "No option chain data returned from broker."}
+        
+        # Convert NaN to None for JSON compatibility and return as records
+        df_serializable = df.replace({np.nan: None})
+        return df_serializable.to_dict('records')
+    except Exception as e:
+        import traceback
+        print(f"Error in debug_option_chain endpoint: {e}")
+        print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))

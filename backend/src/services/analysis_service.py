@@ -191,6 +191,16 @@ def _get_market_price_from_alpaca_df(df, strike, option_type_char):
     return None
 
 
+async def get_raw_option_chain(ticker: str, expiration_date: str):
+    """
+    Helper for debugging. Fetches the raw option chain df for a specific expiration.
+    """
+    trader = await connection_manager.get_trader()
+    # The date format for get_option_chain_df is YYYYMMDD
+    option_chain_df = await trader.get_option_chain_df(ticker, expiration_date)
+    return option_chain_df
+
+
 async def calculate_market_implied_risk_free_rate(expiration_date, tickers=['SPY', 'QQQ', 'IWM']):
     """
     Calculates an aggregate market-implied risk-free rate from a basket of liquid ETFs
@@ -206,17 +216,17 @@ async def calculate_market_implied_risk_free_rate(expiration_date, tickers=['SPY
             # 1. Get current price
             S_current = await trader.get_current_price(ticker, "STK")
             if S_current is None:
-                log_messages.append(f"Could not fetch current price for {ticker}. Skipping.")
+                log_messages.append(f"ERROR: Could not fetch current price for {ticker}. Skipping.")
                 continue
-            log_messages.append(f"DEBUG: Current price for {ticker}: ${S_current:.2f}")
+            log_messages.append(f"INFO: Current price for {ticker}: ${S_current:.2f}")
 
             # 2. Find closest available expiration
             target_expiration_str = expiration_date.strftime('%Y%m%d')
             available_expirations = await trader.get_option_expirations(ticker)
             if not available_expirations:
-                log_messages.append(f"No option expirations found for {ticker}. Skipping.")
+                log_messages.append(f"WARN: No option expirations found for {ticker}. Skipping.")
                 continue
-            log_messages.append(f"DEBUG: Found {len(available_expirations)} expirations for {ticker}. Sample: {available_expirations[:3]}")
+            log_messages.append(f"INFO: Found {len(available_expirations)} expirations for {ticker}. Sample: {available_expirations[:3]}")
 
             target_date_dt = datetime.strptime(target_expiration_str, '%Y%m%d')
             available_dates_dt = [datetime.strptime(exp, '%Y%m%d') for exp in available_expirations]
@@ -227,31 +237,33 @@ async def calculate_market_implied_risk_free_rate(expiration_date, tickers=['SPY
             expiration_date_to_use_str = closest_expiration_dt.strftime('%Y%m%d')
 
             if expiration_date_to_use_str != target_expiration_str:
-                log_messages.append(f"Target date {expiration_date.strftime('%Y-%m-%d')} not available. Using closest expiration: {closest_expiration_dt.strftime('%Y-%m-%d')}.")
+                log_messages.append(f"INFO: Target date {expiration_date.strftime('%Y-%m-%d')} not available. Using closest expiration: {closest_expiration_dt.strftime('%Y-%m-%d')}.")
 
             # 3. CORRECTLY calculate time to expiration (T) based on the ACTUAL expiry date being used
             days_to_exp = (closest_expiration_dt.date() - date.today()).days
             if days_to_exp <= 0:
-                log_messages.append(f"Closest expiration date {closest_expiration_dt.strftime('%Y-%m-%d')} is not in the future. Skipping.")
+                log_messages.append(f"WARN: Closest expiration date {closest_expiration_dt.strftime('%Y-%m-%d')} is not in the future. Skipping.")
                 continue
             T = days_to_exp / 365.0
-            log_messages.append(f"DEBUG: Using T = {T:.4f} ({days_to_exp} days) for calculation based on actual expiry {closest_expiration_dt.strftime('%Y-%m-%d')}.")
+            log_messages.append(f"INFO: Using T = {T:.4f} ({days_to_exp} days) for calculation based on actual expiry {closest_expiration_dt.strftime('%Y-%m-%d')}.")
 
             # 4. Get option chain from Alpaca
             option_chain_df = await trader.get_option_chain_df(ticker, expiration_date_to_use_str)
             if option_chain_df is None or option_chain_df.empty:
-                log_messages.append(f"Could not fetch option chain DataFrame for {ticker} on {expiration_date_to_use_str}. Skipping.")
+                log_messages.append(f"ERROR: Could not fetch option chain DataFrame for {ticker} on {expiration_date_to_use_str}. Skipping.")
                 continue
-            log_messages.append(f"DEBUG: Fetched and filtered option chain with {len(option_chain_df)} contracts for {expiration_date_to_use_str}.")
+            log_messages.append(f"INFO: Fetched and filtered option chain with {len(option_chain_df)} contracts for {expiration_date_to_use_str}.")
+            if len(option_chain_df) > 0:
+                log_messages.append(f"DEBUG: Sample row from chain: {option_chain_df.iloc[0].to_dict()}")
             
             # 5. Select near-the-money strikes
             strikes = option_chain_df['Strike'].unique()
             atm_strikes = strikes[np.abs(strikes - S_current) < (S_current * 0.05)] # Within 5% of stock price
             
             if len(atm_strikes) == 0:
-                log_messages.append(f"Could not find any near-the-money strikes. Strikes available: {strikes[:5]}...")
+                log_messages.append(f"WARN: Could not find any near-the-money strikes. Strikes available: {strikes[:5]}...")
                 continue
-            log_messages.append(f"DEBUG: Found {len(atm_strikes)} ATM strikes. Sample: {atm_strikes[:3]}")
+            log_messages.append(f"INFO: Found {len(atm_strikes)} ATM strikes. Sample: {atm_strikes[:3]}")
 
             ticker_rates = []
             for i, K in enumerate(atm_strikes):
@@ -272,25 +284,30 @@ async def calculate_market_implied_risk_free_rate(expiration_date, tickers=['SPY
                             ticker_rates.append(implied_r)
                         else:
                             if i < 3: log_messages.append(f"DEBUG: ... Rate {implied_r:.4%} rejected (outside -5% to 25% range).")
+                    else:
+                        if i < 3: log_messages.append(f"DEBUG: ... Skipping strike ${K:.2f} due to non-positive synthetic forward or strike.")
+                else:
+                    if i < 3: log_messages.append(f"DEBUG: ... Skipping strike ${K:.2f} due to missing call/put price.")
+
             
             if ticker_rates:
                 avg_rate_for_ticker = np.mean(ticker_rates)
-                log_messages.append(f"Found {len(ticker_rates)} valid rates. Average for {ticker}: {avg_rate_for_ticker:.3%}")
+                log_messages.append(f"SUCCESS: Found {len(ticker_rates)} valid rates. Average for {ticker}: {avg_rate_for_ticker:.3%}")
                 all_valid_rates.append(avg_rate_for_ticker)
             else:
-                log_messages.append(f"No valid implied rates found for {ticker}.")
+                log_messages.append(f"WARN: No valid implied rates found for {ticker}.")
         except Exception as e:
             import traceback
-            log_messages.append(f"An error occurred while processing {ticker}: {e}")
+            log_messages.append(f"CRITICAL: An error occurred while processing {ticker}: {e}")
             log_messages.append(traceback.format_exc())
 
     if all_valid_rates:
         market_rate = np.mean(all_valid_rates)
         log_messages.append(f"--- FINAL ---")
-        log_messages.append(f"Overall market-implied risk-free rate: {market_rate:.3%}")
+        log_messages.append(f"SUCCESS: Overall market-implied risk-free rate: {market_rate:.3%}")
         return market_rate, log_messages
     else:
-        log_messages.append("Could not determine market-implied rate from any ticker or DTE.")
+        log_messages.append("ERROR: Could not determine market-implied rate from any ticker or DTE.")
         return None, log_messages
 
 
