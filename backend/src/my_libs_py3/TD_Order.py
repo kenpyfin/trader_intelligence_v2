@@ -470,16 +470,21 @@ class AlpacaTrader:
         await self.connect()
         chain = await self.client.get_option_chain(symbol)
         if not isinstance(chain, dict):
+            print(f"DEBUG(TD_Order): get_option_chain for {symbol} returned non-dict: {type(chain)}")
             return pd.DataFrame()
-
+        
+        print(f"DEBUG(TD_Order): Received raw chain for {symbol} with {len(chain)} contracts.")
         rows = []
         norm_expiration = _normalize_expiry(expiration_date).replace("-", "")
+        print(f"DEBUG(TD_Order): Filtering for expiration date {norm_expiration}...")
 
+        match_count = 0
         for occ_symbol, snapshot in chain.items():
             parsed = _parse_occ_symbol(occ_symbol)
             if parsed.get("expiry") != norm_expiration:
                 continue
 
+            match_count += 1
             quote = snapshot.get("latest_quote") or {}
             trade = snapshot.get("latest_trade") or {}
 
@@ -493,6 +498,7 @@ class AlpacaTrader:
             }
             rows.append(row)
 
+        print(f"DEBUG(TD_Order): Found {match_count} contracts for {symbol} matching expiration {norm_expiration}.")
         if not rows:
             return pd.DataFrame()
 

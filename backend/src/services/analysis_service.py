@@ -215,6 +215,7 @@ async def calculate_market_implied_risk_free_rate(expiration_date, tickers=['SPY
             if S_current is None:
                 log_messages.append(f"Could not fetch current price for {ticker}. Skipping.")
                 continue
+            log_messages.append(f"DEBUG: Current price for {ticker}: ${S_current:.2f}")
 
             # 2. Find closest available expiration and get option chain from Alpaca
             target_expiration_str = expiration_date.strftime('%Y%m%d')
@@ -222,6 +223,7 @@ async def calculate_market_implied_risk_free_rate(expiration_date, tickers=['SPY
             if not available_expirations:
                 log_messages.append(f"No option expirations found for {ticker}. Skipping.")
                 continue
+            log_messages.append(f"DEBUG: Found {len(available_expirations)} expirations for {ticker}. Sample: {available_expirations[:3]}")
 
             target_date_dt = datetime.strptime(target_expiration_str, '%Y%m%d')
             available_dates_dt = [datetime.strptime(exp, '%Y%m%d') for exp in available_expirations]
@@ -236,21 +238,26 @@ async def calculate_market_implied_risk_free_rate(expiration_date, tickers=['SPY
 
             option_chain_df = await trader.get_option_chain_df(ticker, expiration_date_to_use)
             if option_chain_df is None or option_chain_df.empty:
-                log_messages.append(f"Could not fetch option chain for {ticker} on {expiration_date_to_use}. Skipping.")
+                log_messages.append(f"Could not fetch option chain DataFrame for {ticker} on {expiration_date_to_use}. Skipping.")
                 continue
-            
+            log_messages.append(f"DEBUG: Fetched and filtered option chain with {len(option_chain_df)} contracts for {expiration_date_to_use}.")
+
             # 3. Select near-the-money strikes
             strikes = option_chain_df['Strike'].unique()
             atm_strikes = strikes[np.abs(strikes - S_current) < (S_current * 0.05)] # Within 5% of stock price
             
             if len(atm_strikes) == 0:
-                log_messages.append("Could not find any near-the-money strikes. Skipping.")
+                log_messages.append(f"Could not find any near-the-money strikes. Strikes available: {strikes[:5]}...")
                 continue
+            log_messages.append(f"DEBUG: Found {len(atm_strikes)} ATM strikes. Sample: {atm_strikes[:3]}")
 
             ticker_rates = []
-            for K in atm_strikes:
+            for i, K in enumerate(atm_strikes):
                 call_price = _get_market_price_from_alpaca_df(option_chain_df, K, 'C')
                 put_price = _get_market_price_from_alpaca_df(option_chain_df, K, 'P')
+                
+                if i == 0: # Log details for the first ATM strike only
+                    log_messages.append(f"DEBUG: For ATM strike ${K:.2f}: Call Price=${call_price}, Put Price=${put_price}")
 
                 if call_price is not None and put_price is not None:
                     # Put-Call Parity: C - P = S - K*exp(-rT)
