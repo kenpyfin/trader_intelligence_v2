@@ -413,9 +413,21 @@ class AlpacaTrader:
                         ),
                         None,
                     )
-                if isinstance(snapshot, dict):
-                    fallback_quote = snapshot.get("latest_quote") or {}
-                    fallback_trade = snapshot.get("latest_trade") or {}
+                if snapshot:
+                    latest_quote = getattr(snapshot, 'latest_quote', None)
+                    latest_trade = getattr(snapshot, 'latest_trade', None)
+                    if latest_quote:
+                        fallback_quote = {
+                            "bid_price": getattr(latest_quote, 'bid_price', None),
+                            "ask_price": getattr(latest_quote, 'ask_price', None),
+                            "midpoint": getattr(latest_quote, 'midpoint', None),
+                            "timestamp": getattr(latest_quote, 'timestamp', None),
+                        }
+                    if latest_trade:
+                        fallback_trade = {
+                            "price": getattr(latest_trade, 'price', None),
+                            "timestamp": getattr(latest_trade, 'timestamp', None),
+                        }
 
         bid = getattr(quote, "bid_price", None) if quote is not None else None
         ask = getattr(quote, "ask_price", None) if quote is not None else None
@@ -487,15 +499,15 @@ class AlpacaTrader:
                 continue
 
             match_count += 1
-            quote = snapshot.get("latest_quote") or {}
-            trade = snapshot.get("latest_trade") or {}
+            quote = getattr(snapshot, "latest_quote", None)
+            trade = getattr(snapshot, "latest_trade", None)
 
             row = {
                 "Strike": parsed.get("strike"),
                 "Type": "call" if parsed.get("right") == "C" else "put",
-                "Bid": _maybe_float(quote.get("bid_price")),
-                "Ask": _maybe_float(quote.get("ask_price")),
-                "Last Trade": _maybe_float(trade.get("price")),
+                "Bid": _maybe_float(getattr(quote, "bid_price", None)),
+                "Ask": _maybe_float(getattr(quote, "ask_price", None)),
+                "Last Trade": _maybe_float(getattr(trade, "price", None)),
                 "option_symbol": occ_symbol,
             }
             rows.append(row)
