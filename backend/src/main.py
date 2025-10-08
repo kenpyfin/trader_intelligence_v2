@@ -518,3 +518,25 @@ async def clear_analysis_history(ticker: str):
     except Exception as e:
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to clear analysis history: {e}")
+
+
+@app.get("/analysis/debug-option-chain")
+@app.get("/api/analysis/debug-option-chain")
+async def debug_option_chain(ticker: str, expiration_date: str):
+    """
+    Debug endpoint to fetch and return the raw option chain DataFrame from Alpaca.
+    Expiration date should be in YYYYMMDD format.
+    """
+    try:
+        df = await analysis_service.get_raw_option_chain(ticker, expiration_date)
+        if df is None or df.empty:
+            return {"message": "No option chain data returned from broker."}
+        
+        # Convert NaN to None for JSON compatibility and return as records
+        df_serializable = df.replace({np.nan: None})
+        return df_serializable.to_dict('records')
+    except Exception as e:
+        import traceback
+        print(f"Error in debug_option_chain endpoint: {e}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
