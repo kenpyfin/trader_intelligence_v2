@@ -13,7 +13,7 @@ from .services.analysis_history_service import (
     clear_history_for_ticker,
 )
 from .services.macro_service import get_macro_futures_data, calculate_market_implied_risk_free_rate
-from .services import broker_service
+from .services import broker_service, analysis_service
 from .routers import portfolio
 from .my_libs_py3.my_data import PriceDataFetcher
 from .analytics.treasury_curve import build_treasury_curve
