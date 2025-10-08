@@ -6,6 +6,12 @@ from datetime import date, timedelta
 from .models.analysis_models import AnalysisRequest, RiskFreeRateRequest, SaveVerdictRequest
 from .models.order_models import StrategyOrderRequest
 from .services.analysis_service import run_full_analysis, get_option_expirations
+from .services.analysis_history_service import (
+    save_analysis_record,
+    list_history as list_analysis_history,
+    delete_history_entry,
+    clear_history_for_ticker,
+)
 from .services.macro_service import get_macro_futures_data, calculate_market_implied_risk_free_rate
 from .services import broker_service
 from .routers import portfolio
@@ -213,6 +219,11 @@ async def analyze_stock_with_gpt(request: AnalysisRequest):
         except (ValueError, TypeError):
             raise HTTPException(status_code=400, detail="Invalid expiration_date format. Expected 'YYYYMMDD'.")
 
+        print(
+            f"INFO: Received GPT analysis request for ticker={request.ticker}, "
+            f"expiration={request.expiration_date}, model={request.gpt_model}"
+        )
+
         # Run the full analysis pipeline with the GPT methodology enabled.
         base_result = await run_full_analysis(
             ticker=request.ticker.upper(),
@@ -257,6 +268,24 @@ async def analyze_stock_with_gpt(request: AnalysisRequest):
             "sources": sources,
         }
         result['dte'] = (expiration_date - date.today()).days
+
+        payload_to_persist = {
+            'ticker': request.ticker,
+            'expiration_date': request.expiration_date,
+            'risk_free_rate': request.risk_free_rate,
+            'analysis_method': 'gpt-verdict',
+            'gpt_model': request.gpt_model,
+            'override_price': request.override_price,
+        }
+
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: save_analysis_record(payload_to_persist, [result])
+            )
+        except Exception as history_err:
+            print(f"WARNING: Failed to persist GPT analysis history: {history_err}")
 
         # Auto-save verdict history (best-effort)
         try:
@@ -370,7 +399,12 @@ async def analyze_stock(request: AnalysisRequest):
         try:
             expiration_date = datetime.strptime(request.expiration_date, '%Y%m%d').date()
         except (ValueError, TypeError):
-             raise HTTPException(status_code=400, detail="Invalid expiration_date format. Expected 'YYYYMMDD'.")
+            raise HTTPException(status_code=400, detail="Invalid expiration_date format. Expected 'YYYYMMDD'.")
+
+        print(
+            f"INFO: Received analysis request for ticker={request.ticker}, "
+            f"expiration={request.expiration_date}, method={request.analysis_method}"
+        )
 
         analysis_result = await run_full_analysis(
             ticker=request.ticker.upper(),
@@ -390,6 +424,24 @@ async def analyze_stock(request: AnalysisRequest):
         # We also calculate and add the DTE (days to expiration) for display purposes.
         analysis_result['dte'] = (expiration_date - date.today()).days
 
+        payload_to_persist = {
+            'ticker': request.ticker,
+            'expiration_date': request.expiration_date,
+            'risk_free_rate': request.risk_free_rate,
+            'analysis_method': request.analysis_method,
+            'gpt_model': request.gpt_model,
+            'override_price': request.override_price,
+        }
+
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: save_analysis_record(payload_to_persist, [analysis_result])
+            )
+        except Exception as history_err:
+            print(f"WARNING: Failed to persist analysis history: {history_err}")
+
         # Auto-save verdict history (best-effort)
         try:
             save_verdict_document(analysis_result, None)
@@ -406,3 +458,63 @@ async def analyze_stock(request: AnalysisRequest):
         if isinstance(e, HTTPException):
             raise e
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
+
+
+@app.get("/analysis/history")
+@app.get("/api/analysis/history")
+async def get_all_analysis_history(ticker: str = "", page: int = 1, page_size: int = 20):
+    """Retrieve paginated analysis history entries, optionally filtered by ticker."""
+    try:
+        loop = asyncio.get_running_loop()
+        history = await loop.run_in_executor(
+            None,
+            lambda: list_analysis_history(ticker, page=page, page_size=page_size)
+        )
+        history['status'] = 'success'
+        return history
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to fetch analysis history: {e}")
+
+
+@app.get("/analysis/history/{ticker}")
+@app.get("/api/analysis/history/{ticker}")
+async def get_analysis_history(ticker: str, page: int = 1, page_size: int = 20):
+    """Retrieve paginated analysis history entries for a ticker."""
+    return await get_all_analysis_history(ticker=ticker, page=page, page_size=page_size)
+
+
+@app.delete("/analysis/history/id/{entry_id}")
+@app.delete("/api/analysis/history/id/{entry_id}")
+async def delete_analysis_history(entry_id: str):
+    """Delete a single history entry by ID."""
+    try:
+        loop = asyncio.get_running_loop()
+        deleted = await loop.run_in_executor(
+            None,
+            lambda: delete_history_entry(entry_id)
+        )
+        if not deleted:
+            raise HTTPException(status_code=404, detail="History entry not found")
+        return {'status': 'success'}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to delete history entry: {e}")
+
+
+@app.delete("/analysis/history/{ticker}")
+@app.delete("/api/analysis/history/{ticker}")
+async def clear_analysis_history(ticker: str):
+    """Remove all stored history entries for a ticker."""
+    try:
+        loop = asyncio.get_running_loop()
+        deleted_count = await loop.run_in_executor(
+            None,
+            lambda: clear_history_for_ticker(ticker)
+        )
+        return {'status': 'success', 'deleted': deleted_count}
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to clear analysis history: {e}")
