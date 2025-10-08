@@ -787,12 +787,30 @@ def _to_iso(value: Any) -> Optional[str]:
 
 
 def _normalize_expiry(expiry: str) -> str:
-    expiry = (expiry or "").strip()
-    if len(expiry) == 8 and expiry.isdigit():
-        return expiry
-    if len(expiry) == 6 and expiry.isdigit():
-        return "20" + expiry
-    raise ValueError("Expiry must be provided as YYYYMMDD or YYMMDD.")
+    """
+    Normalizes an expiration date string to YYYY-MM-DD format.
+    Accepts YYYYMMDD, YYMMDD, and YYYY-MM-DD.
+    """
+    expiry_str = (expiry or "").strip()
+    
+    # If it contains dashes, assume it's YYYY-MM-DD and validate it.
+    if '-' in expiry_str:
+        try:
+            datetime.strptime(expiry_str, '%Y-%m-%d')
+            return expiry_str
+        except ValueError:
+            # Fall through to the final error if it's not a valid format
+            pass
+
+    # Handle YYYYMMDD
+    if len(expiry_str) == 8 and expiry_str.isdigit():
+        return f"{expiry_str[:4]}-{expiry_str[4:6]}-{expiry_str[6:]}"
+    
+    # Handle YYMMDD
+    if len(expiry_str) == 6 and expiry_str.isdigit():
+        return f"20{expiry_str[:2]}-{expiry_str[2:4]}-{expiry_str[4:]}"
+    
+    raise ValueError(f"Invalid expiry format: '{expiry}'. Expected YYYYMMDD, YYMMDD, or YYYY-MM-DD.")
 
 
 def _trade_to_summary_dict(trade: TradeEnvelope) -> Dict[str, Any]:
