@@ -5,6 +5,7 @@ from datetime import date, timedelta
 import json
 import re
 import os
+from typing import Any, Dict, Optional
 
 # IB-insync asyncio patching is not required in a FastAPI/uvicorn environment
 # and is incompatible with the 'uvloop' used by uvicorn.
@@ -481,7 +482,13 @@ def analyze_candlestick_patterns(df):
 
     return {"patterns": found_patterns, "context": market_context, "plot_data": plot_data_dict}
 
-def generate_holistic_conclusion(synthesis_data, strikes, S_current):
+def generate_holistic_conclusion(
+    synthesis_data,
+    strikes,
+    S_current,
+    bias_override: Optional[str] = None,
+    strategy_hint: Optional[Any] = None,
+):
     """
     Synthesizes all analysis sections into a holistic conclusion, a directional bias,
     and a professional strategy recommendation.
@@ -513,6 +520,36 @@ def generate_holistic_conclusion(synthesis_data, strikes, S_current):
     elif bear_score > bull_score + 1.5: final_bias = "Bearish"
     elif bull_score > bear_score: final_bias = "Slightly Bullish"
     elif bear_score > bull_score: final_bias = "Slightly Bearish"
+
+    def _normalize_bias_label(label: Optional[str]) -> Optional[str]:
+        if not label:
+            return None
+        norm = str(label).strip().lower()
+        if "slight" in norm and "bull" in norm:
+            return "Slightly Bullish"
+        if "slight" in norm and "bear" in norm:
+            return "Slightly Bearish"
+        if "moderat" in norm and "bull" in norm:
+            return "Slightly Bullish"
+        if "moderat" in norm and "bear" in norm:
+            return "Slightly Bearish"
+        if "strong" in norm and "bull" in norm:
+            return "Bullish"
+        if "strong" in norm and "bear" in norm:
+            return "Bearish"
+        if "bull" in norm:
+            return "Bullish"
+        if "bear" in norm:
+            return "Bearish"
+        if "neutral" in norm:
+            return "Neutral"
+        return None
+
+    bias_overridden = False
+    normalized_override = _normalize_bias_label(bias_override)
+    if normalized_override:
+        final_bias = normalized_override
+        bias_overridden = True
     
     conclusion_html = "<h5>Summary of Findings:</h5><ul>" + "".join(components) + "</ul>"
     
@@ -532,15 +569,17 @@ def generate_holistic_conclusion(synthesis_data, strikes, S_current):
             bias_paragraph += f"However, the presence of bullish signals from <b>{', '.join(bullish_drivers)}</b> suggests potential for a reversal."
     else:
         bias_paragraph += "The analysis reveals a mix of bullish and bearish signals, leading to significant uncertainty. " if contradiction else "There are no strong directional signals from the core indicators. "
+    if bias_overridden:
+        bias_paragraph += " This directional view has been aligned with the AI verdict guidance."
     conclusion_html += bias_paragraph + "</p>"
 
     # --- Professional Strategy Recommendation ---
     iv_sentiment = synthesis_data.get('iv_hv', {}).get('sentiment')
     strategy_rec = "<h5>Recommended Strategy:</h5>"
-    
+
     # This will hold the structured data for the recommended strategy for API consumers.
     recommended_strategy = {"name": "None", "legs": [], "is_credit_spread": False}
-    
+
     # Determine ATM and OTM strikes for constructing strategy legs
     atm_strike = strikes[np.argmin(np.abs(strikes - S_current))] if len(strikes) > 0 else S_current
     otm_calls = strikes[strikes > S_current]
@@ -548,132 +587,314 @@ def generate_holistic_conclusion(synthesis_data, strikes, S_current):
     otm_puts = strikes[strikes < S_current]
     itm_puts = strikes[strikes > S_current]
 
-    if final_bias == "Neutral":
-        if iv_sentiment == 'high_vol':
-            strategy_rec += "<p><b>Sell Premium (High IV) - Iron Condor.</b> The analysis is neutral and implied volatility is high. An Iron Condor profits if the stock price remains within a defined range, benefiting from time decay and a potential decrease in IV. This is a defined-risk, high-probability trade.</p>"
+    def _normalize_strategy_hint_label(label: Optional[str]) -> Optional[str]:
+        if not label:
+            return None
+        norm = str(label).strip().lower()
+        mapping = [
+            ("iron condor", "Iron Condor"),
+            ("condor", "Iron Condor"),
+            ("short straddle", "Short Straddle"),
+            ("long straddle", "Long Straddle"),
+            ("straddle", "Long Straddle"),
+            ("bull call spread", "Bull Call Spread"),
+            ("call debit spread", "Bull Call Spread"),
+            ("bear call spread", "Bear Call Spread"),
+            ("call credit spread", "Bear Call Spread"),
+            ("bear put spread", "Bear Put Spread"),
+            ("put debit spread", "Bear Put Spread"),
+            ("bull put spread", "Bull Put Spread"),
+            ("put credit spread", "Bull Put Spread"),
+            ("cash secured put", "Cash Secured Put"),
+            ("cash-secured put", "Cash Secured Put"),
+            ("short put", "Cash Secured Put"),
+            ("long call", "Long Call"),
+            ("long put", "Long Put"),
+            ("short call", "Short Call"),
+            ("covered call", "Short Call"),
+            ("watch and wait", "Watch and Wait"),
+        ]
+        for key, canonical in mapping:
+            if key in norm:
+                return canonical
+        return None
+
+    def _build_strategy_from_name(name: str):
+        if name == "Iron Condor":
             if len(otm_puts) >= 2 and len(otm_calls) >= 2:
-                recommended_strategy = {
+                return {
                     "name": "Iron Condor",
                     "is_credit_spread": True,
                     "legs": [
-                        {'action': 'SELL', 'strike': otm_puts[-1], 'right': 'P'},
-                        {'action': 'BUY', 'strike': otm_puts[-2], 'right': 'P'},
-                        {'action': 'SELL', 'strike': otm_calls[0], 'right': 'C'},
-                        {'action': 'BUY', 'strike': otm_calls[1], 'right': 'C'}
+                        {'action': 'SELL', 'strike': float(otm_puts[-1]), 'right': 'P'},
+                        {'action': 'BUY', 'strike': float(otm_puts[-2]), 'right': 'P'},
+                        {'action': 'SELL', 'strike': float(otm_calls[0]), 'right': 'C'},
+                        {'action': 'BUY', 'strike': float(otm_calls[1]), 'right': 'C'}
                     ]
                 }
-            else:
-                # Fallback when insufficient strikes for Iron Condor
-                recommended_strategy = {
-                    "name": "Short Straddle",
-                    "is_credit_spread": False,
-                    "legs": [
-                        {'action': 'SELL', 'strike': atm_strike, 'right': 'C'},
-                        {'action': 'SELL', 'strike': atm_strike, 'right': 'P'}
-                    ]
-                }
-        elif iv_sentiment == 'low_vol':
-            strategy_rec += "<p><b>Buy Premium (Low IV) - Long Straddle.</b> The analysis is neutral but a large move is possible, especially if a catalyst is near. A Long Straddle profits from a significant price move in either direction and benefits from the currently cheap option premiums.</p>"
-            recommended_strategy = {
+        elif name == "Short Straddle":
+            return {
+                "name": "Short Straddle",
+                "is_credit_spread": False,
+                "legs": [
+                    {'action': 'SELL', 'strike': float(atm_strike), 'right': 'C'},
+                    {'action': 'SELL', 'strike': float(atm_strike), 'right': 'P'}
+                ]
+            }
+        elif name == "Long Straddle":
+            return {
                 "name": "Long Straddle",
                 "is_credit_spread": False,
                 "legs": [
-                    {'action': 'BUY', 'strike': atm_strike, 'right': 'C'},
-                    {'action': 'BUY', 'strike': atm_strike, 'right': 'P'}
+                    {'action': 'BUY', 'strike': float(atm_strike), 'right': 'C'},
+                    {'action': 'BUY', 'strike': float(atm_strike), 'right': 'P'}
                 ]
             }
-        else:
-            strategy_rec += "<p><b>Wait for a clearer signal.</b> The directional bias is neutral and IV is not at an extreme. It may be prudent to wait for a better entry point or a clearer market sentiment before committing capital.</p>"
-            # Provide a basic watch strategy so execution section appears
-            recommended_strategy = {
-                "name": "Watch and Wait",
-                "is_credit_spread": False,
-                "legs": [
-                    {'action': 'WATCH', 'strike': atm_strike, 'right': 'SIGNAL'}
-                ]
-            }
-    elif "Bullish" in final_bias:
-        if iv_sentiment == 'high_vol':
-            strategy_rec += "<p><b>Defined-Risk Bullish (High IV) - Bull Put Spread.</b> With a bullish bias and high IV, selling a credit spread is advantageous. A Bull Put Spread profits if the stock moves up, sideways, or even slightly down. It benefits from time decay and high premiums, while defining your maximum risk.</p>"
+        elif name == "Bull Put Spread":
             if len(otm_puts) >= 2:
-                recommended_strategy = {
+                return {
                     "name": "Bull Put Spread",
                     "is_credit_spread": True,
                     "legs": [
-                        {'action': 'SELL', 'strike': otm_puts[-1], 'right': 'P'},
-                        {'action': 'BUY', 'strike': otm_puts[-2], 'right': 'P'}
+                        {'action': 'SELL', 'strike': float(otm_puts[-1]), 'right': 'P'},
+                        {'action': 'BUY', 'strike': float(otm_puts[-2]), 'right': 'P'}
                     ]
                 }
-            else:
-                # Fallback when insufficient strikes for spread
-                recommended_strategy = {
-                    "name": "Cash Secured Put",
-                    "is_credit_spread": False,
-                    "legs": [
-                        {'action': 'SELL', 'strike': atm_strike * 0.95, 'right': 'P'}
-                    ]
-                }
-        else:
-            strategy_rec += "<p><b>Defined-Risk Bullish (Low/Mid IV) - Bull Call Spread.</b> With a bullish bias and cheaper premiums, a debit spread is attractive. A Bull Call Spread profits from a rise in the stock price with a lower cost and less time decay sensitivity than buying a call outright. Your risk and reward are both capped.</p>"
+        elif name == "Bull Call Spread":
             if len(itm_calls) >= 1 and len(otm_calls) >= 1:
-                recommended_strategy = {
+                return {
                     "name": "Bull Call Spread",
                     "is_credit_spread": False,
                     "legs": [
-                        {'action': 'BUY', 'strike': itm_calls[-1], 'right': 'C'},
-                        {'action': 'SELL', 'strike': otm_calls[0], 'right': 'C'}
+                        {'action': 'BUY', 'strike': float(itm_calls[-1]), 'right': 'C'},
+                        {'action': 'SELL', 'strike': float(otm_calls[0]), 'right': 'C'}
                     ]
                 }
-            else:
-                # Fallback when insufficient strikes for spread
-                recommended_strategy = {
-                    "name": "Long Call",
-                    "is_credit_spread": False,
-                    "legs": [
-                        {'action': 'BUY', 'strike': atm_strike, 'right': 'C'}
-                    ]
-                }
-    elif "Bearish" in final_bias:
-        if iv_sentiment == 'high_vol':
-            strategy_rec += "<p><b>Defined-Risk Bearish (High IV) - Bear Call Spread.</b> With a bearish bias and high IV, a credit spread is a strong choice. A Bear Call Spread profits if the stock moves down, sideways, or slightly up. It benefits from rich option premiums and time decay.</p>"
+        elif name == "Cash Secured Put":
+            strike_value = float(otm_puts[-1]) if len(otm_puts) >= 1 else float(atm_strike * 0.95)
+            return {
+                "name": "Cash Secured Put",
+                "is_credit_spread": False,
+                "legs": [
+                    {'action': 'SELL', 'strike': strike_value, 'right': 'P'}
+                ]
+            }
+        elif name == "Long Call":
+            return {
+                "name": "Long Call",
+                "is_credit_spread": False,
+                "legs": [
+                    {'action': 'BUY', 'strike': float(atm_strike), 'right': 'C'}
+                ]
+            }
+        elif name == "Long Put":
+            return {
+                "name": "Long Put",
+                "is_credit_spread": False,
+                "legs": [
+                    {'action': 'BUY', 'strike': float(atm_strike), 'right': 'P'}
+                ]
+            }
+        elif name == "Bear Call Spread":
             if len(otm_calls) >= 2:
-                recommended_strategy = {
+                return {
                     "name": "Bear Call Spread",
                     "is_credit_spread": True,
                     "legs": [
-                        {'action': 'SELL', 'strike': otm_calls[0], 'right': 'C'},
-                        {'action': 'BUY', 'strike': otm_calls[1], 'right': 'C'}
+                        {'action': 'SELL', 'strike': float(otm_calls[0]), 'right': 'C'},
+                        {'action': 'BUY', 'strike': float(otm_calls[1]), 'right': 'C'}
                     ]
                 }
-            else:
-                # Fallback when insufficient strikes for spread
-                recommended_strategy = {
-                    "name": "Short Call",
-                    "is_credit_spread": False,
-                    "legs": [
-                        {'action': 'SELL', 'strike': atm_strike * 1.05, 'right': 'C'}
-                    ]
-                }
-        else:
-            strategy_rec += "<p><b>Defined-Risk Bearish (Low/Mid IV) - Bear Put Spread.</b> With a bearish bias and low IV, a debit spread is a good way to express a directional view. A Bear Put Spread profits from a fall in the stock price while having a lower cost and defined risk compared to buying a put.</p>"
+        elif name == "Bear Put Spread":
             if len(itm_puts) >= 1 and len(otm_puts) >= 1:
-                recommended_strategy = {
+                return {
                     "name": "Bear Put Spread",
                     "is_credit_spread": False,
                     "legs": [
-                        {'action': 'BUY', 'strike': itm_puts[0], 'right': 'P'},
-                        {'action': 'SELL', 'strike': otm_puts[-1], 'right': 'P'}
+                        {'action': 'BUY', 'strike': float(itm_puts[0]), 'right': 'P'},
+                        {'action': 'SELL', 'strike': float(otm_puts[-1]), 'right': 'P'}
                     ]
                 }
-            else:
-                # Fallback when insufficient strikes for spread
+        elif name == "Short Call":
+            strike_value = float(otm_calls[0]) if len(otm_calls) >= 1 else float(atm_strike * 1.05)
+            return {
+                "name": "Short Call",
+                "is_credit_spread": False,
+                "legs": [
+                    {'action': 'SELL', 'strike': strike_value, 'right': 'C'}
+                ]
+            }
+        elif name == "Watch and Wait":
+            return {
+                "name": "Watch and Wait",
+                "is_credit_spread": False,
+                "legs": [
+                    {'action': 'WATCH', 'strike': float(atm_strike), 'right': 'SIGNAL'}
+                ]
+            }
+        return None
+
+    hint_type = None
+    hint_description = ""
+    hint_confidence = None
+    hint_horizon = None
+    if isinstance(strategy_hint, dict):
+        hint_type = strategy_hint.get('type')
+        hint_description = strategy_hint.get('description') or ''
+        hint_confidence = strategy_hint.get('confidence')
+        hint_horizon = strategy_hint.get('time_horizon')
+    elif isinstance(strategy_hint, str):
+        hint_type = strategy_hint
+
+    normalized_hint_name = _normalize_strategy_hint_label(hint_type)
+    hint_applied = False
+    if normalized_hint_name:
+        hinted_strategy = _build_strategy_from_name(normalized_hint_name)
+        if hinted_strategy:
+            recommended_strategy = hinted_strategy
+            hint_applied = True
+            desc_segments = []
+            if hint_description:
+                desc_segments.append(hint_description)
+            if hint_confidence:
+                desc_segments.append(f"Confidence: {hint_confidence}.")
+            if hint_horizon:
+                desc_segments.append(f"Time horizon: {hint_horizon}.")
+            desc_text = " ".join(desc_segments) or "Align execution with the AI recommended approach."
+            strategy_rec += f"<p><b>AI Suggested Strategy - {normalized_hint_name}.</b> {desc_text}</p>"
+        else:
+            # We understood the hint but cannot build it with available strikes
+            strategy_rec += f"<p><b>AI Suggested Strategy - {hint_type}.</b> Unable to automatically construct matching legs with available strikes; defaulting to model-derived guidance.</p>"
+    elif hint_type:
+        strategy_rec += f"<p><b>AI Suggested Strategy - {hint_type}.</b> This configuration is not yet supported for one-click execution; falling back to model-derived guidance.</p>"
+
+    if not hint_applied:
+        if final_bias == "Neutral":
+            if iv_sentiment == 'high_vol':
+                strategy_rec += "<p><b>Sell Premium (High IV) - Iron Condor.</b> The analysis is neutral and implied volatility is high. An Iron Condor profits if the stock price remains within a defined range, benefiting from time decay and a potential decrease in IV. This is a defined-risk, high-probability trade.</p>"
+                if len(otm_puts) >= 2 and len(otm_calls) >= 2:
+                    recommended_strategy = {
+                        "name": "Iron Condor",
+                        "is_credit_spread": True,
+                        "legs": [
+                            {'action': 'SELL', 'strike': otm_puts[-1], 'right': 'P'},
+                            {'action': 'BUY', 'strike': otm_puts[-2], 'right': 'P'},
+                            {'action': 'SELL', 'strike': otm_calls[0], 'right': 'C'},
+                            {'action': 'BUY', 'strike': otm_calls[1], 'right': 'C'}
+                        ]
+                    }
+                else:
+                    # Fallback when insufficient strikes for Iron Condor
+                    recommended_strategy = {
+                        "name": "Short Straddle",
+                        "is_credit_spread": False,
+                        "legs": [
+                            {'action': 'SELL', 'strike': atm_strike, 'right': 'C'},
+                            {'action': 'SELL', 'strike': atm_strike, 'right': 'P'}
+                        ]
+                    }
+            elif iv_sentiment == 'low_vol':
+                strategy_rec += "<p><b>Buy Premium (Low IV) - Long Straddle.</b> The analysis is neutral but a large move is possible, especially if a catalyst is near. A Long Straddle profits from a significant price move in either direction and benefits from the currently cheap option premiums.</p>"
                 recommended_strategy = {
-                    "name": "Long Put",
+                    "name": "Long Straddle",
                     "is_credit_spread": False,
                     "legs": [
+                        {'action': 'BUY', 'strike': atm_strike, 'right': 'C'},
                         {'action': 'BUY', 'strike': atm_strike, 'right': 'P'}
                     ]
                 }
+            else:
+                strategy_rec += "<p><b>Wait for a clearer signal.</b> The directional bias is neutral and IV is not at an extreme. It may be prudent to wait for a better entry point or a clearer market sentiment before committing capital.</p>"
+                # Provide a basic watch strategy so execution section appears
+                recommended_strategy = {
+                    "name": "Watch and Wait",
+                    "is_credit_spread": False,
+                    "legs": [
+                        {'action': 'WATCH', 'strike': atm_strike, 'right': 'SIGNAL'}
+                    ]
+                }
+        elif "Bullish" in final_bias:
+            if iv_sentiment == 'high_vol':
+                strategy_rec += "<p><b>Defined-Risk Bullish (High IV) - Bull Put Spread.</b> With a bullish bias and high IV, selling a credit spread is advantageous. A Bull Put Spread profits if the stock moves up, sideways, or even slightly down. It benefits from time decay and high premiums, while defining your maximum risk.</p>"
+                if len(otm_puts) >= 2:
+                    recommended_strategy = {
+                        "name": "Bull Put Spread",
+                        "is_credit_spread": True,
+                        "legs": [
+                            {'action': 'SELL', 'strike': otm_puts[-1], 'right': 'P'},
+                            {'action': 'BUY', 'strike': otm_puts[-2], 'right': 'P'}
+                        ]
+                    }
+                else:
+                    # Fallback when insufficient strikes for spread
+                    recommended_strategy = {
+                        "name": "Cash Secured Put",
+                        "is_credit_spread": False,
+                        "legs": [
+                            {'action': 'SELL', 'strike': atm_strike * 0.95, 'right': 'P'}
+                        ]
+                    }
+            else:
+                strategy_rec += "<p><b>Defined-Risk Bullish (Low/Mid IV) - Bull Call Spread.</b> With a bullish bias and cheaper premiums, a debit spread is attractive. A Bull Call Spread profits from a rise in the stock price with a lower cost and less time decay sensitivity than buying a call outright. Your risk and reward are both capped.</p>"
+                if len(itm_calls) >= 1 and len(otm_calls) >= 1:
+                    recommended_strategy = {
+                        "name": "Bull Call Spread",
+                        "is_credit_spread": False,
+                        "legs": [
+                            {'action': 'BUY', 'strike': itm_calls[-1], 'right': 'C'},
+                            {'action': 'SELL', 'strike': otm_calls[0], 'right': 'C'}
+                        ]
+                    }
+                else:
+                    # Fallback when insufficient strikes for spread
+                    recommended_strategy = {
+                        "name": "Long Call",
+                        "is_credit_spread": False,
+                        "legs": [
+                            {'action': 'BUY', 'strike': atm_strike, 'right': 'C'}
+                        ]
+                    }
+        elif "Bearish" in final_bias:
+            if iv_sentiment == 'high_vol':
+                strategy_rec += "<p><b>Defined-Risk Bearish (High IV) - Bear Call Spread.</b> With a bearish bias and high IV, a credit spread is a strong choice. A Bear Call Spread profits if the stock moves down, sideways, or slightly up. It benefits from rich option premiums and time decay.</p>"
+                if len(otm_calls) >= 2:
+                    recommended_strategy = {
+                        "name": "Bear Call Spread",
+                        "is_credit_spread": True,
+                        "legs": [
+                            {'action': 'SELL', 'strike': otm_calls[0], 'right': 'C'},
+                            {'action': 'BUY', 'strike': otm_calls[1], 'right': 'C'}
+                        ]
+                    }
+                else:
+                    # Fallback when insufficient strikes for spread
+                    recommended_strategy = {
+                        "name": "Short Call",
+                        "is_credit_spread": False,
+                        "legs": [
+                            {'action': 'SELL', 'strike': atm_strike * 1.05, 'right': 'C'}
+                        ]
+                    }
+            else:
+                strategy_rec += "<p><b>Defined-Risk Bearish (Low/Mid IV) - Bear Put Spread.</b> With a bearish bias and low IV, a debit spread is a good way to express a directional view. A Bear Put Spread profits from a fall in the stock price while having a lower cost and defined risk compared to buying a put.</p>"
+                if len(itm_puts) >= 1 and len(otm_puts) >= 1:
+                    recommended_strategy = {
+                        "name": "Bear Put Spread",
+                        "is_credit_spread": False,
+                        "legs": [
+                            {'action': 'BUY', 'strike': itm_puts[0], 'right': 'P'},
+                            {'action': 'SELL', 'strike': otm_puts[-1], 'right': 'P'}
+                        ]
+                    }
+                else:
+                    # Fallback when insufficient strikes for spread
+                    recommended_strategy = {
+                        "name": "Long Put",
+                        "is_credit_spread": False,
+                        "legs": [
+                            {'action': 'BUY', 'strike': atm_strike, 'right': 'P'}
+                        ]
+                    }
     
     # Final safety check - ensure we always have a valid strategy for execution section
     if recommended_strategy["name"] == "None" or len(recommended_strategy["legs"]) == 0:

@@ -1,706 +1,892 @@
+from __future__ import annotations
+
+import asyncio
 import atexit
 import os
-import socket
-import asyncio
-import logging
-from ib_insync import IB, Stock, Forex, MarketOrder, LimitOrder, Index, Option, Bag, ComboLeg
-from ib_insync import util as ibutil
-import sys, random, traceback
-import pandas as pd
 import time
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, date
+from decimal import Decimal
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
-sys.path.append('/home/ken/big_storage/airflowProd/airflow_notebook/My_Trader/my_libs_py3')
-from .my_lib import *
+import pandas as pd
 
+from .broker.alpaca_client import AlpacaAsyncClient, build_occ_symbol
 
-tw_port = 4002
-TIMEOUT = 60
-
-# Configure ib_insync to be more tolerant of slow responses
-import ib_insync
-ib_insync.util.logToConsole(logging.WARNING)  # Reduce ib_insync verbosity
-# Increase default timeout for requests that commonly fail
-ib_insync.util.timeoutReceived = 30  # 2 minute timeout instead of default
-ib_insync.client.Client.requestTimeout = 30  # Set request timeout to 2 minutes
+TIMEOUT = int(os.getenv("ALPACA_ORDER_TIMEOUT", "60"))
+DEFAULT_TIF = os.getenv("ALPACA_DEFAULT_TIME_IN_FORCE", "day")
 
 
-class IBTrader:
-    def __init__(self):
-        # Use an environment variable for the host, defaulting to a common local IP.
-        # For Docker on Mac/Windows, 'host.docker.internal' is preferred.
-        # For Docker on Linux, the host's network IP is needed.
-        self.ip_add = os.getenv('TWS_HOST', '10.0.1.22')
-        self.account= os.getenv("TWS_ACCOUNT")
-        self.port = tw_port
-        print(f"INFO: IBTrader initializing for TWS at {self.ip_add}:{self.port}")
-        # Defer creating IB client until connect() to ensure loop-bound creation
-        self.client = None
-        self._loop = None
-        
-        # The connection is now established on-demand by async methods.
+@dataclass
+class OrderDetails:
+    orderId: str
+    symbol: str
+    action: str
+    orderType: str
+    totalQuantity: float
+    limitPrice: Optional[float] = None
+    clientOrderId: Optional[str] = None
+
+
+@dataclass
+class OrderStatusDetails:
+    status: str
+    filled: float = 0.0
+    remaining: float = 0.0
+    avgFillPrice: Optional[float] = None
+    submittedAt: Optional[str] = None
+    updatedAt: Optional[str] = None
+
+
+class TradeEnvelope:
+    def __init__(self, order: OrderDetails, status: OrderStatusDetails, raw: Any = None) -> None:
+        self.order = order
+        self.orderStatus = status
+        self.raw = raw
+        self.order_ids = [order.orderId]
+
+
+class StrategyEnvelope:
+    def __init__(self, trades: List[TradeEnvelope]) -> None:
+        self.trades = trades
+        self.order = trades[0].order if trades else None
+        self.raw = [t.raw for t in trades]
+        self.order_ids = [t.order.orderId for t in trades]
+        self.orderStatus = _aggregate_status([t.orderStatus for t in trades])
+
+
+class AlpacaTrader:
+    def __init__(self) -> None:
+        self.client = AlpacaAsyncClient()
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._connect_lock = asyncio.Lock()
         atexit.register(self.disconnect)
 
-    async def connect(self):
-        """Establishes connection to TWS/Gateway asynchronously if not already connected.
-        Ensures the IB client is created in the current event loop.
-        """
+    async def connect(self) -> None:
         loop = asyncio.get_running_loop()
-        # Align ib_insync with the currently running asyncio loop
-        try:
-            ib_insync.util.useAsyncio()  # instruct ib_insync to use asyncio integration
-        except Exception:
-            pass
-        # Ensure the default loop getter returns this running loop in this thread
-        try:
-            asyncio.set_event_loop(loop)
-        except Exception:
-            pass
-        # (Re)create client if missing or loop changed
-        if self.client is None or self._loop is not loop:
-            try:
-                if self.client is not None and getattr(self.client, 'isConnected', lambda: False)():
-                    self.client.disconnect()
-            except Exception:
-                pass
-            self.client = IB()
+        if self._loop is not loop:
             self._loop = loop
-            print(f"INFO: IBTrader client bound to loop id={id(loop)}")
-            # Configure request timeout if available
-            try:
-                self.client.RequestTimeout = 30
-            except Exception:
-                pass
+        if self.client.is_connected():
+            return
+        async with self._connect_lock:
+            if self.client.is_connected():
+                return
+            await self.client.connect(host="", port=0, clientId=0, timeout=0)
 
-        if not self.client.isConnected():
-            try:
+    def disconnect(self) -> None:
+        self.client.disconnect()
+
+    async def get_available_fund(self) -> float:
+        summary = await self.get_account_summary()
+        for item in summary:
+            if item.tag == "AvailableFunds":
                 try:
-                    util_loop = ib_insync.util.getLoop()
-                except Exception:
-                    util_loop = None
-                print(
-                    f"INFO: Connecting to TWS at {self.ip_add}:{self.port} on loop id={id(loop)}"
-                    + (f", util_loop id={id(util_loop)} ({type(util_loop).__name__})" if util_loop else ", util_loop unknown")
-                )
-                # Increased timeout to 180s to prevent failures when syncing large option portfolios.
-                await self.client.connectAsync(self.ip_add, self.port, clientId=random.randint(0, 1000), timeout=180, account=self.account)
-                
-                # Disable automatic data syncing to prevent timeout errors
-                # This prevents ib_insync from automatically requesting completed orders and other data
-                self.client.reqAutoOpenOrders(False)  # Don't auto-request open orders
-                
-                print("INFO: Connection to TWS established successfully.")
-            except (asyncio.TimeoutError, ConnectionRefusedError):
-                 print(f"ERROR: Connection to {self.ip_add}:{self.port} timed out or was refused.")
-                 print("HINT: Ensure TWS/Gateway is running, API connections are enabled, and the IP is whitelisted.")
-                 # The synchronous self.client.connect is removed as it blocks the event loop in an async context.
-                 # The exception is allowed to propagate to the caller.
-                 raise
-            except socket.gaierror:
-                print(f"ERROR: Hostname '{self.ip_add}' could not be resolved. This is a DNS lookup failure.")
-                print("HINT: If using Docker on Linux, 'host.docker.internal' may not work without extra configuration. Try setting TWS_HOST to your host's IP address (e.g., 10.0.1.22).")
-                raise
-            except Exception as e:
-                print(f"ERROR: An unexpected exception occurred while connecting to TWS: {e}")
-                traceback.print_exc()
-                raise
-
-    def disconnect(self):
-        try:
-            if self.client is not None and getattr(self.client, 'isConnected', lambda: False)():
-                self.client.disconnect()
-        except Exception:
-            pass
-
-    async def get_available_fund(self):
-        try:
-            await self.connect()
-            # Use accountSummaryAsync to avoid blocking the event loop
-            summary = await self.client.accountSummaryAsync()
-            return float(list(filter(lambda x: x.tag == "AvailableFunds", summary))[0].value)
-        except Exception as e:
-            raise Exception(e)
+                    return float(item.value)
+                except (TypeError, ValueError):
+                    return 0.0
+        return 0.0
 
     async def get_account_summary(self):
-        """Fetches the account summary."""
-        try:
-            await self.connect()
-            return await self.client.accountSummaryAsync()
-        except Exception as e:
-            raise Exception(f"Error fetching account summary: {e}")
+        await self.connect()
+        return await self.client.account_summary()
 
     async def get_position_by_symbol(self, symbol) -> float:
-        try:
-            await self.connect()
-            positions = await self.client.reqPositionsAsync()
-            position_list = list(filter(lambda x: x.contract.symbol == symbol, positions))
-            if len(position_list) == 0:
-                return 0
+        await self.connect()
+        positions = await self.client.req_positions()
+        symbol_upper = symbol.upper()
+        for pos in positions:
+            asset_class = pos.get("asset_class") or pos.get("assetClass")
+            pos_symbol = pos.get("symbol") or ""
+            if asset_class in ("us_option", "option"):
+                parsed = _parse_occ_symbol(pos_symbol)
+                base_symbol = parsed.get("underlying", "")
             else:
-                return position_list[0].position
-        except Exception as e:
-            raise Exception(e)
+                base_symbol = pos_symbol
+            if base_symbol.upper() == symbol_upper:
+                return _to_float(pos.get("qty") or pos.get("quantity") or pos.get("position"))
+        return 0.0
 
     async def place_forex_market_order(self, symbol, size):
-        try:
-            await self.connect()
-            order = MarketOrder('BUY' if size >= 0 else "SELL", abs(size))
-            contract = Forex(symbol)
-            await self.client.qualifyContractsAsync(contract)
-            trade = self.client.placeOrder(contract, order)
-            await asyncio.sleep(1)  # Allow ib_insync to process and send the order
-            return trade
-        except Exception as e:
-            raise Exception(e)
+        raise NotImplementedError("Alpaca does not support spot forex trading via the trading API.")
 
     async def place_stock_market_order(self, symbol, size):
-        """
-        Places a stock order using limit price at current market price.
-        This ensures orders can be placed outside market hours and will remain active.
-        """
-        try:
-            await self.connect()
-            action = 'BUY' if size >= 0 else "SELL"
-            quantity = abs(size)
-            
-            # Get current market price to use as limit price
-            current_price = await self.get_current_price(symbol, 'STK')
-            if current_price is None:
-                # Fallback to market order if price can't be determined
-                print(f"WARN: Could not fetch price for {symbol}, using market order")
-                order = MarketOrder(action, quantity)
-            else:
-                # Use limit order at exact market price
-                limit_price = round(current_price, 2)
-                order = LimitOrder(action, quantity, limit_price)
-                print(f"INFO: Placing {action} limit order for {quantity} {symbol} at ${limit_price}")
-            
-            contract = Stock(symbol, "SMART", "USD")
-            await self.client.qualifyContractsAsync(contract)
-            trade = self.client.placeOrder(contract, order)
-            await asyncio.sleep(1)  # Allow ib_insync to process and send the order
-            return trade
-        except Exception as e:
-            raise Exception(e)
+        await self.connect()
+        action = "BUY" if size >= 0 else "SELL"
+        quantity = abs(float(size))
+        contract = _stock_contract(symbol)
+        order_payload = {
+            "asset_type": "stock",
+            "order_type": "market",
+            "side": action,
+            "qty": quantity,
+            "time_in_force": DEFAULT_TIF,
+        }
+        order_obj = await self.client.place_order(contract, order_payload)
+        return _alpaca_order_to_trade(order_obj)
 
     async def place_stock_limit_order(self, symbol, size, limit_price):
-        try:
-            await self.connect()
-            action = 'BUY' if size > 0 else 'SELL'
-            order = LimitOrder(action, abs(size), limit_price)
-            contract = Stock(symbol, "SMART", "USD")
-            await self.client.qualifyContractsAsync(contract)
-            trade = self.client.placeOrder(contract, order)
-            await asyncio.sleep(1)  # Allow ib_insync to process and send the order
-            return trade
-        except Exception as e:
-            raise Exception(f"Error placing limit order for {symbol}: {str(e)}")
+        await self.connect()
+        if limit_price is None:
+            raise ValueError("Limit price is required for stock limit orders.")
+        action = "BUY" if size > 0 else "SELL"
+        quantity = abs(float(size))
+        contract = _stock_contract(symbol)
+        order_payload = {
+            "asset_type": "stock",
+            "order_type": "limit",
+            "side": action,
+            "qty": quantity,
+            "limit_price": float(limit_price),
+            "time_in_force": DEFAULT_TIF,
+        }
+        order_obj = await self.client.place_order(contract, order_payload)
+        return _alpaca_order_to_trade(order_obj)
 
-    async def place_option_order(self, symbol: str, size: int, expiry_date: str, strike: float, right: str, order_type: str = 'MKT', limit_price: float = None, exchange: str = 'SMART'):
-        """
-        Places an option order asynchronously. For MKT orders, automatically converts to LMT
-        orders using current market price to ensure orders can be placed outside market hours.
+    async def place_option_order(
+        self,
+        symbol: str,
+        size: int,
+        expiry_date: str,
+        strike: float,
+        right: str,
+        order_type: str = "MKT",
+        limit_price: float = None,
+        exchange: str = "SMART",
+    ):
+        del exchange
+        await self.connect()
+        action = "BUY" if size > 0 else "SELL"
+        quantity = abs(int(size))
+        order_kind = order_type.upper()
+        final_limit = limit_price
+        if order_kind == "MKT" and final_limit is None:
+            market_price = await self.get_current_price(symbol, "OPT", expiry_date, strike, right)
+            if market_price:
+                final_limit = round(market_price, 2)
+                order_kind = "LMT"
+        contract = _option_contract(symbol, expiry_date, strike, right)
+        order_payload = {
+            "asset_type": "option",
+            "order_type": "market" if order_kind == "MKT" else "limit",
+            "side": action,
+            "qty": quantity,
+            "limit_price": float(final_limit) if final_limit is not None else None,
+            "time_in_force": DEFAULT_TIF,
+        }
+        if order_payload["order_type"] == "limit" and order_payload["limit_price"] is None:
+            raise ValueError("Limit price is required for limit option orders.")
+        order_obj = await self.client.place_order(contract, order_payload)
+        return _alpaca_order_to_trade(order_obj)
 
-        Args:
-            symbol (str): The underlying symbol.
-            size (int): The number of contracts to trade. Positive for buy, negative for sell.
-            expiry_date (str): The option's expiration date in YYYYMMDD format.
-            strike (float): The option's strike price.
-            right (str): The option type, 'C' for Call or 'P' for Put.
-            order_type (str): 'MKT' for market order, 'LMT' for limit order.
-            limit_price (float, optional): The limit price for LMT orders. Defaults to None.
-            exchange (str, optional): The exchange. Defaults to 'SMART'.
+    async def place_strategy_order(
+        self,
+        symbol: str,
+        legs_data: list,
+        size: int,
+        order_type: str = "MKT",
+        limit_price: float = None,
+        exchange: str = "SMART",
+        open_position: bool = True,
+    ):
+        del exchange
+        if not legs_data:
+            raise ValueError("Strategy legs cannot be empty.")
+        contracts: List[TradeEnvelope] = []
+        order_kind = order_type.upper()
+        final_limit = limit_price
+        absolute_size = abs(int(size))
+        if absolute_size == 0:
+            raise ValueError("Strategy size must be non-zero.")
 
-        Returns:
-            ib_insync.Trade: The trade object.
-        """
-        try:
-            await self.connect()
-            action = 'BUY' if size > 0 else 'SELL'
-            quantity = abs(size)
+        sell_tokens: Set[str] = {"SELL", "SHORT", "WRITE"}
+        buy_tokens: Set[str] = {"BUY", "LONG"}
 
-            if order_type.upper() == 'MKT':
-                # Convert market order to limit order using current market price
-                current_price = await self.get_current_price(symbol, 'OPT', expiry_date, strike, right, exchange)
-                if current_price is None:
-                    # Fallback to market order if price can't be determined
-                    print(f"WARN: Could not fetch price for {symbol} {expiry_date} {strike} {right}, using market order")
-                    order = MarketOrder(action, quantity)
-                else:
-                    # Use limit order at exact market price
-                    calculated_limit_price = round(current_price, 2)
-                    order = LimitOrder(action, quantity, calculated_limit_price)
-                    print(f"INFO: Placing {action} limit order for {quantity} {symbol} {expiry_date} {strike}{right} at ${calculated_limit_price:.2f}")
-                    
-            elif order_type.upper() == 'LMT' and limit_price is not None:
-                order = LimitOrder(action, quantity, limit_price)
-            else:
-                raise ValueError("Invalid order type or missing limit price for LMT order.")
+        leg_specs: List[Dict[str, Any]] = []
+        for leg in legs_data:
+            base_qty = int(leg.get("quantity", 1))
+            if base_qty == 0:
+                continue
+            leg_action = str(leg.get("action", "BUY")).upper()
+            if leg_action not in sell_tokens and leg_action not in buy_tokens:
+                raise ValueError(f"Unsupported leg action '{leg_action}'.")
+            leg_sign = -1 if leg_action in sell_tokens else 1
+            expiry = leg.get("expiry_date") or leg.get("expiry")
+            strike = leg.get("strike")
+            right = leg.get("right")
+            if not all([expiry, strike, right]):
+                raise ValueError("Each leg requires expiry, strike, and right fields.")
+            occ_symbol = leg.get("option_symbol") or build_occ_symbol(symbol, expiry, _to_decimal(strike), right)
+            ratio_qty = float(base_qty * leg_sign)
+            per_leg_qty = int(base_qty * absolute_size * leg_sign)
+            if per_leg_qty == 0:
+                continue
+            position_intent = _leg_position_intent(open_position=open_position, leg_sign=leg_sign)
+            leg_specs.append(
+                {
+                    "occ_symbol": occ_symbol,
+                    "ratio_qty": ratio_qty,
+                    "per_leg_qty": per_leg_qty,
+                    "expiry": expiry,
+                    "strike": strike,
+                    "right": right,
+                    "action": leg_action,
+                    "position_intent": position_intent,
+                }
+            )
 
-            contract = Option(symbol, expiry_date, strike, right, exchange, tradingClass=symbol)
-            await self.client.qualifyContractsAsync(contract)
-            
-            trade = self.client.placeOrder(contract, order)
-            await asyncio.sleep(1)  # Allow ib_insync to process and send the order
-            return trade
-        except Exception as e:
-            raise Exception(f"Error placing option order for {symbol} {expiry_date} K={strike} {right}: {str(e)}")
+        if not leg_specs:
+            raise ValueError("No executable legs were produced for strategy order.")
 
-    async def place_strategy_order(self, symbol: str, legs_data: list, size: int, order_type: str = 'MKT', limit_price: float = None, exchange: str = 'SMART'):
-        """
-        Places a multi-leg option strategy order asynchronously. For MKT orders, attempts to 
-        calculate strategy limit price based on individual leg prices to ensure orders can
-        be placed outside market hours.
+        multi_leg_requested = len(leg_specs) > 1
+        if multi_leg_requested:
+            order_side = _strategy_side_from_legs(leg_specs, size)
+            multi_contract = {"asset_type": "option", "symbol": symbol.upper()}
+            multi_payload: Dict[str, Any] = {
+                "asset_type": "option",
+                "order_type": "limit",
+                "side": order_side,
+                "qty": absolute_size,
+                "time_in_force": DEFAULT_TIF,
+                "order_class": "mleg",
+                "legs": [
+                    {
+                        "option_symbol": spec["occ_symbol"],
+                        "ratio_qty": spec["ratio_qty"],
+                        "side": spec["action"],
+                        "position_intent": spec["position_intent"],
+                    }
+                    for spec in leg_specs
+                ],
+            }
+            if final_limit is None:
+                final_limit = await self._derive_strategy_limit_price(symbol, leg_specs)
+            if final_limit is None:
+                raise RuntimeError("Unable to determine limit price for multi-leg strategy order.")
+            multi_payload["limit_price"] = float(final_limit)
 
-        Args:
-            symbol (str): The underlying symbol.
-            legs_data (list): A list of dictionaries, each describing a leg.
-                e.g., [{'action': 'BUY', 'quantity': 1, 'expiry_date': '20251219', 'strike': 500, 'right': 'C'}, ...]
-            size (int): The number of strategy units to trade. Positive for buy, negative for sell.
-            order_type (str): 'MKT' for market order, 'LMT' for limit order.
-            limit_price (float, optional): The limit price for the entire strategy. Defaults to None.
-            exchange (str, optional): The exchange. Defaults to 'SMART'.
+            try:
+                order_obj = await self.client.place_order(multi_contract, multi_payload)
+                return _alpaca_order_to_trade(order_obj)
+            except Exception as exc:
+                raise RuntimeError(f"Multi-leg order submission failed: {exc}") from exc
 
-        Returns:
-            ib_insync.Trade: The trade object.
-        """
-        try:
-            await self.connect()
-            print(f"DEBUG: Placing strategy order for {symbol} with size {size}")
-            print(f"DEBUG: Legs data: {legs_data}")
-            
-            # Create a Bag contract for the combo
-            contract = Bag()
-            contract.symbol = symbol
-            contract.currency = 'USD'
-            contract.exchange = exchange
-            
-            combo_legs = []
-            strategy_estimated_price = 0.0
-            
-            for leg_info in legs_data:
-                # Qualify each leg to get its conId
-                leg_contract = Option(
-                    symbol, 
-                    leg_info['expiry_date'], 
-                    leg_info['strike'], 
-                    leg_info['right'], 
-                    exchange, 
-                    tradingClass=symbol
-                )
-                print(f"DEBUG: Qualifying leg: {leg_contract}")
-                await self.client.qualifyContractsAsync(leg_contract)
-                print(f"DEBUG: Leg qualified: {leg_contract.localSymbol}, conId: {leg_contract.conId}")
-                
-                # For MKT orders, try to get leg price for strategy pricing
-                if order_type.upper() == 'MKT' and limit_price is None:
-                    leg_price = await self.get_current_price(symbol, 'OPT', leg_info['expiry_date'], leg_info['strike'], leg_info['right'], exchange)
-                    if leg_price is not None:
-                        # Add/subtract based on whether we're buying or selling this leg
-                        leg_contribution = leg_price * leg_info['quantity']
-                        if leg_info['action'] == 'BUY':
-                            strategy_estimated_price += leg_contribution
-                        else:  # SELL
-                            strategy_estimated_price -= leg_contribution
-                        print(f"DEBUG: Leg {leg_info['strike']}{leg_info['right']} price: ${leg_price:.2f}, contribution: ${leg_contribution:.2f}")
-                
-                # Create a ComboLeg for the Bag contract
-                combo_leg = ComboLeg()
-                combo_leg.conId = leg_contract.conId
-                combo_leg.ratio = leg_info['quantity']
-                combo_leg.action = leg_info['action']
-                combo_leg.exchange = exchange
-                combo_legs.append(combo_leg)
-                
-            contract.comboLegs = combo_legs
-            print("DEBUG: Combo contract constructed from qualified legs.")
+        for spec in leg_specs:
+            trade = await self.place_option_order(
+                symbol=symbol,
+                size=spec["per_leg_qty"],
+                expiry_date=spec["expiry"],
+                strike=spec["strike"],
+                right=spec["right"],
+                order_type=order_type,
+                limit_price=limit_price,
+            )
+            contracts.append(trade)
 
-            # Create the order for the whole strategy
-            strategy_action = 'BUY' if size > 0 else 'SELL'
-            quantity = abs(size)
+        if len(contracts) == 1:
+            return contracts[0]
+        return StrategyEnvelope(contracts)
 
-            if order_type.upper() == 'MKT':
-                # Try to use calculated strategy limit price for execution outside market hours
-                if strategy_estimated_price != 0.0:
-                    # Use exact estimated strategy price without buffer
-                    calculated_limit_price = round(strategy_estimated_price, 2)
-                    
-                    # Ensure the limit price is positive for buy orders and reasonable for sell orders
-                    if strategy_action == 'BUY' and calculated_limit_price > 0:
-                        order = LimitOrder(strategy_action, quantity, calculated_limit_price)
-                        print(f"INFO: Converting MKT to LMT order at ${calculated_limit_price:.2f}")
-                    elif strategy_action == 'SELL' and calculated_limit_price > 0:
-                        order = LimitOrder(strategy_action, quantity, calculated_limit_price)
-                        print(f"INFO: Converting MKT to LMT order at ${calculated_limit_price:.2f}")
-                    else:
-                        print("WARN: Could not calculate reasonable strategy limit price, using market order")
-                        order = MarketOrder(strategy_action, quantity)
-                else:
-                    print("WARN: Could not estimate strategy price, using market order")
-                    order = MarketOrder(strategy_action, quantity)
-            elif order_type.upper() == 'LMT' and limit_price is not None:
-                order = LimitOrder(strategy_action, quantity, limit_price)
-            else:
-                raise ValueError("Invalid order type or missing limit price for LMT order.")
-
-            print(f"DEBUG: Placing order: {order}")
-            trade = self.client.placeOrder(contract, order)
-            await asyncio.sleep(1)  # Allow ib_insync to process and send the order
-            print(f"DEBUG: Order placed successfully. Trade: {trade}")
-    
-            return trade
-        except Exception as e:
-            print("--- ORDER PLACEMENT FAILED ---")
-            traceback.print_exc()
-            print("-----------------------------")
-            raise Exception(f"Error placing strategy order for {symbol}: {str(e)}")
+    async def _derive_strategy_limit_price(self, symbol: str, leg_specs: Sequence[Dict[str, Any]]) -> Optional[float]:
+        total_value = 0.0
+        observed = False
+        for spec in leg_specs:
+            ratio = float(spec.get("ratio_qty", 0.0))
+            if ratio == 0:
+                continue
+            observed = True
+            market_data = await self.get_option_market_data(symbol, spec["expiry"], spec["strike"], spec["right"])
+            if not market_data:
+                return None
+            bid = _maybe_float(market_data.get("bid"))
+            ask = _maybe_float(market_data.get("ask"))
+            midpoint = _maybe_float(market_data.get("midpoint"))
+            leg_price = _select_leg_price(midpoint, bid, ask, ratio)
+            if leg_price is None:
+                return None
+            total_value += leg_price * ratio
+        if not observed:
+            return None
+        return round(abs(total_value), 2)
 
     async def wait_for_order_fill(self, trade, timeout=TIMEOUT, cancel_on_timeout: bool = False):
-        """
-        Polls for order completion up to `timeout` seconds without blocking the event loop.
-        By default this does NOT cancel the order when the timeout elapses; it simply returns
-        the latest known status (e.g., Submitted/PreSubmitted). If `cancel_on_timeout` is True,
-        the order will be explicitly cancelled when the timeout is reached.
-
-        Returns the current `trade.orderStatus.status` at exit.
-        """
-        start_time = time.time()
-
-        while not trade.isDone():
-            if time.time() - start_time > timeout:
+        await self.connect()
+        order_ids = getattr(trade, "order_ids", None)
+        if not order_ids:
+            order_ids = [trade.order.orderId]
+        start = time.time()
+        while True:
+            refreshed = []
+            for oid in order_ids:
+                refreshed.append(await self.client.get_order_by_id(oid))
+            _update_trade_structure(trade, refreshed)
+            if _all_terminal(refreshed):
+                return trade.orderStatus.status
+            if (time.time() - start) > timeout:
                 if cancel_on_timeout:
-                    try:
-                        self.client.cancelOrder(trade.order)
-                    except Exception:
-                        pass
-                break
-            await asyncio.sleep(1)  # Non-blocking wait
-
-        return trade.orderStatus.status
+                    for oid in order_ids:
+                        try:
+                            await self.client.cancel_order(oid)
+                        except Exception:
+                            pass
+                return trade.orderStatus.status
+            await asyncio.sleep(1)
 
     async def open_positions_symbol(self):
-        try:
-            await self.connect()
-            positions = await self.client.reqPositionsAsync()
-            return [x.contract.symbol for x in positions]
-        except Exception as e:
-            raise Exception(e)
+        positions_df = await self.open_positions()
+        if positions_df.empty:
+            return []
+        return positions_df["symbol"].dropna().unique().tolist()
 
     async def open_positions(self):
-        try:
-            await self.connect()
-            data = await self.client.reqPositionsAsync()
-            unpacked_data = []
-
-            for pos in data:
-                position_data = {
-                    'account': pos.account,
-                    'contract_type': type(pos.contract).__name__,
-                    'symbol': pos.contract.symbol,
-                    'exchange': getattr(pos.contract, 'exchange', None),
-                    'currency': getattr(pos.contract, 'currency', None),
-                    'localSymbol': pos.contract.localSymbol,
-                    'tradingClass': pos.contract.tradingClass,
-                    'position': pos.position,
-                    'avgCost': pos.avgCost
-                }
-                # Add option-specific details if the contract is an Option
-                if isinstance(pos.contract, Option):
-                    position_data['strike'] = pos.contract.strike
-                    position_data['right'] = pos.contract.right
-                    position_data['expiry'] = pos.contract.lastTradeDateOrContractMonth
-
-                unpacked_data.append(position_data)
-
-            return pd.DataFrame(unpacked_data)
-        except Exception as e:
-            raise Exception(e)
+        await self.connect()
+        positions = await self.client.req_positions()
+        normalized = [_normalize_position(p) for p in positions]
+        if not normalized:
+            return pd.DataFrame()
+        return pd.DataFrame(normalized)
 
     async def get_option_expirations(self, symbol: str):
-        """
-        Fetches all available option expiration dates for a given underlying symbol.
-        """
-        try:
-            await self.connect()
-            contract = Stock(symbol, 'SMART', 'USD')
-            await self.client.qualifyContractsAsync(contract)
-            
-            # This request returns a list of chain parameters.
-            chains = await self.client.reqSecDefOptParamsAsync(
-                underlyingSymbol=contract.symbol,
-                futFopExchange='',
-                underlyingSecType=contract.secType,
-                underlyingConId=contract.conId
-            )
-            
-            # The result is grouped by exchange. We'll collect all unique expirations.
-            expirations = set()
-            if chains:
-                for chain in chains:
-                    expirations.update(chain.expirations)
-                
-            return sorted(list(expirations))
-        except Exception as e:
-            print(f"Error fetching option expirations for {symbol}: {e}")
-            raise
+        await self.connect()
+        chain = await self.client.get_option_chain(symbol)
+        expirations = _extract_expiration_list(chain)
+        return sorted(expirations)
 
     async def realtimequote(self, ticker):
-        try:
-            await self.connect()
-            if (ticker.upper() == 'VIX'):
-                contract = Index(ticker, 'CBOE')  # Use the Index wrapper for VIX
-            else:
-                contract = Stock(ticker, 'SMART', 'USD')  # Use the Stock wrapper for other tickers
+        return await self.get_current_price(ticker, "STK")
 
-            start = ''
-            end = datetime.now()
-            ticks = await self.client.reqHistoricalTicksAsync(contract, start, end, 1, 'Trades', useRth=False)
-            if ticks:
-                return ticks[-1].price
-            return None
-        except Exception as e:
-            raise Exception(e)
+    async def get_current_price(
+        self,
+        symbol: str,
+        contract_type: str = "STK",
+        expiry_date: str = None,
+        strike: float = None,
+        right: str = None,
+        exchange: str = "SMART",
+    ):
+        del exchange
+        await self.connect()
+        if contract_type.upper() == "STK":
+            contract = _stock_contract(symbol)
+        elif contract_type.upper() == "OPT":
+            if not all([expiry_date, strike, right]):
+                raise ValueError("Options require expiry_date, strike, and right.")
+            contract = _option_contract(symbol, expiry_date, strike, right)
+        else:
+            raise ValueError(f"Unsupported contract type {contract_type}.")
+        quote = await self.client.req_mkt_data(contract, "", True, False)
+        price = _quote_to_price(quote)
+        if price is not None:
+            return price
+        bars = await self.client.req_historical_data(contract, timeframe="1 day", limit=5)
+        if bars:
+            last_bar = bars[-1]
+            close = getattr(last_bar, "close", None)
+            if close is not None:
+                try:
+                    return float(close)
+                except (TypeError, ValueError):
+                    pass
+        return None
 
-    async def get_current_price(self, symbol: str, contract_type: str = 'STK', expiry_date: str = None, strike: float = None, right: str = None, exchange: str = 'SMART'):
-        """
-        Gets current market price (or last close price if market closed) for any instrument.
-        
-        Args:
-            symbol (str): The symbol
-            contract_type (str): 'STK' for stock, 'OPT' for option
-            expiry_date (str): Option expiry in YYYYMMDD format (for options only)
-            strike (float): Strike price (for options only)  
-            right (str): 'C' or 'P' (for options only)
-            exchange (str): Exchange, defaults to 'SMART'
-            
-        Returns:
-            float: Current market price or last close price, None if unable to fetch
-        """
-        try:
-            await self.connect()
-            
-            if contract_type.upper() == 'STK':
-                contract = Stock(symbol, exchange, 'USD')
-            elif contract_type.upper() == 'OPT':
-                contract = Option(symbol, expiry_date, strike, right, exchange, tradingClass=symbol)
-            else:
-                raise ValueError(f"Unsupported contract type: {contract_type}")
-                
-            await self.client.qualifyContractsAsync(contract)
-            
-            # Try to get live market data first
-            ticker = self.client.reqMktData(contract, '', False, False)
-            await asyncio.sleep(2)  # Allow time for data to arrive
-            
-            # Check for live prices (bid/ask/last)
-            if ticker and hasattr(ticker, 'last') and ticker.last is not None and not pd.isna(ticker.last) and ticker.last > 0:
-                self.client.cancelMktData(contract)
-                return float(ticker.last)
-            elif ticker and hasattr(ticker, 'close') and ticker.close is not None and not pd.isna(ticker.close) and ticker.close > 0:
-                self.client.cancelMktData(contract)
-                return float(ticker.close)
-            elif ticker and hasattr(ticker, 'bid') and hasattr(ticker, 'ask') and ticker.bid is not None and ticker.ask is not None:
-                if not pd.isna(ticker.bid) and not pd.isna(ticker.ask) and ticker.bid > 0 and ticker.ask > 0:
-                    mid_price = (float(ticker.bid) + float(ticker.ask)) / 2.0
-                    self.client.cancelMktData(contract)
-                    return mid_price
-                    
-            # If live data fails, get historical data
-            self.client.cancelMktData(contract)
-            print(f"INFO: No live data available for {symbol}, fetching historical close price")
-            
-            hist_data = await self.client.reqHistoricalDataAsync(
-                contract,
-                endDateTime='',
-                durationStr='5 D',  # Get last 5 days of data
-                barSizeSetting='1 day',
-                whatToShow='MIDPOINT',
-                useRTH=True,
-                formatDate=1
-            )
-            
-            if hist_data and len(hist_data) > 0:
-                # Return the most recent close price
-                last_bar = hist_data[-1]
-                if hasattr(last_bar, 'close') and last_bar.close is not None and last_bar.close > 0:
-                    return float(last_bar.close)
-                    
-            print(f"WARN: Unable to fetch price for {symbol} {contract_type}")
-            return None
-            
-        except Exception as e:
-            print(f"ERROR: Failed to fetch price for {symbol}: {e}")
+    async def get_option_market_data(self, symbol: str, expiry_date: str, strike: float, right: str, exchange: str = "SMART"):
+        del exchange
+        await self.connect()
+        contract = _option_contract(symbol, expiry_date, strike, right)
+        quote = await self.client.req_mkt_data(contract, "", True, False)
+        fallback_quote: Dict[str, Any] = {}
+        fallback_trade: Dict[str, Any] = {}
+        occ_symbol = contract["option_symbol"]
+        if quote is None:
+            chain = await self.client.get_option_chain(symbol)
+            if isinstance(chain, dict):
+                normalized_occ = occ_symbol.replace(" ", "")
+                snapshot = chain.get(occ_symbol) or chain.get(normalized_occ)
+                if snapshot is None:
+                    snapshot = next(
+                        (
+                            payload
+                            for payload in chain.values()
+                            if isinstance(payload, dict)
+                            and (payload.get("symbol") in {occ_symbol, normalized_occ})
+                        ),
+                        None,
+                    )
+                if isinstance(snapshot, dict):
+                    fallback_quote = snapshot.get("latest_quote") or {}
+                    fallback_trade = snapshot.get("latest_trade") or {}
+
+        bid = getattr(quote, "bid_price", None) if quote is not None else None
+        ask = getattr(quote, "ask_price", None) if quote is not None else None
+        midpoint = getattr(quote, "midpoint", None) if quote is not None else None
+        timestamp = getattr(quote, "timestamp", None) if quote is not None else None
+
+        if bid is None:
+            bid = fallback_quote.get("bid_price")
+        if ask is None:
+            ask = fallback_quote.get("ask_price")
+        if midpoint is None and bid is not None and ask is not None:
+            midpoint = (float(bid) + float(ask)) / 2
+        if midpoint is None:
+            midpoint = fallback_quote.get("midpoint") or fallback_trade.get("price")
+        if timestamp is None:
+            timestamp = fallback_quote.get("timestamp") or fallback_trade.get("timestamp")
+
+        if bid is None and ask is None and midpoint is None:
             return None
 
-    async def get_option_market_data(self, symbol: str, expiry_date: str, strike: float, right: str, exchange: str = 'SMART'):
-        """
-        Fetches market data for a specific option contract asynchronously.
+        return {
+            "bid": bid,
+            "ask": ask,
+            "midpoint": midpoint,
+            "timestamp": _to_iso(timestamp),
+        }
 
-        Args:
-            symbol (str): The underlying symbol (e.g., 'AAPL').
-            expiry_date (str): The option's expiration date in YYYYMMDD format.
-            strike (float): The option's strike price.
-            right (str): The option type, 'C' for Call or 'P' for Put.
-            exchange (str): The exchange to trade on, defaults to 'SMART'.
-
-        Returns:
-            ib_insync.Ticker: Ticker object containing market data, or None if data retrieval fails.
-        """
-        try:
-            await self.connect() # Ensure connection
-            contract = Option(symbol, expiry_date, strike, right, exchange, tradingClass=symbol)
-            await self.client.qualifyContractsAsync(contract)
-            
-            ticker = self.client.reqMktData(contract, '', False, False)
-            await asyncio.sleep(2) # Allow time for data to arrive, adjust as needed
-
-            if ticker and (ticker.last is not None and not pd.isna(ticker.last) or ticker.close is not None and not pd.isna(ticker.close)): # Check if we got some price
-                self.client.cancelMktData(contract)
-                return ticker
-            else:
-                # Attempt to get historical data if live tick fails or is empty
-                hist_data = await self.client.reqHistoricalDataAsync(
-                    contract,
-                    endDateTime='',
-                    durationStr='1 D', # Get data for 1 day
-                    barSizeSetting='1 day', # Daily bars
-                    whatToShow='MIDPOINT',
-                    useRTH=True,
-                    formatDate=1
-                )
-                self.client.cancelMktData(contract) # Clean up subscription
-                if hist_data:
-                    # Create a mock ticker object from historical data if needed
-                    # This part depends on what specific fields you need from the ticker
-                    # For simplicity, returning the raw historical data list for now
-                    # Or, you can populate a Ticker-like object if consistent structure is required
-                    # For example, if you need the close price:
-                    # mock_ticker = ibutil.Ticker(contract=contract, close=hist_data[-1].close)
-                    # return mock_ticker
-                    # For now, let's assume the user might want the last close from historical data
-                    # and we can return a simplified structure or the last historical bar.
-                    # Returning the last bar's close price as an example.
-                    # You might want to return the whole ticker or a more complex object.
-                    if hist_data[-1].close:
-                         # Create a Ticker object and populate it
-                        mock_ticker = ibutil.Ticker(
-                            contract=contract,
-                            time=datetime.now(), # Or use hist_data[-1].date
-                            bid=float('nan'), # Historical data might not have live bid/ask
-                            bidSize=0,
-                            ask=float('nan'),
-                            askSize=0,
-                            last=hist_data[-1].close, # Using close as last
-                            lastSize=0,
-                            volume=hist_data[-1].volume if hasattr(hist_data[-1], 'volume') else 0,
-                            close=hist_data[-1].close,
-                            # Add other fields as necessary
-                        )
-                        return mock_ticker
-                return None # If both live and historical fail
-        except Exception as e:
-            # Log the exception or handle it as per your application's needs
-            print(f"Error fetching option market data for {symbol} {expiry_date} {strike} {right}: {e}")
-            # It might be better to raise the exception or return a specific error indicator
-            # For now, returning None to indicate failure
-            return None
-        
     async def cancel_order(self, trade):
-        """
-        Cancels an existing order asynchronously.
-        
-        Args:
-            trade: The trade object to cancel
-            
-        Returns:
-            None
-        """
-        try:
-            await self.connect()
-            if trade.orderStatus.status not in ["Filled", "Cancelled", "ApiCancelled", "Inactive"]:
-                # Send cancel request
-                self.client.cancelOrder(trade.order)
-                
-                # Wait briefly to ensure the cancel request is processed
-                await asyncio.sleep(1)
-                    
-        except Exception as e:
-            raise Exception(f"Error cancelling order: {str(e)}")
+        await self.connect()
+        if trade is None:
+            return
+        order_ids = getattr(trade, "order_ids", None)
+        if not order_ids and getattr(trade, "order", None):
+            order_ids = [trade.order.orderId]
+        if not order_ids:
+            raise ValueError("Trade does not include order identifiers.")
+        for oid in order_ids:
+            try:
+                await self.client.cancel_order(oid)
+            except Exception:
+                pass
 
     async def get_recent_orders(self, count=10):
-        """
-        Fetches the most recent trades from the current session.
-        """
-        try:
-            await self.connect()
-            # client.trades() returns all trades for the session.
-            # This is a synchronous call that gets cached data and doesn't trigger network requests
-            all_trades = self.client.trades()
-            
-            # If no trades available, return empty list instead of trying to request completed orders
-            if not all_trades:
-                print("INFO: No trades found in current session")
-                return []
-            
-            # Sort trades by the execution time of their last fill.
-            def get_latest_fill_time(trade):
+        await self.connect()
+        orders = await self.client.list_orders(status="all", limit=count)
+        envelopes = [_alpaca_order_to_trade(order) for order in orders]
+        return [_trade_to_summary_dict(env) for env in envelopes]
+
+
+IBTrader = AlpacaTrader
+
+
+def _stock_contract(symbol: str) -> Dict[str, Any]:
+    return {"asset_type": "stock", "symbol": symbol.upper()}
+
+
+def _option_contract(symbol: str, expiry: str, strike: float, right: str) -> Dict[str, Any]:
+    occ = build_occ_symbol(symbol, expiry, _to_decimal(strike), right)
+    return {
+        "asset_type": "option",
+        "symbol": symbol.upper(),
+        "expiry": _normalize_expiry(expiry),
+        "strike": float(strike),
+        "right": right.upper()[0],
+        "option_symbol": occ,
+    }
+
+
+def _to_decimal(value: float) -> Decimal:
+    return Decimal(str(value))
+
+
+def _parse_occ_symbol(symbol: str) -> Dict[str, Any]:
+    if not symbol:
+        return {"underlying": "", "expiry": "", "right": "", "strike": 0.0}
+    cleaned = symbol.replace(" ", "")
+    if len(cleaned) < 15:
+        return {"underlying": symbol.strip(), "expiry": "", "right": "", "strike": 0.0}
+    first_digit = next((idx for idx, ch in enumerate(cleaned) if ch.isdigit()), None)
+    if first_digit is None or len(cleaned) < first_digit + 15:
+        return {"underlying": symbol.strip(), "expiry": "", "right": "", "strike": 0.0}
+    root = symbol[:first_digit].strip()
+    expiry_segment = cleaned[first_digit : first_digit + 6]
+    right = cleaned[first_digit + 6].upper()
+    strike_segment = cleaned[first_digit + 7 : first_digit + 15]
+    try:
+        strike = int(strike_segment) / 1000.0
+    except ValueError:
+        strike = 0.0
+    if expiry_segment.isdigit():
+        year, month, day = expiry_segment[:2], expiry_segment[2:4], expiry_segment[4:6]
+        expiry_fmt = f"20{year}{month}{day}"
+    else:
+        expiry_fmt = ""
+    return {"underlying": root, "expiry": expiry_fmt, "right": right, "strike": strike}
+
+
+def _normalize_position(raw: Dict[str, Any]) -> Dict[str, Any]:
+    asset_class = raw.get("asset_class") or raw.get("assetClass")
+    base = {
+        "account": raw.get("account_id") or raw.get("account"),
+        "exchange": raw.get("exchange") or "ALPACA",
+        "currency": raw.get("currency") or "USD",
+        "localSymbol": raw.get("symbol"),
+        "position": _to_float(raw.get("qty") or raw.get("quantity") or raw.get("position")),
+        "avgCost": _maybe_float(raw.get("avg_entry_price") or raw.get("avgPrice")),
+        "marketValue": _maybe_float(raw.get("market_value")),
+        "unrealizedPNL": _maybe_float(raw.get("unrealized_pl") or raw.get("unrealized_plpc")),
+    }
+    if asset_class in ("us_option", "option"):
+        parsed = _parse_occ_symbol(raw.get("symbol", ""))
+        base.update(
+            {
+                "contract_type": "Option",
+                "symbol": parsed["underlying"],
+                "tradingClass": parsed["underlying"],
+                "strike": parsed["strike"],
+                "right": parsed["right"],
+                "expiry": parsed["expiry"],
+            }
+        )
+    else:
+        base.update(
+            {
+                "contract_type": "Stock",
+                "symbol": (raw.get("symbol") or "").upper(),
+                "tradingClass": (raw.get("symbol") or "").upper(),
+            }
+        )
+    return base
+
+
+def _strategy_side_from_legs(leg_specs: Sequence[Dict[str, Any]], size: int) -> str:
+    net = sum(float(spec.get("ratio_qty", 0.0)) for spec in leg_specs)
+    if net > 1e-9:
+        return "BUY"
+    if net < -1e-9:
+        return "SELL"
+    return "BUY" if size >= 0 else "SELL"
+
+
+def _select_leg_price(midpoint: Optional[float], bid: Optional[float], ask: Optional[float], ratio: float) -> Optional[float]:
+    if midpoint is not None:
+        return midpoint
+    direction = 1 if ratio > 0 else -1
+    if direction > 0:
+        for candidate in (ask, bid):
+            if candidate is not None:
+                return float(candidate)
+    else:
+        for candidate in (bid, ask):
+            if candidate is not None:
+                return float(candidate)
+    return None
+
+
+def _leg_position_intent(open_position: bool, leg_sign: int) -> str:
+    if open_position:
+        return "buy_to_open" if leg_sign > 0 else "sell_to_open"
+    return "buy_to_close" if leg_sign > 0 else "sell_to_close"
+
+
+def _aggregate_status(statuses: Sequence[OrderStatusDetails]) -> OrderStatusDetails:
+    if not statuses:
+        return OrderStatusDetails(status="Unknown")
+    normalized = [s.status.lower() for s in statuses]
+    if all(s in ("filled", "complete") for s in normalized):
+        combined = "Filled"
+    elif any(s in ("cancelled", "canceled", "expired", "rejected") for s in normalized):
+        combined = "Cancelled"
+    elif any(s in ("partiallyfilled", "partially_filled", "partial") for s in normalized):
+        combined = "PartiallyFilled"
+    else:
+        combined = "Submitted"
+    filled = sum(s.filled for s in statuses)
+    remaining = sum(max(s.remaining, 0.0) for s in statuses)
+    avg = _weighted_average([s.avgFillPrice for s in statuses], [s.filled for s in statuses])
+    submitted = next((s.submittedAt for s in statuses if s.submittedAt), None)
+    updated = next((s.updatedAt for s in statuses if s.updatedAt), None)
+    return OrderStatusDetails(
+        status=combined,
+        filled=filled,
+        remaining=remaining,
+        avgFillPrice=avg,
+        submittedAt=submitted,
+        updatedAt=updated,
+    )
+
+
+def _weighted_average(values: Sequence[Optional[float]], weights: Sequence[float]) -> Optional[float]:
+    numerator = 0.0
+    denominator = 0.0
+    for value, weight in zip(values, weights):
+        if value is None or weight is None:
+            continue
+        numerator += value * weight
+        denominator += weight
+    if denominator == 0:
+        return None
+    return numerator / denominator
+
+
+def _alpaca_order_to_trade(order_obj: Any) -> TradeEnvelope:
+    order_id = str(getattr(order_obj, "id", getattr(order_obj, "order_id", "")))
+    symbol = getattr(order_obj, "symbol", "")
+    side = str(getattr(order_obj, "side", "")).upper()
+    order_type = str(getattr(order_obj, "type", "")).upper()
+    qty = _to_float(getattr(order_obj, "qty", getattr(order_obj, "quantity", 0)))
+    limit_price = _maybe_float(getattr(order_obj, "limit_price", None) or getattr(order_obj, "limit", None))
+    filled_qty = _to_float(getattr(order_obj, "filled_qty", 0))
+    avg_price = _maybe_float(getattr(order_obj, "filled_avg_price", None))
+    status_value = _normalize_status(str(getattr(order_obj, "status", "")))
+    submitted_at = _to_iso(getattr(order_obj, "submitted_at", None))
+    updated_at = _to_iso(getattr(order_obj, "updated_at", None))
+    details = OrderDetails(
+        orderId=order_id,
+        symbol=symbol,
+        action=side or "BUY",
+        orderType=order_type or "MARKET",
+        totalQuantity=qty,
+        limitPrice=limit_price,
+        clientOrderId=getattr(order_obj, "client_order_id", None),
+    )
+    status = OrderStatusDetails(
+        status=status_value,
+        filled=filled_qty,
+        remaining=max(qty - filled_qty, 0.0),
+        avgFillPrice=avg_price,
+        submittedAt=submitted_at,
+        updatedAt=updated_at,
+    )
+    return TradeEnvelope(details, status, raw=order_obj)
+
+
+def _normalize_status(status: str) -> str:
+    normalized = status.lower()
+    mapping = {
+        "new": "Submitted",
+        "pending_new": "Submitted",
+        "accepted": "Submitted",
+        "partially_filled": "PartiallyFilled",
+        "partiallyfilled": "PartiallyFilled",
+        "filled": "Filled",
+        "done_for_day": "Filled",
+        "canceled": "Cancelled",
+        "cancelled": "Cancelled",
+        "expired": "Cancelled",
+        "rejected": "Rejected",
+    }
+    return mapping.get(normalized, status.capitalize() if status else "Unknown")
+
+
+def _quote_to_price(quote: Any) -> Optional[float]:
+    if quote is None:
+        return None
+    for attr in ("last_price", "last", "close", "midpoint", "price"):
+        value = getattr(quote, attr, None)
+        if value is not None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+    bid = getattr(quote, "bid_price", None)
+    ask = getattr(quote, "ask_price", None)
+    try:
+        if bid is not None and ask is not None:
+            return (float(bid) + float(ask)) / 2.0
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+def _update_trade_structure(trade: Any, refreshed_orders: Sequence[Any]) -> None:
+    if isinstance(trade, StrategyEnvelope):
+        existing = {t.order.orderId: t for t in trade.trades}
+        for order_obj in refreshed_orders:
+            updated = _alpaca_order_to_trade(order_obj)
+            target = existing.get(updated.order.orderId)
+            if target:
+                target.order = updated.order
+                target.orderStatus = updated.orderStatus
+                target.raw = updated.raw
+            else:
+                trade.trades.append(updated)
+        trade.orderStatus = _aggregate_status([t.orderStatus for t in trade.trades])
+        trade.order_ids = [t.order.orderId for t in trade.trades]
+    else:
+        updated = _alpaca_order_to_trade(refreshed_orders[0])
+        trade.order = updated.order
+        trade.orderStatus = updated.orderStatus
+        trade.raw = updated.raw
+        trade.order_ids = [updated.order.orderId]
+
+
+def _all_terminal(orders: Sequence[Any]) -> bool:
+    terminal = {"filled", "cancelled", "canceled", "expired", "rejected", "done_for_day"}
+    for order_obj in orders:
+        status = str(getattr(order_obj, "status", "")).lower()
+        if status not in terminal:
+            return False
+    return True
+
+
+def _to_float(value: Any) -> float:
+    try:
+        if value is None:
+            return 0.0
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _maybe_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_iso(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.astimezone().isoformat()
+    text = str(value)
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return parsed.astimezone().isoformat()
+    except ValueError:
+        return text
+
+
+def _normalize_expiry(expiry: str) -> str:
+    expiry = (expiry or "").strip()
+    if len(expiry) == 8 and expiry.isdigit():
+        return expiry
+    if len(expiry) == 6 and expiry.isdigit():
+        return "20" + expiry
+    raise ValueError("Expiry must be provided as YYYYMMDD or YYMMDD.")
+
+
+def _trade_to_summary_dict(trade: TradeEnvelope) -> Dict[str, Any]:
+    symbol = trade.order.symbol
+    entry = {
+        "symbol": symbol,
+        "secType": "OPT" if _looks_like_occ(symbol) else "STK",
+        "action": trade.order.action,
+        "quantity": trade.order.totalQuantity,
+        "orderType": trade.order.orderType,
+        "status": trade.orderStatus.status,
+        "filled": trade.orderStatus.filled,
+        "avgFillPrice": trade.orderStatus.avgFillPrice,
+        "lastFillTime": trade.orderStatus.updatedAt,
+        "description": symbol,
+        "orderId": trade.order.orderId,
+        "clientOrderId": trade.order.clientOrderId,
+    }
+    if entry["secType"] == "OPT":
+        parsed = _parse_occ_symbol(symbol)
+        entry["description"] = f"{parsed['expiry']} {parsed['strike']} {parsed['right']}"
+    return entry
+
+
+def _looks_like_occ(symbol: str) -> bool:
+    if not symbol:
+        return False
+    cleaned = symbol.replace(" ", "")
+    if len(cleaned) < 15:
+        return False
+    first_digit = next((idx for idx, ch in enumerate(cleaned) if ch.isdigit()), None)
+    if first_digit is None or len(cleaned) < first_digit + 15:
+        return False
+    expiry_segment = cleaned[first_digit : first_digit + 6]
+    right_segment = cleaned[first_digit + 6]
+    strike_segment = cleaned[first_digit + 7 : first_digit + 15]
+    return expiry_segment.isdigit() and right_segment in {"C", "P"} and strike_segment.isdigit()
+
+
+def _extract_expiration_list(chain: Any) -> Set[str]:
+    expirations: Set[str] = set()
+
+    def add_value(value: Any) -> None:
+        if value is None:
+            return
+        if isinstance(value, str):
+            normalized = value.strip()
+            if not normalized:
+                return
+            if _looks_like_occ(normalized):
+                parsed = _parse_occ_symbol(normalized)
+                expiry = parsed.get("expiry")
+                if expiry:
+                    expirations.add(expiry)
+                return
+            if len(normalized) == 10 and normalized[4] == "-":
+                expirations.add(normalized.replace("-", ""))
+                return
+            if len(normalized) == 8 and normalized.isdigit():
+                expirations.add(normalized)
+                return
+            try:
+                # Support ISO strings like '2024-12-20T00:00:00Z'.
+                parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+            except ValueError:
+                parsed = None
+            if parsed:
+                expirations.add(parsed.strftime("%Y%m%d"))
+                return
+            digits_only = "".join(ch for ch in normalized if ch.isdigit())
+            if len(digits_only) >= 8:
+                candidate = digits_only[:8]
                 try:
-                    # Prefer the latest execution fill time if available
-                    if trade.fills:
-                        latest_fill_time = max(
-                            (f.time for f in trade.fills if getattr(f, "time", None)),
-                            default=None
-                        )
-                        if latest_fill_time:
-                            return latest_fill_time
-                    # Fallback: use latest trade log event time if available
-                    if getattr(trade, "log", None):
-                        log_times = [getattr(l, "time", None) for l in trade.log if getattr(l, "time", None)]
-                        if log_times:
-                            return max(log_times)
-                    # Final fallback: epoch (tz-aware) to keep sorting stable
-                    return datetime.fromtimestamp(0).astimezone()
-                except Exception:
-                    # Defensive fallback in case of unexpected structures
-                    return datetime.fromtimestamp(0).astimezone()
+                    datetime.strptime(candidate, "%Y%m%d")
+                except ValueError:
+                    pass
+                else:
+                    expirations.add(candidate)
+                    return
+            return
+        if isinstance(value, date):
+            expirations.add(value.strftime("%Y%m%d"))
+            return
+        if isinstance(value, datetime):
+            expirations.add(value.strftime("%Y%m%d"))
+            return
 
-            # Sort trades, most recent first.
-            sorted_trades = sorted(all_trades, key=get_latest_fill_time, reverse=True)
-            
-            recent_trades = sorted_trades[:count]
-            
-            unpacked_trades = []
-            for trade in recent_trades:
-                contract = trade.contract
-                order = trade.order
-                status = trade.orderStatus
+    def visit(obj: Any, key_hint: Optional[str] = None) -> None:
+        if obj is None:
+            return
+        if isinstance(obj, str):
+            add_value(obj)
+            return
+        if isinstance(obj, (list, tuple, set)):
+            for item in obj:
+                visit(item, key_hint)
+            return
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if isinstance(key, str) and _looks_like_occ(key.strip()):
+                    parsed = _parse_occ_symbol(key.strip())
+                    expiry = parsed.get("expiry")
+                    if expiry:
+                        expirations.add(expiry)
+                lower_key = key.lower()
+                if any(token in lower_key for token in ("exp", "expiry", "maturity")):
+                    visit(value, lower_key)
+                else:
+                    visit(value, lower_key)
+            return
 
-                trade_data = {
-                    'symbol': contract.symbol,
-                    'secType': contract.secType,
-                    'action': order.action,
-                    'quantity': order.totalQuantity,
-                    'orderType': order.orderType,
-                    'status': status.status,
-                    'filled': status.filled,
-                    'avgFillPrice': status.avgFillPrice,
-                    'lastFillTime': get_latest_fill_time(trade).isoformat() if status.status == 'Filled' else None,
-                    'description': '',
-                    'orderId': getattr(order, 'orderId', None),
-                    'permId': getattr(order, 'permId', None),
-                }
+        # Handle pydantic models / dataclasses with model_dump or dict representations
+        if hasattr(obj, "model_dump") and callable(obj.model_dump):
+            visit(obj.model_dump(), key_hint)
+            return
+        if hasattr(obj, "dict") and callable(obj.dict):
+            visit(obj.dict(), key_hint)
+            return
+        if hasattr(obj, "__dict__"):
+            visit(vars(obj), key_hint)
+            return
 
-                if isinstance(contract, Option):
-                    trade_data['description'] = f"{contract.lastTradeDateOrContractMonth} {contract.strike} {contract.right}"
-                elif isinstance(contract, Stock):
-                    trade_data['description'] = 'Stock'
-                elif isinstance(contract, Forex):
-                    trade_data['description'] = 'Forex'
+        # Pull known attributes lazily
+        for attr in ("expiration_dates", "expiration_date", "expiry", "expiration", "last_trade_date"):
+            if hasattr(obj, attr):
+                visit(getattr(obj, attr), attr)
 
-                unpacked_trades.append(trade_data)
-                
-            return unpacked_trades
-        except Exception as e:
-            print(f"Error fetching recent orders: {e}")
-            traceback.print_exc()
-            raise
+        # If we reached a scalar and the key hinted at expiration, try to add it
+        if key_hint and any(token in key_hint for token in ("exp", "expiry", "maturity")):
+            add_value(obj)
+
+    visit(chain)
+    return expirations
