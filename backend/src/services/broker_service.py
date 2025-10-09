@@ -23,8 +23,8 @@ async def place_strategy_order(order_request: StrategyOrderRequest):
             
         trader = await connection_manager.get_trader()
         
-        # IBTrader's place_strategy_order expects YYYYMMDD format
-        expiry_date_ib_format = order_request.expiration_date.replace('-', '')
+        # Broker implementation expects YYYYMMDD format
+        expiry_date_broker_format = order_request.expiration_date.replace('-', '')
         
         # Enrich leg data for IBTrader
         enriched_legs = []
@@ -33,7 +33,7 @@ async def place_strategy_order(order_request: StrategyOrderRequest):
                 'action': leg.action,
                 'strike': leg.strike,
                 'right': leg.right,
-                'expiry_date': expiry_date_ib_format,
+                'expiry_date': expiry_date_broker_format,
                 'quantity': 1 # Ratio within the spread is 1:1
             })
 
@@ -53,6 +53,8 @@ async def place_strategy_order(order_request: StrategyOrderRequest):
                     'execution_recommendations': gv.get('execution_recommendations'),
                     'rationale': gv.get('rationale'),
                     'sources': gv.get('sources'),
+                    'actionable_ideas': gv.get('actionable_ideas') or data.get('actionable_ideas'),
+                    'risk_factors': gv.get('risk_factors') or data.get('risk_factors'),
                 }
                 # If everything is None, treat as no insights
                 if not any(v is not None for v in insights_to_store.values()):
@@ -65,7 +67,8 @@ async def place_strategy_order(order_request: StrategyOrderRequest):
             symbol=order_request.ticker,
             legs_data=enriched_legs,
             size=order_size,
-            order_type='MKT'
+            order_type='MKT',
+            open_position=True,
         )
 
         if trade and hasattr(trade, 'orderStatus') and trade.orderStatus:
@@ -76,11 +79,11 @@ async def place_strategy_order(order_request: StrategyOrderRequest):
                 gpt_context = f" (AI Bias: {bias})"
                 
             # Try to extract identifiers from the IB trade object
-            ib_order_id = None
-            ib_perm_id = None
+            broker_order_id = None
+            broker_perm_id = None
             try:
-                ib_order_id = getattr(getattr(trade, 'order', None), 'orderId', None)
-                ib_perm_id = getattr(getattr(trade, 'order', None), 'permId', None)
+                broker_order_id = getattr(getattr(trade, 'order', None), 'orderId', None)
+                broker_perm_id = getattr(getattr(trade, 'order', None), 'permId', None)
             except Exception:
                 pass
 
@@ -96,8 +99,8 @@ async def place_strategy_order(order_request: StrategyOrderRequest):
                         'remaining': trade.orderStatus.remaining,
                         'message': f"Order for {order_request.size} {order_request.ticker} strategy sent{gpt_context}.",
                     },
-                    ib_order_id=ib_order_id,
-                    ib_perm_id=ib_perm_id,
+                    broker_order_id=broker_order_id,
+                    broker_perm_id=broker_perm_id,
                 )
                 tracking_id = tracking.get('id')
             except Exception as _e:
@@ -112,8 +115,8 @@ async def place_strategy_order(order_request: StrategyOrderRequest):
                 "remaining": trade.orderStatus.remaining,
                 "gpt_insights_included": bool(insights_to_store),
                 "tracking_id": tracking_id,
-                "ib_order_id": ib_order_id,
-                "ib_perm_id": ib_perm_id,
+                "broker_order_id": broker_order_id,
+                "broker_perm_id": broker_perm_id,
             }
         else:
             return {"status": "error", "message": "Failed to place order or get status from broker."}
