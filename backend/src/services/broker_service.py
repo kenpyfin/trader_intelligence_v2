@@ -45,20 +45,19 @@ async def place_strategy_order(order_request: StrategyOrderRequest):
             )
             if latest_verdict and isinstance(latest_verdict.get('data'), dict):
                 data = latest_verdict['data']
-                gv = data.get('gpt_verdict') or {}
-                # Build a compact snapshot structure expected by tracking service
-                insights_to_store = {
-                    'final_bias': data.get('final_bias') or gv.get('final_bias'),
-                    'summary_html': gv.get('summary_html'),
-                    'execution_recommendations': gv.get('execution_recommendations'),
-                    'rationale': gv.get('rationale'),
-                    'sources': gv.get('sources'),
-                    'actionable_ideas': gv.get('actionable_ideas') or data.get('actionable_ideas'),
-                    'risk_factors': gv.get('risk_factors') or data.get('risk_factors'),
-                }
-                # If everything is None, treat as no insights
-                if not any(v is not None for v in insights_to_store.values()):
-                    insights_to_store = None
+                # If a full gpt_verdict object exists in the saved analysis, use it directly.
+                # This ensures all guidance (entry/exit signals, etc.) is preserved.
+                if data.get('gpt_verdict') and isinstance(data['gpt_verdict'], dict):
+                    insights_to_store = data['gpt_verdict']
+                else:
+                    # Fallback to creating a minimal guidance object if there's no full gpt_verdict
+                    insights_to_store = {
+                        'final_bias': data.get('final_bias'),
+                        'actionable_ideas': data.get('actionable_ideas'),
+                        'risk_factors': data.get('risk_factors'),
+                    }
+                    if not any(v is not None for v in insights_to_store.values()):
+                        insights_to_store = None
 
         # For credit spreads, the order size must be negative (to SELL the spread)
         order_size = -order_request.size if order_request.is_credit_spread else order_request.size
