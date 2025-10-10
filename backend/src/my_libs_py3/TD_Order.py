@@ -88,7 +88,9 @@ class AlpacaTrader:
 
     async def get_account_summary(self):
         await self.connect()
-        return await self.client.account_summary()
+        summary = await self.client.account_summary()
+        print(f"DEBUG(TD_Order): get_account_summary response: {summary}")
+        return summary
 
     async def get_account_details(self) -> Dict[str, Optional[float]]:
         """
@@ -97,6 +99,7 @@ class AlpacaTrader:
         await self.connect()
         summary_items = await self.get_account_summary()
         summary_dict = {item.tag: item.value for item in summary_items}
+        print(f"DEBUG(TD_Order): get_account_details summary_dict: {summary_dict}")
 
         equity = _maybe_float(summary_dict.get("EquityWithLoanValue"))
         last_equity = _maybe_float(
