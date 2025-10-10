@@ -92,26 +92,30 @@ class AlpacaTrader:
 
     async def get_account_details(self) -> Dict[str, Optional[float]]:
         """
-        Fetches the raw Alpaca account object and returns a dictionary of key financial metrics.
+        Fetches key financial metrics from the account summary.
         """
         await self.connect()
-        account = await self.client.get_account()
-        if not account:
-            return {}
+        summary_items = await self.get_account_summary()
+        summary_dict = {item.tag: item.value for item in summary_items}
 
-        equity = _maybe_float(getattr(account, 'equity', None))
-        last_equity = _maybe_float(getattr(account, 'last_equity', None))
+        equity = _maybe_float(summary_dict.get("EquityWithLoanValue"))
+        last_equity = _maybe_float(
+            summary_dict.get("last_equity")
+            or summary_dict.get("PreviousDayEquityWithLoanValue")
+            or summary_dict.get("LastEquityWithLoanValue")
+        )
+
         pnl_today = None
         if equity is not None and last_equity is not None:
             pnl_today = equity - last_equity
-            
+
         return {
-            'total_account_value': equity,
-            'pnl_today': pnl_today,
-            'unrealized_pnl': _maybe_float(getattr(account, 'unrealized_pl', None)),
-            'realized_pnl_today': _maybe_float(getattr(account, 'realized_pl', None)),
-            'available_cash': _maybe_float(getattr(account, 'cash', None)),
-            'buying_power': _maybe_float(getattr(account, 'buying_power', None)),
+            "total_account_value": equity,
+            "pnl_today": pnl_today,
+            "unrealized_pnl": _maybe_float(summary_dict.get("UnrealizedPnL")),
+            "realized_pnl_today": _maybe_float(summary_dict.get("RealizedPnL")),
+            "available_cash": _maybe_float(summary_dict.get("TotalCashValue") or summary_dict.get("CashBalance")),
+            "buying_power": _maybe_float(summary_dict.get("BuyingPower")),
         }
 
     async def get_position_by_symbol(self, symbol) -> float:
