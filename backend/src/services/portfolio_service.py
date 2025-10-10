@@ -148,9 +148,9 @@ async def get_recent_orders_service():
             print("WARN: Recent orders request timed out, returning empty list")
             recent_orders = []
         except Exception as e:
-            # Handle ib_insync internal errors like "completed orders request timed out"
+            # Handle broker internal timeouts like "completed orders request timed out"
             if "completed orders" in str(e).lower() or "timeout" in str(e).lower():
-                print(f"WARN: ib_insync internal timeout ({e}), returning empty orders list")
+                print(f"WARN: Broker recent-orders request timed out ({e}), returning empty list")
                 recent_orders = []
             else:
                 raise
@@ -204,7 +204,8 @@ async def close_strategy(request: CloseStrategyRequest):
             symbol=underlying_symbol,
             legs_data=legs_data,
             size=strategy_size,  # Positive size since action is already set in legs
-            order_type='MKT'
+            order_type='MKT',
+            open_position=False,
         )
         
         # Briefly poll for a status update without cancelling on timeout
