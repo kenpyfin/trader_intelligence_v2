@@ -11,6 +11,13 @@ import logging
 import os
 import io
 import requests
+import asyncio
+import numpy as np
+from datetime import datetime, timedelta
+import logging
+import os
+import io
+import requests
 try:
     from airflow.models import Variable
 except Exception:  # Catch broader exceptions if Airflow is present but fails to init
@@ -185,7 +192,7 @@ class PriceDataFetcher:
             return df
 
     def get_price_data(self, tic_list, method, start_date=None, end_date=None, back_day=90, max_retries=2, last_record=False, fmp_switch=False, fall_back=True, frequency=None):
-        valid_methods = ["minute", "day", "self_minute", "td_data", "intraday", "minute_to_day", "fmp","realtimedata", "finviz","ib"]
+        valid_methods = ["minute", "day", "self_minute", "td_data", "intraday", "minute_to_day", "alpaca","realtimedata", "finviz","ib"]
         if method not in valid_methods:
             raise ValueError(f"Method '{method}' not correct. Supported methods: {', '.join(valid_methods)}")
 
@@ -205,8 +212,8 @@ class PriceDataFetcher:
         elif method in ["td_data", "intraday", "realtimedata"]:
             frequency = 'd' if method in ["td_data","realtimedata"] else '10m'
             return self._query_finviz(tic_list, frequency, self.start_date, self.end_date, last_record, max_retries)
-        elif method == "fmp":
-            return self._query_fmp(tic_list, start_date, end_date, max_retries)
+        elif method == "alpaca":
+            return self._query_alpaca(tic_list, start_date, end_date, max_retries)
         elif method == "finviz":
              valid_finviz_frequencies = ["1m", "3m", "5m", "10m" ,"15m", "30m", "1h", "d", "w", "m"]
              if frequency is None or frequency not in valid_finviz_frequencies:
@@ -324,16 +331,36 @@ class PriceDataFetcher:
                     print(f"Retry {attempt}/{max_retries} for {ticker} due to error: {e}. Retrying in {retry_delay} seconds...")
                     time.sleep(retry_delay)
 
-    def _query_fmp(self, tic_list, start_date, end_date, max_retries):
-        if max_retries != 0:
-            logging.info("mongo method doesn't have retry yet")
-        result = pd.DataFrame()
+    def _query_alpaca(self, tic_list, start_date, end_date, max_retries):
+        if max_retries > 0:
+            logging.info("Alpaca query retry logic not implemented yet.")
+
+        # IBTrader is an alias for AlpacaTrader
+        trader = IBTrader() if self.trader is None else self.trader
+        
+        all_data = []
         for tic in tic_list:
-            data = self.fmp_client.historical_data(tic, start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
-            result = pd.concat([result, data], ignore_index=True)
-        result["TimeStamp"] = result["date"]
-        result["Close"] = result["adjClose"]
-        result = result.drop(columns=['close', "date"])
+            try:
+                # Use asyncio.run() to call the async method from this sync function.
+                # Alpaca expects ISO 8601 format for start/end.
+                df = asyncio.run(trader.get_historical_data_df(
+                    symbol=tic,
+                    start=start_date.isoformat(),
+                    end=end_date.isoformat(),
+                    timeframe='1Day' # Assuming daily data for now
+                ))
+                
+                if not df.empty:
+                    df["Ticker"] = tic
+                    all_data.append(df)
+            except Exception as e:
+                logging.error(f"Failed to fetch data for {tic} from Alpaca: {e}")
+
+        if not all_data:
+            return pd.DataFrame()
+
+        result = pd.concat(all_data, ignore_index=True)
+        # The DataFrame from get_historical_data_df should already have the correct column names
         result = self._calculate_returns(result)
         return result
 

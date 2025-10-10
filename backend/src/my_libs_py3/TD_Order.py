@@ -504,6 +504,40 @@ class AlpacaTrader:
         envelopes = [_alpaca_order_to_trade(order) for order in orders]
         return [_trade_to_summary_dict(env) for env in envelopes]
 
+    async def get_historical_data_df(self, symbol: str, start: str, end: str, timeframe: str = "1Day") -> pd.DataFrame:
+        """
+        Fetches historical data from Alpaca and returns a pandas DataFrame.
+        """
+        await self.connect()
+        contract = _stock_contract(symbol)
+        
+        # This assumes the underlying client supports start/end, which is standard.
+        bars = await self.client.req_historical_data(
+            contract, start=start, end=end, timeframe=timeframe
+        )
+
+        if not bars:
+            return pd.DataFrame()
+
+        # Convert bars to DataFrame, assuming standard bar attributes (t, o, h, l, c, v)
+        # The Alpaca V2 API returns t, o, h, l, c, v, n, vw.
+        df = pd.DataFrame([
+            {
+                "TimeStamp": getattr(bar, 't', None),
+                "Open": getattr(bar, 'o', None),
+                "High": getattr(bar, 'h', None),
+                "Low": getattr(bar, 'l', None),
+                "Close": getattr(bar, 'c', None),
+                "Volume": getattr(bar, 'v', None),
+            } for bar in bars
+        ])
+        
+        if not df.empty and 'TimeStamp' in df.columns:
+            # The timestamp is typically timezone-aware (UTC) from Alpaca
+            df['TimeStamp'] = pd.to_datetime(df['TimeStamp'])
+        
+        return df
+
     async def get_option_chain_df(self, symbol: str, expiration_date: str) -> pd.DataFrame:
         """
         Fetches the option chain for a specific expiration date from Alpaca
