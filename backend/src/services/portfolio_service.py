@@ -89,7 +89,7 @@ async def get_grouped_open_positions():
         "market_value": account_details.get('total_account_value'),
         "unrealized_pnl": account_details.get('unrealized_pnl'),
         "realized_pnl_today": account_details.get('realized_pnl_today'),
-        "available_cash": account_details.get('available_cash'),
+        "available_cash": account_details.get('buying_power'),
         "pnl_today": account_details.get('pnl_today'),
     }
     
