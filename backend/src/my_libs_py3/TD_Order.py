@@ -90,6 +90,30 @@ class AlpacaTrader:
         await self.connect()
         return await self.client.account_summary()
 
+    async def get_account_details(self) -> Dict[str, Optional[float]]:
+        """
+        Fetches the raw Alpaca account object and returns a dictionary of key financial metrics.
+        """
+        await self.connect()
+        account = await self.client.get_account()
+        if not account:
+            return {}
+
+        equity = _maybe_float(getattr(account, 'equity', None))
+        last_equity = _maybe_float(getattr(account, 'last_equity', None))
+        pnl_today = None
+        if equity is not None and last_equity is not None:
+            pnl_today = equity - last_equity
+            
+        return {
+            'total_account_value': equity,
+            'pnl_today': pnl_today,
+            'unrealized_pnl': _maybe_float(getattr(account, 'unrealized_pl', None)),
+            'realized_pnl_today': _maybe_float(getattr(account, 'realized_pl', None)),
+            'available_cash': _maybe_float(getattr(account, 'cash', None)),
+            'buying_power': _maybe_float(getattr(account, 'buying_power', None)),
+        }
+
     async def get_position_by_symbol(self, symbol) -> float:
         await self.connect()
         positions = await self.client.req_positions()

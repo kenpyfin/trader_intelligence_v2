@@ -319,13 +319,28 @@ const PortfolioPage = () => {
   const PortfolioSummary = ({ summary }) => {
     if (!summary) return null;
 
+    const pnlTodayColor = summary.pnl_today >= 0 ? 'green' : 'red';
+    const unrealizedPnlColor = summary.unrealized_pnl >= 0 ? 'green' : 'red';
+
     return (
         <div style={{ border: '1px solid #ddd', borderRadius: '8px', padding: '20px', marginBottom: '24px', background: '#f8f9fa' }}>
             <h2 style={{ marginTop: 0, marginBottom: '16px' }}>Portfolio Overview</h2>
-            <div style={{ display: 'flex', justifyContent: 'space-around', fontSize: '1.2em' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '16px', fontSize: '1.1em' }}>
                 <div>
-                    <span style={{ color: '#666', marginRight: '10px' }}>Total Market Value:</span>
-                    <strong>${formatCurrency(summary.market_value)}</strong>
+                    <div style={{ color: '#666', fontSize: '0.9em' }}>Total Account Value</div>
+                    <strong style={{ fontSize: '1.2em' }}>${formatCurrency(summary.market_value)}</strong>
+                </div>
+                <div>
+                    <div style={{ color: '#666', fontSize: '0.9em' }}>P/L Today</div>
+                    <strong style={{ fontSize: '1.2em', color: pnlTodayColor }}>${formatCurrency(summary.pnl_today)}</strong>
+                </div>
+                <div>
+                    <div style={{ color: '#666', fontSize: '0.9em' }}>Unrealized P/L</div>
+                    <strong style={{ fontSize: '1.2em', color: unrealizedPnlColor }}>${formatCurrency(summary.unrealized_pnl)}</strong>
+                </div>
+                <div>
+                    <div style={{ color: '#666', fontSize: '0.9em' }}>Available Cash</div>
+                    <strong style={{ fontSize: '1.2em' }}>${formatCurrency(summary.available_cash)}</strong>
                 </div>
             </div>
         </div>

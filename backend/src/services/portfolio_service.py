@@ -60,10 +60,10 @@ async def get_grouped_open_positions():
             positions_df = await asyncio.wait_for(trader.open_positions(), timeout=30.0)
         
         try:
-            account_summary_list = await asyncio.wait_for(trader.get_account_summary(), timeout=30.0)
+            account_details = await asyncio.wait_for(trader.get_account_details(), timeout=30.0)
         except asyncio.TimeoutError:
             print("WARN: Account summary request timed out, using empty summary")
-            account_summary_list = []
+            account_details = {}
             
     except Exception as e:
         print(f"ERROR: Failed to fetch positions data: {e}")
@@ -84,26 +84,13 @@ async def get_grouped_open_positions():
     _coalesce_column(positions_df, 'marketValue', ['marketValue', 'market_value', 'marketvalue'], default=0)
     _coalesce_column(positions_df, 'unrealizedPNL', ['unrealizedPNL', 'unrealizedPnl', 'unrealizedPnL', 'unrealized_pnl', 'unrealized'], default=0)
         
-    # Calculate portfolio-wide summary from account summary
-    market_value = 0.0
-    unrealized_pnl = 0.0
-    # Find the summary values for USD currency from the 'All' aggregate account
-    for val in account_summary_list:
-        if val.account == 'All' and val.currency == 'USD':
-            if val.tag == 'NetLiquidationByCurrency':
-                try:
-                    market_value = float(val.value)
-                except (ValueError, TypeError):
-                    pass # Keep default 0.0 if value is not a valid float
-            elif val.tag == 'UnrealizedPnL':
-                try:
-                    unrealized_pnl = float(val.value)
-                except (ValueError, TypeError):
-                    pass # Keep default 0.0 if value is not a valid float
-
+    # Build portfolio summary from account details
     portfolio_summary = {
-        "market_value": market_value,
-        "unrealized_pnl": unrealized_pnl
+        "market_value": account_details.get('total_account_value'),
+        "unrealized_pnl": account_details.get('unrealized_pnl'),
+        "realized_pnl_today": account_details.get('realized_pnl_today'),
+        "available_cash": account_details.get('available_cash'),
+        "pnl_today": account_details.get('pnl_today'),
     }
     
     # Group individual positions
