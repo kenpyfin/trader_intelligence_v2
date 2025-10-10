@@ -88,9 +88,7 @@ class AlpacaTrader:
 
     async def get_account_summary(self):
         await self.connect()
-        summary = await self.client.account_summary()
-        print(f"DEBUG(TD_Order): get_account_summary response: {summary}")
-        return summary
+        return await self.client.account_summary()
 
     async def get_account_details(self) -> Dict[str, Optional[float]]:
         """
@@ -99,9 +97,8 @@ class AlpacaTrader:
         await self.connect()
         summary_items = await self.get_account_summary()
         summary_dict = {item.tag: item.value for item in summary_items}
-        print(f"DEBUG(TD_Order): get_account_details summary_dict: {summary_dict}")
 
-        equity = _maybe_float(summary_dict.get("EquityWithLoanValue"))
+        equity = _maybe_float(summary_dict.get("NetLiquidationByCurrency"))
         last_equity = _maybe_float(
             summary_dict.get("last_equity")
             or summary_dict.get("PreviousDayEquityWithLoanValue")
@@ -118,7 +115,7 @@ class AlpacaTrader:
             "unrealized_pnl": _maybe_float(summary_dict.get("UnrealizedPnL")),
             "realized_pnl_today": _maybe_float(summary_dict.get("RealizedPnL")),
             "available_cash": _maybe_float(summary_dict.get("TotalCashValue") or summary_dict.get("CashBalance")),
-            "buying_power": _maybe_float(summary_dict.get("BuyingPower")),
+            "buying_power": _maybe_float(summary_dict.get("AvailableFunds")),
         }
 
     async def get_position_by_symbol(self, symbol) -> float:
