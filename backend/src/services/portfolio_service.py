@@ -75,8 +75,15 @@ async def get_grouped_open_positions():
         }
 
     if positions_df.empty:
+        portfolio_summary = {
+            "market_value": account_details.get('total_account_value'),
+            "unrealized_pnl": account_details.get('unrealized_pnl'),
+            "realized_pnl_today": account_details.get('realized_pnl_today'),
+            "available_cash": account_details.get('buying_power'),
+            "pnl_today": account_details.get('pnl_today'),
+        }
         return {
-            "summary": {"market_value": 0, "unrealized_pnl": 0},
+            "summary": _sanitize_for_json(portfolio_summary),
             "positions": {"options": {}, "stocks": [], "others": []}
         }
 

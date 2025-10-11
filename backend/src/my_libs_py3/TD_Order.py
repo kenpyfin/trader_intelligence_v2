@@ -95,11 +95,13 @@ class AlpacaTrader:
         Fetches key financial metrics from the account summary.
         """
         await self.connect()
-        summary_dict = await self.get_account_summary()
-        print(f"DEBUG(TD_Order): Received account summary from broker: {summary_dict}")
+        summary_items = await self.get_account_summary()
+        print(f"DEBUG(TD_Order): Received account summary from broker: {summary_items}")
 
-        if not isinstance(summary_dict, dict):
-            summary_dict = {}
+        # The summary is a list of objects with tag and value attributes.
+        summary_dict = {
+            item.tag: item.value for item in summary_items if hasattr(item, 'tag') and hasattr(item, 'value')
+        }
 
         equity = _maybe_float(summary_dict.get("equity"))
         last_equity = _maybe_float(summary_dict.get("last_equity"))
