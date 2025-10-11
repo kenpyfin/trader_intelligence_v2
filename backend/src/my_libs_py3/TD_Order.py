@@ -92,19 +92,16 @@ class AlpacaTrader:
 
     async def get_account_details(self) -> Dict[str, Optional[float]]:
         """
-        Fetches key financial metrics from the account summary.
+        Fetches key financial metrics from the account summary. For Alpaca, this is a single object.
         """
         await self.connect()
-        summary_items = await self.get_account_summary()
-        print(f"DEBUG(TD_Order): Received account summary from broker: {summary_items}")
+        summary_obj = await self.get_account_summary()
+        print(f"DEBUG(TD_Order): Received account summary from broker: {summary_obj}")
 
-        # The summary is a list of objects with tag and value attributes.
-        summary_dict = {
-            item.tag: item.value for item in summary_items if hasattr(item, 'tag') and hasattr(item, 'value')
-        }
-
-        equity = _maybe_float(summary_dict.get("equity"))
-        last_equity = _maybe_float(summary_dict.get("last_equity"))
+        # The Alpaca summary is a single object with attributes, not an IBKR-style list.
+        # We can access attributes directly.
+        equity = _maybe_float(getattr(summary_obj, "equity", None))
+        last_equity = _maybe_float(getattr(summary_obj, "last_equity", None))
 
         pnl_today = None
         if equity is not None and last_equity is not None:
@@ -113,10 +110,10 @@ class AlpacaTrader:
         return {
             "total_account_value": equity,
             "pnl_today": pnl_today,
-            "unrealized_pnl": _maybe_float(summary_dict.get("unrealized_pl")),
-            "realized_pnl_today": _maybe_float(summary_dict.get("realized_pl")),
-            "available_cash": _maybe_float(summary_dict.get("cash")),
-            "buying_power": _maybe_float(summary_dict.get("buying_power")),
+            "unrealized_pnl": _maybe_float(getattr(summary_obj, "unrealized_pl", None)),
+            "realized_pnl_today": _maybe_float(getattr(summary_obj, "realized_pl", None)),
+            "available_cash": _maybe_float(getattr(summary_obj, "cash", None)),
+            "buying_power": _maybe_float(getattr(summary_obj, "buying_power", None)),
         }
 
     async def get_position_by_symbol(self, symbol) -> float:

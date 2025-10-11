@@ -44,55 +44,38 @@ def _coalesce_column(df, target_name, candidates, default=0):
 
 async def get_grouped_open_positions():
     """
-    Fetches all open positions from the broker, calculates portfolio summary metrics,
-    and groups positions by contract type. Options are further grouped by underlying symbol.
+    Fetches all open positions and account summary from the broker. It fetches them
+    independently so that a failure in one does not prevent the other from being returned.
     """
+    trader = await connection_manager.get_trader()
+    account_details = {}
+    positions_df = pd.DataFrame()
+
+    # Step 1: Fetch account summary.
     try:
-        trader = await connection_manager.get_trader()
-        
-        # Add timeout wrapper for the TWS API calls that commonly timeout
-        try:
-            positions_df = await asyncio.wait_for(trader.open_positions(), timeout=45.0)
-        except asyncio.TimeoutError:
-            print("WARN: Positions request timed out, resetting connection and retrying...")
-            await connection_manager.reset_connection()
-            trader = await connection_manager.get_trader()
-            positions_df = await asyncio.wait_for(trader.open_positions(), timeout=30.0)
-        
-        try:
-            account_details = await asyncio.wait_for(trader.get_account_details(), timeout=30.0)
-            print(f"DEBUG(PortfolioSvc): Fetched account details: {account_details}")
-        except asyncio.TimeoutError:
-            print("WARN: Account summary request timed out, using empty summary")
-            account_details = {}
-            
+        account_details = await asyncio.wait_for(trader.get_account_details(), timeout=30.0)
+        print(f"DEBUG(PortfolioSvc): Fetched account details: {account_details}")
     except Exception as e:
-        print(f"ERROR: Failed to fetch positions data: {e}")
-        # Return empty data structure instead of failing completely
-        return {
-            "summary": {"market_value": 0, "unrealized_pnl": 0},
-            "positions": {"options": {}, "stocks": [], "others": []}
-        }
+        print(f"WARN: Could not fetch account details, will use empty summary. Error: {e}")
+        account_details = {}
 
-    if positions_df.empty:
-        portfolio_summary = {
-            "market_value": account_details.get('total_account_value'),
-            "unrealized_pnl": account_details.get('unrealized_pnl'),
-            "realized_pnl_today": account_details.get('realized_pnl_today'),
-            "available_cash": account_details.get('buying_power'),
-            "pnl_today": account_details.get('pnl_today'),
-        }
-        return {
-            "summary": _sanitize_for_json(portfolio_summary),
-            "positions": {"options": {}, "stocks": [], "others": []}
-        }
+    # Step 2: Fetch open positions, with retry logic.
+    try:
+        positions_df = await asyncio.wait_for(trader.open_positions(), timeout=45.0)
+    except asyncio.TimeoutError:
+        print("WARN: Positions request timed out, resetting connection and retrying...")
+        await connection_manager.reset_connection()
+        trader = await connection_manager.get_trader()
+        try:
+            positions_df = await asyncio.wait_for(trader.open_positions(), timeout=30.0)
+        except Exception as e_retry:
+            print(f"ERROR: Failed to fetch positions on retry: {e_retry}")
+            positions_df = pd.DataFrame()
+    except Exception as e:
+        print(f"ERROR: Failed to fetch positions: {e}")
+        positions_df = pd.DataFrame()
 
-    # Normalize numeric columns from various possible source field names.
-    positions_df = positions_df.copy()
-    _coalesce_column(positions_df, 'marketValue', ['marketValue', 'market_value', 'marketvalue'], default=0)
-    _coalesce_column(positions_df, 'unrealizedPNL', ['unrealizedPNL', 'unrealizedPnl', 'unrealizedPnL', 'unrealized_pnl', 'unrealized'], default=0)
-        
-    # Build portfolio summary from account details
+    # Step 3: Always build the portfolio summary from whatever account details we have.
     portfolio_summary = {
         "market_value": account_details.get('total_account_value'),
         "unrealized_pnl": account_details.get('unrealized_pnl'),
@@ -101,29 +84,33 @@ async def get_grouped_open_positions():
         "pnl_today": account_details.get('pnl_today'),
     }
     print(f"DEBUG(PortfolioSvc): Constructed portfolio summary: {portfolio_summary}")
-    
-    # Group individual positions
+
+    # Step 4: Process positions if any were fetched.
     grouped_positions_data = {
         "options": defaultdict(list),
         "stocks": [],
         "others": []
     }
 
-    all_positions = positions_df.to_dict('records')
-
-    for pos in all_positions:
-        contract_type = pos.get('contract_type')
-        if contract_type == 'Option':
-            grouped_positions_data['options'][pos['symbol']].append(pos)
-        elif contract_type == 'Stock':
-            grouped_positions_data['stocks'].append(pos)
-        else:
-            # For futures, forex, etc.
-            grouped_positions_data['others'].append(pos)
-
+    if not positions_df.empty:
+        positions_df = positions_df.copy()
+        _coalesce_column(positions_df, 'marketValue', ['marketValue', 'market_value', 'marketvalue'], default=0)
+        _coalesce_column(positions_df, 'unrealizedPNL', ['unrealizedPNL', 'unrealizedPnl', 'unrealizedPnL', 'unrealized_pnl', 'unrealized'], default=0)
+        
+        all_positions = positions_df.to_dict('records')
+        for pos in all_positions:
+            contract_type = pos.get('contract_type')
+            if contract_type == 'Option':
+                grouped_positions_data['options'][pos['symbol']].append(pos)
+            elif contract_type == 'Stock':
+                grouped_positions_data['stocks'].append(pos)
+            else:
+                grouped_positions_data['others'].append(pos)
+    
     # Convert defaultdict to regular dict for JSON serialization
     grouped_positions_data['options'] = dict(grouped_positions_data['options'])
     
+    # Step 5: Combine and return.
     response_data = {
         "summary": portfolio_summary,
         "positions": grouped_positions_data
