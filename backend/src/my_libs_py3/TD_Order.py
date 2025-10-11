@@ -92,28 +92,43 @@ class AlpacaTrader:
 
     async def get_account_details(self) -> Dict[str, Optional[float]]:
         """
-        Fetches key financial metrics from the account summary. For Alpaca, this is a single object.
+        Fetches key financial metrics from the account summary.
         """
         await self.connect()
         summary_obj = await self.get_account_summary()
         print(f"DEBUG(TD_Order): Received account summary from broker: {summary_obj}")
 
-        # The Alpaca summary is a single object with attributes, not an IBKR-style list.
-        # We can access attributes directly.
-        equity = _maybe_float(getattr(summary_obj, "equity", None))
-        last_equity = _maybe_float(getattr(summary_obj, "last_equity", None))
+        if not isinstance(summary_obj, list):
+            # Fallback for Alpaca's direct object response
+            equity = _maybe_float(getattr(summary_obj, "equity", None))
+            last_equity = _maybe_float(getattr(summary_obj, "last_equity", None))
+            pnl_today = None
+            if equity is not None and last_equity is not None:
+                pnl_today = equity - last_equity
+            return {
+                "total_account_value": equity,
+                "pnl_today": pnl_today,
+                "unrealized_pnl": _maybe_float(getattr(summary_obj, "unrealized_pl", None)),
+                "realized_pnl_today": _maybe_float(getattr(summary_obj, "realized_pl", None)),
+                "available_cash": _maybe_float(getattr(summary_obj, "cash", None)),
+                "buying_power": _maybe_float(getattr(summary_obj, "buying_power", None)),
+            }
 
-        pnl_today = None
-        if equity is not None and last_equity is not None:
-            pnl_today = equity - last_equity
+        # Handle IBKR-style list of AccountValue objects
+        summary_map = {
+            item.tag: _maybe_float(item.value)
+            for item in summary_obj
+            if hasattr(item, "tag") and hasattr(item, "value")
+        }
 
+        # Map known tags to our expected dictionary keys
         return {
-            "total_account_value": equity,
-            "pnl_today": pnl_today,
-            "unrealized_pnl": _maybe_float(getattr(summary_obj, "unrealized_pl", None)),
-            "realized_pnl_today": _maybe_float(getattr(summary_obj, "realized_pl", None)),
-            "available_cash": _maybe_float(getattr(summary_obj, "cash", None)),
-            "buying_power": _maybe_float(getattr(summary_obj, "buying_power", None)),
+            "total_account_value": summary_map.get("NetLiquidationByCurrency") or summary_map.get("NetLiquidation"),
+            "pnl_today": None,  # Not directly available from this summary type
+            "unrealized_pnl": summary_map.get("UnrealizedPnL"),
+            "realized_pnl_today": summary_map.get("RealizedPnL"),
+            "available_cash": summary_map.get("AvailableFunds"),
+            "buying_power": summary_map.get("BuyingPower"),
         }
 
     async def get_position_by_symbol(self, symbol) -> float:
