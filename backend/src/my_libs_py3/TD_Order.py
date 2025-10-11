@@ -96,6 +96,7 @@ class AlpacaTrader:
         """
         await self.connect()
         summary_dict = await self.get_account_summary()
+        print(f"DEBUG(TD_Order): Received account summary from broker: {summary_dict}")
 
         if not isinstance(summary_dict, dict):
             summary_dict = {}

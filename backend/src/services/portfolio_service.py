@@ -61,6 +61,7 @@ async def get_grouped_open_positions():
         
         try:
             account_details = await asyncio.wait_for(trader.get_account_details(), timeout=30.0)
+            print(f"DEBUG(PortfolioSvc): Fetched account details: {account_details}")
         except asyncio.TimeoutError:
             print("WARN: Account summary request timed out, using empty summary")
             account_details = {}
@@ -92,6 +93,7 @@ async def get_grouped_open_positions():
         "available_cash": account_details.get('buying_power'),
         "pnl_today": account_details.get('pnl_today'),
     }
+    print(f"DEBUG(PortfolioSvc): Constructed portfolio summary: {portfolio_summary}")
     
     # Group individual positions
     grouped_positions_data = {
