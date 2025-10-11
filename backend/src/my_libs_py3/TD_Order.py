@@ -95,15 +95,13 @@ class AlpacaTrader:
         Fetches key financial metrics from the account summary.
         """
         await self.connect()
-        summary_items = await self.get_account_summary()
-        summary_dict = {item.tag: item.value for item in summary_items}
+        summary_dict = await self.get_account_summary()
 
-        equity = _maybe_float(summary_dict.get("NetLiquidationByCurrency"))
-        last_equity = _maybe_float(
-            summary_dict.get("last_equity")
-            or summary_dict.get("PreviousDayEquityWithLoanValue")
-            or summary_dict.get("LastEquityWithLoanValue")
-        )
+        if not isinstance(summary_dict, dict):
+            summary_dict = {}
+
+        equity = _maybe_float(summary_dict.get("equity"))
+        last_equity = _maybe_float(summary_dict.get("last_equity"))
 
         pnl_today = None
         if equity is not None and last_equity is not None:
@@ -112,10 +110,10 @@ class AlpacaTrader:
         return {
             "total_account_value": equity,
             "pnl_today": pnl_today,
-            "unrealized_pnl": _maybe_float(summary_dict.get("UnrealizedPnL")),
-            "realized_pnl_today": _maybe_float(summary_dict.get("RealizedPnL")),
-            "available_cash": _maybe_float(summary_dict.get("TotalCashValue") or summary_dict.get("CashBalance")),
-            "buying_power": _maybe_float(summary_dict.get("AvailableFunds")),
+            "unrealized_pnl": _maybe_float(summary_dict.get("unrealized_pl")),
+            "realized_pnl_today": _maybe_float(summary_dict.get("realized_pl")),
+            "available_cash": _maybe_float(summary_dict.get("cash")),
+            "buying_power": _maybe_float(summary_dict.get("buying_power")),
         }
 
     async def get_position_by_symbol(self, symbol) -> float:
