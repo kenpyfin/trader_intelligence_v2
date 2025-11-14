@@ -634,232 +634,101 @@ def generate_holistic_conclusion(
     itm_puts = strikes[strikes > S_current]
 
 
-    # Check for AI-generated recommendations in the synthesis data
-    gpt_verdict = synthesis_data.get('gpt_verdict', {})
-    ai_recommendations = []
-    
-    # Extract strategies from GPT verdict if available
-    if isinstance(gpt_verdict, dict):
-        # Check for execution_recommendations in the GPT verdict
-        exec_recommendations = gpt_verdict.get('execution_recommendations', {})
-        if isinstance(exec_recommendations, dict):
-            # Handle primary strategy hint
-            primary_hint = exec_recommendations.get('primary_strategy')
-            if primary_hint and isinstance(primary_hint, dict):
-                strategy_hint = primary_hint
-            
-            # Handle alternative strategies
-            alt_strategies = exec_recommendations.get('alternative_strategies', [])
-            if isinstance(alt_strategies, list):
-                ai_recommendations.extend(alt_strategies)
-    
-    # Process AI recommendations into strategy objects
-    for rec in ai_recommendations:
+    def _construct_strategy_from_ai_rec(rec: Dict[str, Any]):
+        """Constructs a complete strategy object from a structured AI recommendation."""
         if not isinstance(rec, dict):
-            continue
-            
-        rec_type = rec.get('type')
-        if not rec_type:
-            continue
-            
-        # Build strategy from the recommendation
-        strategy = _build_strategy_from_name(rec_type)
-        if strategy:
-            # Add additional metadata from the recommendation
-            strategy.update({
-                'confidence': rec.get('confidence', 'Medium'),
-                'description': rec.get('description', ''),
-                'time_horizon': rec.get('time_horizon'),
-                'risk_level': rec.get('risk_level')
-            })
-            # Add to recommended strategies
-            recommended_strategies.append(strategy)
-    
-    # Add the primary strategy to the recommended strategies if it's not already there
-    # This is handled at the end of the function.
-    # if primary_strategy not in recommended_strategies:
-    #     recommended_strategies.append(primary_strategy)
-
-    def _normalize_strategy_hint_label(label: Optional[str]) -> Optional[str]:
-        if not label:
             return None
-        norm = str(label).strip().lower()
-        mapping = [
-            ("iron condor", "Iron Condor"),
-            ("condor", "Iron Condor"),
-            ("short straddle", "Short Straddle"),
-            ("long straddle", "Long Straddle"),
-            ("straddle", "Long Straddle"),
-            ("bull call spread", "Bull Call Spread"),
-            ("call debit spread", "Bull Call Spread"),
-            ("bear call spread", "Bear Call Spread"),
-            ("call credit spread", "Bear Call Spread"),
-            ("bear put spread", "Bear Put Spread"),
-            ("put debit spread", "Bear Put Spread"),
-            ("bull put spread", "Bull Put Spread"),
-            ("put credit spread", "Bull Put Spread"),
-            ("cash secured put", "Cash Secured Put"),
-            ("cash-secured put", "Cash Secured Put"),
-            ("short put", "Cash Secured Put"),
-            ("long call", "Long Call"),
-            ("long put", "Long Put"),
-            ("short call", "Short Call"),
-            ("covered call", "Short Call"),
-            ("watch and wait", "Watch and Wait"),
-        ]
-        for key, canonical in mapping:
-            if key in norm:
-                return canonical
-        return None
+        
+        name = rec.get('name') or rec.get('type')
+        if not name:
+            return None
+            
+        ai_legs = rec.get('legs')
+        if not isinstance(ai_legs, list) or not ai_legs:
+            return None
 
-    def _build_strategy_from_name(name: str):
-        if name == "Iron Condor":
-            if len(otm_puts) >= 2 and len(otm_calls) >= 2:
-                return {
-                    "name": "Iron Condor",
-                    "is_credit_spread": True,
-                    "legs": [
-                        {'action': 'SELL', 'strike': float(otm_puts[-1]), 'right': 'P'},
-                        {'action': 'BUY', 'strike': float(otm_puts[-2]), 'right': 'P'},
-                        {'action': 'SELL', 'strike': float(otm_calls[0]), 'right': 'C'},
-                        {'action': 'BUY', 'strike': float(otm_calls[1]), 'right': 'C'}
-                    ]
-                }
-        elif name == "Short Straddle":
-            return {
-                "name": "Short Straddle",
-                "is_credit_spread": False,
-                "legs": [
-                    {'action': 'SELL', 'strike': float(atm_strike), 'right': 'C'},
-                    {'action': 'SELL', 'strike': float(atm_strike), 'right': 'P'}
-                ]
-            }
-        elif name == "Long Straddle":
-            return {
-                "name": "Long Straddle",
-                "is_credit_spread": False,
-                "legs": [
-                    {'action': 'BUY', 'strike': float(atm_strike), 'right': 'C'},
-                    {'action': 'BUY', 'strike': float(atm_strike), 'right': 'P'}
-                ]
-            }
-        elif name == "Bull Put Spread":
-            if len(otm_puts) >= 2:
-                return {
-                    "name": "Bull Put Spread",
-                    "is_credit_spread": True,
-                    "legs": [
-                        {'action': 'SELL', 'strike': float(otm_puts[-1]), 'right': 'P'},
-                        {'action': 'BUY', 'strike': float(otm_puts[-2]), 'right': 'P'}
-                    ]
-                }
-        elif name == "Bull Call Spread":
-            if len(itm_calls) >= 1 and len(otm_calls) >= 1:
-                return {
-                    "name": "Bull Call Spread",
-                    "is_credit_spread": False,
-                    "legs": [
-                        {'action': 'BUY', 'strike': float(itm_calls[-1]), 'right': 'C'},
-                        {'action': 'SELL', 'strike': float(otm_calls[0]), 'right': 'C'}
-                    ]
-                }
-        elif name == "Cash Secured Put":
-            strike_value = float(otm_puts[-1]) if len(otm_puts) >= 1 else float(atm_strike * 0.95)
-            return {
-                "name": "Cash Secured Put",
-                "is_credit_spread": False,
-                "legs": [
-                    {'action': 'SELL', 'strike': strike_value, 'right': 'P'}
-                ]
-            }
-        elif name == "Long Call":
-            return {
-                "name": "Long Call",
-                "is_credit_spread": False,
-                "legs": [
-                    {'action': 'BUY', 'strike': float(atm_strike), 'right': 'C'}
-                ]
-            }
-        elif name == "Long Put":
-            return {
-                "name": "Long Put",
-                "is_credit_spread": False,
-                "legs": [
-                    {'action': 'BUY', 'strike': float(atm_strike), 'right': 'P'}
-                ]
-            }
-        elif name == "Bear Call Spread":
-            if len(otm_calls) >= 2:
-                return {
-                    "name": "Bear Call Spread",
-                    "is_credit_spread": True,
-                    "legs": [
-                        {'action': 'SELL', 'strike': float(otm_calls[0]), 'right': 'C'},
-                        {'action': 'BUY', 'strike': float(otm_calls[1]), 'right': 'C'}
-                    ]
-                }
-        elif name == "Bear Put Spread":
-            if len(itm_puts) >= 1 and len(otm_puts) >= 1:
-                return {
-                    "name": "Bear Put Spread",
-                    "is_credit_spread": False,
-                    "legs": [
-                        {'action': 'BUY', 'strike': float(itm_puts[0]), 'right': 'P'},
-                        {'action': 'SELL', 'strike': float(otm_puts[-1]), 'right': 'P'}
-                    ]
-                }
-        elif name == "Short Call":
-            strike_value = float(otm_calls[0]) if len(otm_calls) >= 1 else float(atm_strike * 1.05)
-            return {
-                "name": "Short Call",
-                "is_credit_spread": False,
-                "legs": [
-                    {'action': 'SELL', 'strike': strike_value, 'right': 'C'}
-                ]
-            }
-        elif name == "Watch and Wait":
-            return {
-                "name": "Watch and Wait",
-                "is_credit_spread": False,
-                "legs": [
-                    {'action': 'WATCH', 'strike': float(atm_strike), 'right': 'SIGNAL'}
-                ]
-            }
-        return None
+        strategy_legs = []
+        for leg in ai_legs:
+            action = leg.get('action', '').upper()
+            right = leg.get('right', '').upper()
+            offset_str = leg.get('strike_offset', '').upper()
+            
+            if not all([action in ['BUY', 'SELL', 'WATCH'], right in ['C', 'P', 'SIGNAL'], offset_str]):
+                print(f"WARNING: Skipping malformed AI leg: {leg}")
+                continue
 
-    hint_type = None
-    hint_description = ""
-    hint_confidence = None
-    hint_horizon = None
-    if isinstance(strategy_hint, dict):
-        hint_type = strategy_hint.get('type')
-        hint_description = strategy_hint.get('description') or ''
-        hint_confidence = strategy_hint.get('confidence')
-        hint_horizon = strategy_hint.get('time_horizon')
-    elif isinstance(strategy_hint, str):
-        hint_type = strategy_hint
+            strike = None
+            match = re.match(r"([A-Z]+)(\d+)", offset_str)
+            if offset_str == 'ATM':
+                strike = atm_strike
+            elif match:
+                offset_type = match.group(1)
+                offset_index = int(match.group(2)) - 1
+                if offset_index < 0: continue
 
-    normalized_hint_name = _normalize_strategy_hint_label(hint_type)
+                target_strikes = []
+                if right == 'C':
+                    if offset_type == 'ITM': target_strikes = np.flip(itm_calls)
+                    elif offset_type == 'OTM': target_strikes = otm_calls
+                elif right == 'P':
+                    if offset_type == 'ITM': target_strikes = itm_puts
+                    elif offset_type == 'OTM': target_strikes = np.flip(otm_puts)
+
+                if 0 <= offset_index < len(target_strikes):
+                    strike = target_strikes[offset_index]
+            
+            if strike is not None:
+                strategy_legs.append({'action': action, 'strike': float(strike), 'right': right})
+            else:
+                print(f"WARNING: Could not resolve strike for AI leg: {leg}")
+                return None  # Fail whole strategy if one leg fails
+
+        if not strategy_legs:
+            return None
+
+        sells = sum(1 for leg in strategy_legs if leg['action'] == 'SELL')
+        buys = sum(1 for leg in strategy_legs if leg['action'] == 'BUY')
+        is_credit_spread = sells > buys
+
+        return {
+            'name': name,
+            'is_credit_spread': is_credit_spread,
+            'legs': strategy_legs,
+            'confidence': rec.get('confidence', 'Medium'),
+            'description': rec.get('description', ''),
+            'time_horizon': rec.get('time_horizon'),
+        }
+
+    # --- Strategy Generation from AI Verdict ---
+    gpt_verdict = synthesis_data.get('gpt_verdict', {})
+    primary_strategy_rec = None
+    alt_strategy_recs = []
+    if isinstance(gpt_verdict, dict):
+        exec_recs = gpt_verdict.get('execution_recommendations', {})
+        if isinstance(exec_recs, dict):
+            primary_strategy_rec = exec_recs.get('primary_strategy')
+            alt_strategy_recs = exec_recs.get('alternative_strategies', [])
+
     hint_applied = False
-    if normalized_hint_name:
-        hinted_strategy = _build_strategy_from_name(normalized_hint_name)
-        if hinted_strategy:
-            primary_strategy = hinted_strategy
+    if primary_strategy_rec:
+        strategy = _construct_strategy_from_ai_rec(primary_strategy_rec)
+        if strategy:
+            primary_strategy = strategy
+            recommended_strategies.append(strategy)
             hint_applied = True
+            
             desc_segments = []
-            if hint_description:
-                desc_segments.append(hint_description)
-            if hint_confidence:
-                desc_segments.append(f"Confidence: {hint_confidence}.")
-            if hint_horizon:
-                desc_segments.append(f"Time horizon: {hint_horizon}.")
+            if strategy.get('description'): desc_segments.append(strategy.get('description'))
+            if strategy.get('confidence'): desc_segments.append(f"Confidence: {strategy.get('confidence')}.")
+            if strategy.get('time_horizon'): desc_segments.append(f"Time horizon: {strategy.get('time_horizon')}.")
             desc_text = " ".join(desc_segments) or "Align execution with the AI recommended approach."
-            strategy_rec += f"<p><b>AI Suggested Strategy - {normalized_hint_name}.</b> {desc_text}</p>"
-        else:
-            # We understood the hint but cannot build it with available strikes
-            strategy_rec += f"<p><b>AI Suggested Strategy - {hint_type}.</b> Unable to automatically construct matching legs with available strikes; defaulting to model-derived guidance.</p>"
-    elif hint_type:
-        strategy_rec += f"<p><b>AI Suggested Strategy - {hint_type}.</b> This configuration is not yet supported for one-click execution; falling back to model-derived guidance.</p>"
+            strategy_rec += f"<p><b>AI Suggested Strategy - {strategy['name']}.</b> {desc_text}</p>"
+
+    if isinstance(alt_strategy_recs, list):
+        for rec in alt_strategy_recs:
+            strategy = _construct_strategy_from_ai_rec(rec)
+            if strategy:
+                recommended_strategies.append(strategy)
 
     if not hint_applied:
         if final_bias == "Neutral":
