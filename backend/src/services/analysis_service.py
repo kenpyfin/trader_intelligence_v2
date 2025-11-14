@@ -626,6 +626,14 @@ def generate_holistic_conclusion(
     # Primary recommended strategy (kept for backward compatibility)
     primary_strategy = {"name": "None", "legs": [], "is_credit_spread": False, "confidence": "Medium"}
     
+    # Determine ATM and OTM strikes for constructing strategy legs
+    atm_strike = strikes[np.argmin(np.abs(strikes - S_current))] if len(strikes) > 0 else S_current
+    otm_calls = strikes[strikes > S_current]
+    itm_calls = strikes[strikes < S_current]
+    otm_puts = strikes[strikes < S_current]
+    itm_puts = strikes[strikes > S_current]
+
+
     # Check for AI-generated recommendations in the synthesis data
     gpt_verdict = synthesis_data.get('gpt_verdict', {})
     ai_recommendations = []
@@ -671,13 +679,6 @@ def generate_holistic_conclusion(
     # This is handled at the end of the function.
     # if primary_strategy not in recommended_strategies:
     #     recommended_strategies.append(primary_strategy)
-
-    # Determine ATM and OTM strikes for constructing strategy legs
-    atm_strike = strikes[np.argmin(np.abs(strikes - S_current))] if len(strikes) > 0 else S_current
-    otm_calls = strikes[strikes > S_current]
-    itm_calls = strikes[strikes < S_current]
-    otm_puts = strikes[strikes < S_current]
-    itm_puts = strikes[strikes > S_current]
 
     def _normalize_strategy_hint_label(label: Optional[str]) -> Optional[str]:
         if not label:
