@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import Plot from 'react-plotly.js';
 
@@ -59,6 +59,30 @@ const CandlestickChart = ({ plotData, ticker }) => {
   });
 
   // Overlay SMA50 and SMA200 if available
+  const sma10Idx = findCol('SMA10');
+  if (sma10Idx !== -1) {
+    traces.push({
+      x: dates,
+      y: data.map(row => row[sma10Idx]),
+      type: 'scatter',
+      mode: 'lines',
+      name: 'SMA 10',
+      line: { color: '#8c564b', width: 1.2 },
+    });
+  }
+
+  const sma20Idx = findCol('SMA20');
+  if (sma20Idx !== -1) {
+    traces.push({
+      x: dates,
+      y: data.map(row => row[sma20Idx]),
+      type: 'scatter',
+      mode: 'lines',
+      name: 'SMA 20',
+      line: { color: '#2ca02c', width: 1.2 },
+    });
+  }
+
   const sma50Idx = findCol('SMA50');
   if (sma50Idx !== -1) {
     traces.push({
@@ -68,6 +92,18 @@ const CandlestickChart = ({ plotData, ticker }) => {
       mode: 'lines',
       name: 'SMA 50',
       line: { color: '#1f77b4', width: 1.5 },
+    });
+  }
+
+  const sma100Idx = findCol('SMA100');
+  if (sma100Idx !== -1) {
+    traces.push({
+      x: dates,
+      y: data.map(row => row[sma100Idx]),
+      type: 'scatter',
+      mode: 'lines',
+      name: 'SMA 100',
+      line: { color: '#9467bd', width: 1.3 },
     });
   }
 
@@ -85,7 +121,12 @@ const CandlestickChart = ({ plotData, ticker }) => {
 
   const layout = {
     title: `${ticker} Price Chart`,
-    xaxis: { rangeslider: { visible: false } },
+    xaxis: {
+      type: 'date',
+      title: 'Date',
+      tickformat: '%Y-%m-%d',
+      rangeslider: { visible: false },
+    },
     yaxis: { title: 'Price' },
     margin: { t: 40, b: 40, l: 50, r: 20 },
     height: 420,
@@ -201,14 +242,18 @@ const MacroInsights = ({ onRateCalculated }) => {
   );
 };
 
-const StrategyOrder = ({ strategy, ticker, expirationDate, gptVerdict }) => {
-    const [isOrdering, setIsOrdering] = useState(false);
-    const [orderStatus, setOrderStatus] = useState(null);
+const StrategyOrder = ({ strategy, strategies = [], ticker, expirationDate, gptVerdict }) => {
+    const [isOrdering, setIsOrdering] = useState({});
+    const [orderStatus, setOrderStatus] = useState({});    
     const [showGptInsights, setShowGptInsights] = useState(false);
 
-    const handleExecute = async () => {
-        setIsOrdering(true);
-        setOrderStatus(null);
+    // If single strategy is passed, convert it to array for consistent handling
+    const allStrategies = strategies && strategies.length > 0 ? strategies : (strategy ? [strategy] : []);
+
+    const handleExecute = async (strategy, index) => {
+        setIsOrdering(prev => ({ ...prev, [index]: true }));
+        setOrderStatus(prev => ({ ...prev, [index]: null }));
+        
         try {
             const payload = {
                 ticker: ticker,
@@ -222,94 +267,600 @@ const StrategyOrder = ({ strategy, ticker, expirationDate, gptVerdict }) => {
                     actionable_ideas: gptVerdict.actionable_ideas || [],
                     risk_factors: gptVerdict.risk_factors || [],
                     rationale: gptVerdict.rationale || '',
-                    sources: gptVerdict.sources || []
+                    sources: gptVerdict.sources || [],
+                    execution_recommendations: {
+                        ...(gptVerdict.execution_recommendations || {}),
+                        selected_strategy: {
+                            name: strategy.name,
+                            confidence: strategy.confidence || 'Medium'
+                        }
+                    }
                 } : null
             };
+            
             const response = await axios.post('/api/orders/strategy', payload);
-            setOrderStatus(response.data);
+            setOrderStatus(prev => ({ ...prev, [index]: response.data }));
         } catch (err) {
-            setOrderStatus({ status: 'error', message: err.response?.data?.detail || 'Order failed.' });
+            setOrderStatus(prev => ({ ...prev, [index]: { 
+                status: 'error', 
+                message: err.response?.data?.detail || 'Order failed.' 
+            }}));
         } finally {
-            setIsOrdering(false);
+            setIsOrdering(prev => ({ ...prev, [index]: false }));
         }
     };
 
-    if (!strategy || !strategy.name || strategy.name === 'None' || strategy.legs.length === 0) {
+    if (allStrategies.length === 0) {
         return null;
     }
 
-    const legDescriptions = strategy.legs.map((leg, i) => (
-      <li key={i}>{leg.action} {leg.strike.toFixed(2)} {leg.right}</li>
-    ));
+    const renderStrategyCard = (strategy, index) => {
+        if (!strategy || !strategy.name || strategy.name === 'None' || !strategy.legs || strategy.legs.length === 0) {
+            return null;
+        }
+
+        const legDescriptions = strategy.legs.map((leg, i) => (
+            <li key={i}>
+                <strong>{leg.action}</strong> {leg.strike.toFixed(2)} {leg.right}
+            </li>
+        ));
+
+        const confidence = strategy.confidence || 'Medium';
+        const confidenceColor = {
+            'High': 'green',
+            'Medium': 'orange',
+            'Low': 'red'
+        }[confidence] || 'gray';
+
+        return (
+            <div key={index} style={{
+                marginBottom: '20px',
+                padding: '15px',
+                border: '1px solid #e0e0e0',
+                borderRadius: '8px',
+                backgroundColor: '#fff'
+            }}>
+                <div style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    marginBottom: '10px',
+                    paddingBottom: '10px',
+                    borderBottom: '1px solid #f0f0f0'
+                }}>
+                    <h4 style={{ margin: 0 }}>{strategy.name}</h4>
+                    <span style={{
+                        padding: '2px 8px',
+                        borderRadius: '10px',
+                        backgroundColor: `${confidenceColor}20`,
+                        color: confidenceColor,
+                        fontSize: '12px',
+                        fontWeight: 'bold'
+                    }}>
+                        {confidence} Confidence
+                    </span>
+                </div>
+                
+                <div style={{ marginBottom: '15px' }}>
+                    <strong>Strategy Legs:</strong>
+                    <ul style={{ 
+                        margin: '5px 0 0 0', 
+                        paddingLeft: '20px',
+                        fontSize: '14px'
+                    }}>
+                        {legDescriptions}
+                    </ul>
+                </div>
+                
+                <button 
+                    onClick={() => handleExecute(strategy, index)}
+                    disabled={isOrdering[index]}
+                    style={{
+                        padding: '8px 16px',
+                        backgroundColor: isOrdering[index] ? '#cccccc' : '#4CAF50',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: '4px',
+                        cursor: 'pointer',
+                        fontSize: '14px',
+                        width: '100%',
+                        transition: 'background-color 0.3s',
+                        ':hover': {
+                            backgroundColor: isOrdering[index] ? '#cccccc' : '#45a049'
+                        }
+                    }}
+                >
+                    {isOrdering[index] ? 'Placing Order...' : `Execute ${strategy.name}`}
+                </button>
+                
+                {orderStatus[index] && (
+                    <div style={{
+                        marginTop: '10px',
+                        padding: '10px',
+                        borderRadius: '5px',
+                        background: orderStatus[index].status === 'error' ? '#ffebee' : '#e8f5e9',
+                        borderLeft: `4px solid ${orderStatus[index].status === 'error' ? '#f44336' : '#4CAF50'}`
+                    }}>
+                        <p style={{ margin: '0', color: orderStatus[index].status === 'error' ? '#d32f2f' : '#2e7d32' }}>
+                            <strong>{orderStatus[index].status === 'error' ? 'Error:' : 'Success:'}</strong> {orderStatus[index].message}
+                        </p>
+                        {orderStatus[index].status === 'success' && orderStatus[index].order_status && (
+                            <p style={{ margin: '5px 0 0 0', fontSize: '13px' }}>
+                                <strong>Order Status:</strong> {orderStatus[index].order_status}
+                            </p>
+                        )}
+                    </div>
+                )}
+            </div>
+        );
+    };
 
     return (
-        <AnalysisCard title="Execute Recommended Strategy">
-            <p><strong>Strategy:</strong> {strategy.name}</p>
-            <ul style={{ margin: '5px 0', paddingLeft: '20px' }}>
-                {legDescriptions}
-            </ul>
+        <AnalysisCard title={allStrategies.length > 1 ? "Recommended Strategies" : "Execute Strategy"}>
             
             {/* GPT Insights Section */}
             {gptVerdict && (
-                <div style={{ marginBottom: '15px', padding: '10px', border: '1px solid #e0e0e0', borderRadius: '5px', backgroundColor: '#f8f9fa' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-                        <strong>🤖 AI Trading Insights</strong>
+                <div style={{ 
+                    marginBottom: '20px', 
+                    padding: '15px', 
+                    border: '1px solid #e0e0e0', 
+                    borderRadius: '8px', 
+                    backgroundColor: '#f8f9fa' 
+                }}>
+                    <div style={{ 
+                        display: 'flex', 
+                        justifyContent: 'space-between', 
+                        alignItems: 'center', 
+                        marginBottom: '10px' 
+                    }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                            <span style={{ fontSize: '18px' }}>🤖</span>
+                            <h3 style={{ margin: 0 }}>AI Trading Insights</h3>
+                        </div>
                         <button 
                             onClick={() => setShowGptInsights(!showGptInsights)}
-                            style={{ padding: '2px 8px', fontSize: '12px', cursor: 'pointer' }}
+                            style={{ 
+                                padding: '4px 12px', 
+                                fontSize: '13px', 
+                                cursor: 'pointer',
+                                backgroundColor: 'transparent',
+                                border: '1px solid #d0d0d0',
+                                borderRadius: '4px',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '5px'
+                            }}
                         >
-                            {showGptInsights ? 'Hide' : 'Show'} Details
+                            {showGptInsights ? (
+                                <>
+                                    <span>Hide Details</span>
+                                    <span>▲</span>
+                                </>
+                            ) : (
+                                <>
+                                    <span>Show Details</span>
+                                    <span>▼</span>
+                                </>
+                            )}
                         </button>
                     </div>
                     
-                    <div><strong>AI Bias:</strong> <span style={{ color: gptVerdict.final_bias?.includes('Bull') ? 'green' : gptVerdict.final_bias?.includes('Bear') ? 'red' : 'gray' }}>{gptVerdict.final_bias}</span></div>
+                    <div style={{ 
+                        display: 'flex', 
+                        alignItems: 'center', 
+                        marginBottom: showGptInsights ? '15px' : 0,
+                        paddingBottom: showGptInsights ? '15px' : 0,
+                        borderBottom: showGptInsights ? '1px solid #e8e8e8' : 'none'
+                    }}>
+                        <strong style={{ marginRight: '5px' }}>Market Bias:</strong>
+                        <span style={{ 
+                            padding: '2px 8px',
+                            borderRadius: '10px',
+                            backgroundColor: gptVerdict.final_bias?.includes('Bull') ? '#e8f5e9' : 
+                                           gptVerdict.final_bias?.includes('Bear') ? '#ffebee' : '#e3f2fd',
+                            color: gptVerdict.final_bias?.includes('Bull') ? '#2e7d32' : 
+                                  gptVerdict.final_bias?.includes('Bear') ? '#c62828' : '#1565c0',
+                            fontWeight: '500',
+                            fontSize: '13px'
+                        }}>
+                            {gptVerdict.final_bias || 'Neutral'}
+                        </span>
+                    </div>
                     
                     {showGptInsights && (
-                        <div style={{ marginTop: '10px' }}>
-                            {gptVerdict.execution_recommendations && (
-                                <div style={{ marginBottom: '12px' }}>
-                                    <strong>🎯 Execution Strategy:</strong>
-                                    <div style={{ marginLeft: '10px', fontSize: '14px' }}>
-                                        <div style={{ marginBottom: '6px' }}>
-                                            <strong>Primary:</strong> {gptVerdict.execution_recommendations.primary_strategy?.type} 
-                                            <span style={{ color: gptVerdict.execution_recommendations.primary_strategy?.confidence === 'High' ? 'green' : gptVerdict.execution_recommendations.primary_strategy?.confidence === 'Medium' ? 'orange' : 'red', marginLeft: '5px' }}>
-                                                ({gptVerdict.execution_recommendations.primary_strategy?.confidence})
-                                            </span>
-                                        </div>
-                                        <div style={{ fontSize: '13px', color: '#666', marginBottom: '6px' }}>
-                                            {gptVerdict.execution_recommendations.primary_strategy?.description}
-                                        </div>
-                                        {gptVerdict.execution_recommendations.position_sizing && (
-                                            <div style={{ fontSize: '13px', marginBottom: '6px' }}>
-                                                <strong>Position Size:</strong> {gptVerdict.execution_recommendations.position_sizing.suggested_allocation} 
-                                                <span style={{ color: gptVerdict.execution_recommendations.position_sizing.risk_level === 'Conservative' ? 'green' : gptVerdict.execution_recommendations.position_sizing.risk_level === 'Moderate' ? 'orange' : 'red', marginLeft: '5px' }}>
-                                                    ({gptVerdict.execution_recommendations.position_sizing.risk_level})
+                        <div style={{ marginTop: '15px' }}>
+                            {gptVerdict.execution_recommendations?.primary_strategy && (
+                                <div style={{ 
+                                    backgroundColor: '#f0f7ff',
+                                    padding: '12px',
+                                    borderRadius: '6px',
+                                    marginBottom: '15px',
+                                    borderLeft: '4px solid #4a90e2'
+                                }}>
+                                    <div style={{ 
+                                        display: 'flex', 
+                                        alignItems: 'center', 
+                                        marginBottom: '8px' 
+                                    }}>
+                                        <span style={{ 
+                                            backgroundColor: '#4a90e2', 
+                                            color: 'white', 
+                                            borderRadius: '50%', 
+                                            width: '24px', 
+                                            height: '24px', 
+                                            display: 'flex', 
+                                            alignItems: 'center', 
+                                            justifyContent: 'center',
+                                            marginRight: '10px',
+                                            fontSize: '14px',
+                                            fontWeight: 'bold'
+                                        }}>
+                                            ✓
+                                        </span>
+                                        <h4 style={{ margin: 0, color: '#1a365d' }}>Recommended Strategy</h4>
+                                    </div>
+                                    <div style={{ paddingLeft: '34px' }}>
+                                        <p style={{ 
+                                            margin: '0 0 8px 0', 
+                                            fontSize: '14px',
+                                            lineHeight: '1.5',
+                                            color: '#2d3748'
+                                        }}>
+                                            {gptVerdict.execution_recommendations.primary_strategy.description || 
+                                             'No specific strategy description available.'}
+                                        </p>
+                                        <div style={{ 
+                                            display: 'flex', 
+                                            alignItems: 'center',
+                                            fontSize: '13px',
+                                            color: '#4a5568'
+                                        }}>
+                                            <span style={{ marginRight: '15px' }}>
+                                                <strong>Confidence:</strong> 
+                                                <span style={{
+                                                    color: gptVerdict.execution_recommendations.primary_strategy.confidence === 'High' ? 'green' : 
+                                                          gptVerdict.execution_recommendations.primary_strategy.confidence === 'Medium' ? 'orange' : 'red',
+                                                    marginLeft: '5px'
+                                                }}>
+                                                    {gptVerdict.execution_recommendations.primary_strategy.confidence}
                                                 </span>
+                                            </span>
+                                            {gptVerdict.execution_recommendations.primary_strategy.time_horizon && (
+                                                <span>
+                                                    <strong>Timeframe:</strong> {gptVerdict.execution_recommendations.primary_strategy.time_horizon}
+                                                </span>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                            
+                            {gptVerdict.execution_recommendations?.position_sizing && (
+                                <div style={{ 
+                                    backgroundColor: '#f8f9ff',
+                                    border: '1px solid #e0e0ff',
+                                    borderRadius: '6px',
+                                    padding: '12px',
+                                    marginBottom: '15px'
+                                }}>
+                                    <h5 style={{ 
+                                        margin: '0 0 10px 0', 
+                                        color: '#4a4a8a',
+                                        fontSize: '14px',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '8px'
+                                    }}>
+                                        <span>📊</span>
+                                        Position Sizing
+                                    </h5>
+                                    <div style={{
+                                        display: 'grid',
+                                        gridTemplateColumns: '1fr 1fr',
+                                        gap: '15px',
+                                        fontSize: '13px'
+                                    }}>
+                                        <div>
+                                            <div style={{ color: '#6b7280', marginBottom: '4px' }}>Suggested Allocation</div>
+                                            <div style={{ fontWeight: '500' }}>
+                                                {gptVerdict.execution_recommendations.position_sizing.suggested_allocation}
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <div style={{ color: '#6b7280', marginBottom: '4px' }}>Risk Level</div>
+                                            <div>
+                                                <span style={{
+                                                    padding: '2px 8px',
+                                                    borderRadius: '10px',
+                                                    backgroundColor: gptVerdict.execution_recommendations.position_sizing.risk_level === 'Conservative' ? '#e6f6e6' : 
+                                                                  gptVerdict.execution_recommendations.position_sizing.risk_level === 'Moderate' ? '#fff3e0' : '#ffebee',
+                                                    color: gptVerdict.execution_recommendations.position_sizing.risk_level === 'Conservative' ? '#2e7d32' : 
+                                                          gptVerdict.execution_recommendations.position_sizing.risk_level === 'Moderate' ? '#e65100' : '#c62828',
+                                                    fontSize: '12px',
+                                                    fontWeight: '500'
+                                                }}>
+                                                    {gptVerdict.execution_recommendations.position_sizing.risk_level}
+                                                </span>
+                                            </div>
+                                        </div>
+                                        {gptVerdict.execution_recommendations.position_sizing.justification && (
+                                            <div style={{ gridColumn: '1 / -1' }}>
+                                                <div style={{ color: '#6b7280', marginBottom: '4px' }}>Rationale</div>
+                                                <div style={{ fontStyle: 'italic', fontSize: '12px' }}>
+                                                    "{gptVerdict.execution_recommendations.position_sizing.justification}"
+                                                </div>
                                             </div>
                                         )}
                                     </div>
                                 </div>
                             )}
                             
+                            <div style={{
+                                display: 'grid',
+                                gridTemplateColumns: '1fr 1fr',
+                                gap: '15px',
+                                marginBottom: '15px'
+                            }}>
+                                {gptVerdict.execution_recommendations?.entry_conditions?.length > 0 && (
+                                    <div style={{
+                                        backgroundColor: '#f0fdf4',
+                                        border: '1px solid #dcfce7',
+                                        borderRadius: '6px',
+                                        padding: '12px'
+                                    }}>
+                                        <h5 style={{
+                                            margin: '0 0 10px 0',
+                                            color: '#166534',
+                                            fontSize: '14px',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '8px'
+                                        }}>
+                                            <span>📈</span>
+                                            Entry Conditions
+                                        </h5>
+                                        <ul style={{
+                                            margin: '0',
+                                            paddingLeft: '20px',
+                                            fontSize: '13px',
+                                            color: '#1f2937'
+                                        }}>
+                                            {gptVerdict.execution_recommendations.entry_conditions.slice(0, 3).map((condition, i) => (
+                                                <li key={i} style={{ marginBottom: '6px', lineHeight: '1.4' }}>
+                                                    {condition}
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    </div>
+                                )}
+                                
+                                {gptVerdict.execution_recommendations?.exit_conditions?.length > 0 && (
+                                    <div style={{
+                                        backgroundColor: '#fff7ed',
+                                        border: '1px solid #ffedd5',
+                                        borderRadius: '6px',
+                                        padding: '12px'
+                                    }}>
+                                        <h5 style={{
+                                            margin: '0 0 10px 0',
+                                            color: '#9a3412',
+                                            fontSize: '14px',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '8px'
+                                        }}>
+                                            <span>📉</span>
+                                            Exit Conditions
+                                        </h5>
+                                        <ul style={{
+                                            margin: '0',
+                                            paddingLeft: '20px',
+                                            fontSize: '13px',
+                                            color: '#1f2937'
+                                        }}>
+                                            {gptVerdict.execution_recommendations.exit_conditions.slice(0, 3).map((condition, i) => (
+                                                <li key={i} style={{ marginBottom: '6px', lineHeight: '1.4' }}>
+                                                    {condition}
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    </div>
+                                )}
+                                
+                                {gptVerdict.execution_recommendations?.stop_loss_guidance && (
+                                    <div style={{
+                                        backgroundColor: '#fef2f2',
+                                        border: '1px solid #fee2e2',
+                                        borderRadius: '6px',
+                                        padding: '12px'
+                                    }}>
+                                        <h5 style={{
+                                            margin: '0 0 10px 0',
+                                            color: '#b91c1c',
+                                            fontSize: '14px',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '8px'
+                                        }}>
+                                            <span>🛡️</span>
+                                            Stop Loss
+                                        </h5>
+                                        <p style={{
+                                            margin: '0',
+                                            fontSize: '13px',
+                                            color: '#1f2937',
+                                            lineHeight: '1.5'
+                                        }}>
+                                            {gptVerdict.execution_recommendations.stop_loss_guidance}
+                                        </p>
+                                    </div>
+                                )}
+                                
+                                {gptVerdict.execution_recommendations?.profit_target_guidance && (
+                                    <div style={{
+                                        backgroundColor: '#f0fdf4',
+                                        border: '1px solid #dcfce7',
+                                        borderRadius: '6px',
+                                        padding: '12px'
+                                    }}>
+                                        <h5 style={{
+                                            margin: '0 0 10px 0',
+                                            color: '#166534',
+                                            fontSize: '14px',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '8px'
+                                        }}>
+                                            <span>🎯</span>
+                                            Profit Target
+                                        </h5>
+                                        <p style={{
+                                            margin: '0',
+                                            fontSize: '13px',
+                                            color: '#1f2937',
+                                            lineHeight: '1.5'
+                                        }}>
+                                            {gptVerdict.execution_recommendations.profit_target_guidance}
+                                        </p>
+                                    </div>
+                                )}
+                            </div>
+                            
                             {gptVerdict.actionable_ideas?.length > 0 && (
-                                <div style={{ marginBottom: '8px' }}>
-                                    <strong>💡 Key Ideas:</strong>
-                                    <ul style={{ margin: '5px 0', paddingLeft: '20px', fontSize: '14px' }}>
+                                <div style={{
+                                    backgroundColor: '#f0f9ff',
+                                    border: '1px solid #e0f2fe',
+                                    borderRadius: '6px',
+                                    padding: '12px',
+                                    marginBottom: '15px'
+                                }}>
+                                    <h5 style={{
+                                        margin: '0 0 10px 0',
+                                        color: '#075985',
+                                        fontSize: '14px',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '8px'
+                                    }}>
+                                        <span>💡</span>
+                                        Key Trading Ideas
+                                    </h5>
+                                    <ul style={{
+                                        margin: '0',
+                                        paddingLeft: '20px',
+                                        fontSize: '13px',
+                                        color: '#1f2937'
+                                    }}>
                                         {gptVerdict.actionable_ideas.slice(0, 3).map((idea, i) => (
-                                            <li key={i}>{idea}</li>
+                                            <li key={i} style={{ marginBottom: '6px', lineHeight: '1.5' }}>
+                                                {idea}
+                                            </li>
                                         ))}
                                     </ul>
                                 </div>
                             )}
                             
                             {gptVerdict.risk_factors?.length > 0 && (
-                                <div style={{ marginBottom: '8px' }}>
-                                    <strong>⚠️ Risk Factors:</strong>
-                                    <ul style={{ margin: '5px 0', paddingLeft: '20px', fontSize: '14px' }}>
+                                <div style={{
+                                    backgroundColor: '#fef2f2',
+                                    border: '1px solid #fee2e2',
+                                    borderRadius: '6px',
+                                    padding: '12px',
+                                    marginBottom: '10px'
+                                }}>
+                                    <h5 style={{
+                                        margin: '0 0 10px 0',
+                                        color: '#b91c1c',
+                                        fontSize: '14px',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '8px'
+                                    }}>
+                                        <span>⚠️</span>
+                                        Risk Factors
+                                    </h5>
+                                    <ul style={{
+                                        margin: '0',
+                                        paddingLeft: '20px',
+                                        fontSize: '13px',
+                                        color: '#1f2937'
+                                    }}>
                                         {gptVerdict.risk_factors.slice(0, 3).map((risk, i) => (
-                                            <li key={i}>{risk}</li>
+                                            <li key={i} style={{ marginBottom: '6px', lineHeight: '1.5' }}>
+                                                {risk}
+                                            </li>
                                         ))}
                                     </ul>
+                                </div>
+                            )}
+                            
+                            {gptVerdict.execution_recommendations?.alternative_strategies?.length > 0 && (
+                                <div style={{
+                                    backgroundColor: '#f9fafb',
+                                    border: '1px solid #e5e7eb',
+                                    borderRadius: '6px',
+                                    padding: '12px',
+                                    marginTop: '15px'
+                                }}>
+                                    <h5 style={{
+                                        margin: '0 0 10px 0',
+                                        color: '#4b5563',
+                                        fontSize: '14px',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '8px'
+                                    }}>
+                                        <span>🔄</span>
+                                        Alternative Strategies
+                                    </h5>
+                                    <div style={{
+                                        display: 'grid',
+                                        gap: '10px'
+                                    }}>
+                                        {gptVerdict.execution_recommendations.alternative_strategies.slice(0, 2).map((alt, i) => (
+                                            <div key={i} style={{
+                                                backgroundColor: 'white',
+                                                border: '1px solid #e5e7eb',
+                                                borderRadius: '6px',
+                                                padding: '10px',
+                                                fontSize: '13px'
+                                            }}>
+                                                <div style={{
+                                                    display: 'flex',
+                                                    justifyContent: 'space-between',
+                                                    alignItems: 'center',
+                                                    marginBottom: '6px'
+                                                }}>
+                                                    <strong style={{
+                                                        color: '#1f2937',
+                                                        fontSize: '13px'
+                                                    }}>
+                                                        {alt.type}
+                                                    </strong>
+                                                    <span style={{
+                                                        padding: '2px 8px',
+                                                        borderRadius: '10px',
+                                                        backgroundColor: alt.confidence === 'High' ? '#e6f6e6' : 
+                                                                      alt.confidence === 'Medium' ? '#fff3e0' : '#ffebee',
+                                                        color: alt.confidence === 'High' ? '#2e7d32' : 
+                                                              alt.confidence === 'Medium' ? '#e65100' : '#c62828',
+                                                        fontSize: '11px',
+                                                        fontWeight: '500'
+                                                    }}>
+                                                        {alt.confidence} Confidence
+                                                    </span>
+                                                </div>
+                                                <p style={{
+                                                    margin: '0',
+                                                    color: '#4b5563',
+                                                    lineHeight: '1.5',
+                                                    fontSize: '12px'
+                                                }}>
+                                                    {alt.description}
+                                                </p>
+                                            </div>
+                                        ))}
+                                    </div>
                                 </div>
                             )}
                         </div>
@@ -317,81 +868,14 @@ const StrategyOrder = ({ strategy, ticker, expirationDate, gptVerdict }) => {
                 </div>
             )}
             
-            {/* Enhanced Execution Options */}
-            {gptVerdict?.execution_recommendations && (
-                <div style={{ marginTop: '15px', padding: '12px', border: '1px solid #dee2e6', borderRadius: '6px', backgroundColor: '#f8f9fa' }}>
-                    <h4 style={{ margin: '0 0 10px 0', fontSize: '16px' }}>🎯 AI-Powered Execution Guidance</h4>
-                    
-                    {/* Entry/Exit Conditions */}
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '10px' }}>
-                        {gptVerdict.execution_recommendations.entry_conditions?.length > 0 && (
-                            <div>
-                                <strong style={{ fontSize: '14px' }}>📈 Entry Signals:</strong>
-                                <ul style={{ margin: '5px 0', paddingLeft: '15px', fontSize: '13px' }}>
-                                    {gptVerdict.execution_recommendations.entry_conditions.slice(0, 3).map((condition, i) => (
-                                        <li key={i}>{condition}</li>
-                                    ))}
-                                </ul>
-                            </div>
-                        )}
-                        
-                        {gptVerdict.execution_recommendations.exit_conditions?.length > 0 && (
-                            <div>
-                                <strong style={{ fontSize: '14px' }}>📉 Exit Signals:</strong>
-                                <ul style={{ margin: '5px 0', paddingLeft: '15px', fontSize: '13px' }}>
-                                    {gptVerdict.execution_recommendations.exit_conditions.slice(0, 3).map((condition, i) => (
-                                        <li key={i}>{condition}</li>
-                                    ))}
-                                </ul>
-                            </div>
-                        )}
-                    </div>
-                    
-                    {/* Risk Management */}
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '10px' }}>
-                        {gptVerdict.execution_recommendations.stop_loss_guidance && (
-                            <div style={{ fontSize: '13px' }}>
-                                <strong>🛡️ Stop Loss:</strong> {gptVerdict.execution_recommendations.stop_loss_guidance}
-                            </div>
-                        )}
-                        
-                        {gptVerdict.execution_recommendations.profit_target_guidance && (
-                            <div style={{ fontSize: '13px' }}>
-                                <strong>🎯 Profit Target:</strong> {gptVerdict.execution_recommendations.profit_target_guidance}
-                            </div>
-                        )}
-                    </div>
-                    
-                    {/* Alternative Strategies */}
-                    {gptVerdict.execution_recommendations.alternative_strategies?.length > 0 && (
-                        <div style={{ marginBottom: '10px' }}>
-                            <strong style={{ fontSize: '14px' }}>🔄 Alternative Strategies:</strong>
-                            <div style={{ fontSize: '13px', marginTop: '5px' }}>
-                                {gptVerdict.execution_recommendations.alternative_strategies.slice(0, 2).map((alt, i) => (
-                                    <div key={i} style={{ marginBottom: '4px' }}>
-                                        • {alt.type} 
-                                        <span style={{ color: alt.confidence === 'High' ? 'green' : alt.confidence === 'Medium' ? 'orange' : 'red', marginLeft: '5px' }}>
-                                            ({alt.confidence})
-                                        </span>
-                                        - {alt.description}
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
-                    )}
-                </div>
-            )}
-            
-            {/* TODO: Add quantity input here */}
-            <button onClick={handleExecute} disabled={isOrdering} style={{ padding: '5px 15px', cursor: 'pointer' }}>
-                {isOrdering ? 'Placing Order...' : `Execute ${strategy.name}${gptVerdict ? ' (with AI insights)' : ''}`}
-            </button>
-            {orderStatus && (
-                <div style={{ marginTop: '10px', padding: '10px', borderRadius: '5px', background: orderStatus.status === 'error' ? '#ffdddd' : '#e8f5e9' }}>
-                    <p><strong>Status:</strong> {orderStatus.message}</p>
-                    {orderStatus.status === 'success' && <p>Order Status from Broker: {orderStatus.order_status}</p>}
-                </div>
-            )}
+            {/* Strategy Cards */}
+            <div style={{
+                display: 'grid',
+                gap: '15px',
+                marginTop: '20px'
+            }}>
+                {allStrategies.map((strat, idx) => renderStrategyCard(strat, idx))}
+            </div>
         </AnalysisCard>
     );
 };
@@ -493,7 +977,7 @@ const AnalysisDetails = ({ data }) => {
       </AnalysisCard>
       
       <StrategyOrder 
-        strategy={data.recommended_strategy} 
+        strategies={data.recommended_strategies || [data.recommended_strategy].filter(Boolean)}
         ticker={data.ticker} 
         expirationDate={data.expiration_date}
         gptVerdict={data.gpt_verdict}
@@ -580,29 +1064,37 @@ const ResultsDisplay = ({ analysisResult }) => {
         </div>
       ))}
 
-      <SavedVerdictsControls currentResult={analysisResult[0]} />
+      {/* Verdict history moved outside the results box */}
     </div>
   );
 };
 
-const SavedVerdictsControls = ({ currentResult }) => {
+const SavedVerdictsControls = ({ ticker, currentResult }) => {
   const [saving, setSaving] = useState(false);
   const [saveLabel, setSaveLabel] = useState('');
   const [saveMsg, setSaveMsg] = useState('');
 
   const [listLoading, setListLoading] = useState(false);
   const [savedList, setSavedList] = useState([]);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+  const [total, setTotal] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
   const [selectedId, setSelectedId] = useState('');
   const [selectedDoc, setSelectedDoc] = useState(null);
 
-  const ticker = currentResult?.ticker || '';
+  // Use the provided ticker; currentResult is optional (used for manual save and compare)
 
   const loadList = async () => {
     if (!ticker) return;
     setListLoading(true);
     try {
-      const resp = await axios.get(`/api/analysis/verdicts/${encodeURIComponent(ticker)}`);
+      const resp = await axios.get(`/api/analysis/verdicts/${encodeURIComponent(ticker)}`, {
+        params: { page, page_size: pageSize }
+      });
       setSavedList(resp.data?.items || []);
+      setTotal(resp.data?.total || 0);
+      setHasMore(!!resp.data?.has_more);
     } catch (e) {
       console.error('Failed to load saved verdicts', e);
     } finally {
@@ -614,11 +1106,30 @@ const SavedVerdictsControls = ({ currentResult }) => {
     setSavedList([]);
     setSelectedDoc(null);
     setSelectedId('');
+    setPage(1);
     if (ticker) loadList();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ticker]);
 
+  // Reload history when page or pageSize changes
+  useEffect(() => {
+    if (ticker) loadList();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, pageSize]);
+
+  // After a new analysis result arrives, refresh to include autosaved entry
+  useEffect(() => {
+    if (!ticker || !currentResult) return;
+    setPage(1);
+    loadList();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentResult]);
+
   const handleSave = async () => {
+    if (!currentResult) {
+      setSaveMsg('No current verdict to save.');
+      return;
+    }
     setSaving(true);
     setSaveMsg('');
     try {
@@ -655,34 +1166,89 @@ const SavedVerdictsControls = ({ currentResult }) => {
   const biasChanged = previousBias && currentBias && previousBias !== currentBias;
 
   return (
-    <AnalysisCard title="Saved Verdicts">
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+    <AnalysisCard title="Verdict History">
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '16px' }}>
         <div>
-          <h4>Save Current Verdict</h4>
+          <h4>Add Current Verdict to History</h4>
           <div style={{ marginBottom: '8px' }}>
             <label>Label (optional):</label><br/>
             <input type="text" value={saveLabel} onChange={e => setSaveLabel(e.target.value)} placeholder="e.g., Before Earnings" style={{ width: '95%' }} />
           </div>
-          <button onClick={handleSave} disabled={saving || !ticker} style={{ padding: '6px 12px' }}>
-            {saving ? 'Saving...' : 'Save Verdict'}
+          <button onClick={handleSave} disabled={saving || !ticker || !currentResult} style={{ padding: '6px 12px' }}>
+            {saving ? 'Saving...' : 'Add to History'}
           </button>
           {saveMsg && <div style={{ marginTop: '8px', fontSize: '0.9em' }}>{saveMsg}</div>}
         </div>
 
         <div>
-          <h4>Load Previous Verdict</h4>
+          <h4>History</h4>
           {listLoading ? (
-            <p>Loading saved verdicts...</p>
+            <p>Loading verdict history...</p>
           ) : (
-            <select value={selectedId} onChange={e => handleSelect(e.target.value)} style={{ width: '100%', padding: '6px' }}>
-              <option value="">Select a saved verdict...</option>
-              {savedList.map(item => (
-                <option key={item.id} value={item.id}>
-                  {`${item.created_at?.slice(0, 19).replace('T',' ')} | ${item.label || ''} | ${item.final_bias || ''}`}
-                </option>
-              ))}
-            </select>
+            <div style={{ maxHeight: '320px', overflow: 'auto', border: '1px solid #e0e0e0', borderRadius: 4 }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr style={{ background: '#f7f7f7' }}>
+                    <th style={{ textAlign: 'left', padding: '6px', borderBottom: '1px solid #e0e0e0' }}>Saved At</th>
+                    <th style={{ textAlign: 'left', padding: '6px', borderBottom: '1px solid #e0e0e0' }}>Label</th>
+                    <th style={{ textAlign: 'left', padding: '6px', borderBottom: '1px solid #e0e0e0' }}>Type</th>
+                    <th style={{ textAlign: 'left', padding: '6px', borderBottom: '1px solid #e0e0e0' }}>Bias</th>
+                    <th style={{ textAlign: 'left', padding: '6px', borderBottom: '1px solid #e0e0e0' }}>Expiration</th>
+                    <th style={{ textAlign: 'right', padding: '6px', borderBottom: '1px solid #e0e0e0' }}>DTE</th>
+                    <th style={{ textAlign: 'right', padding: '6px', borderBottom: '1px solid #e0e0e0' }}>Price</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {savedList && savedList.length > 0 ? (
+                    savedList.map(item => {
+                      const ts = item.created_at?.slice(0, 19).replace('T',' ');
+                      const ov = item.overview || {};
+                      const typeText = ov.method_label || ((item.analysis_method || '').includes('gpt')
+                        ? (((item.analysis_method || '').includes('web') ? 'GPT Web Verdict' : 'GPT Verdict'))
+                        : 'Model Verdict');
+                      const isSelected = selectedId === item.id;
+                      return (
+                        <tr
+                          key={item.id}
+                          onClick={() => handleSelect(item.id)}
+                          style={{ cursor: 'pointer', background: isSelected ? '#eef6ff' : 'transparent' }}
+                        >
+                          <td style={{ padding: '6px', borderBottom: '1px solid #f0f0f0' }}>{ts}</td>
+                          <td style={{ padding: '6px', borderBottom: '1px solid #f0f0f0' }}>{item.label || ''}</td>
+                          <td style={{ padding: '6px', borderBottom: '1px solid #f0f0f0' }}>{typeText}</td>
+                          <td style={{ padding: '6px', borderBottom: '1px solid #f0f0f0' }}>{item.final_bias || ov.final_bias || ''}</td>
+                          <td style={{ padding: '6px', borderBottom: '1px solid #f0f0f0' }}>{item.expiration_date || ov.expiration_date || ''}</td>
+                          <td style={{ padding: '6px', borderBottom: '1px solid #f0f0f0', textAlign: 'right' }}>{ov.dte ?? ''}</td>
+                          <td style={{ padding: '6px', borderBottom: '1px solid #f0f0f0', textAlign: 'right' }}>{typeof ov.S_current === 'number' ? `$${ov.S_current.toFixed(2)}` : ''}</td>
+                        </tr>
+                      );
+                    })
+                  ) : (
+                    <tr>
+                      <td colSpan="7" style={{ padding: '10px', textAlign: 'center', color: '#777' }}>No saved verdicts yet.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
           )}
+
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 8 }}>
+            <div>
+              <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page <= 1} style={{ marginRight: 8 }}>Prev</button>
+              <button onClick={() => setPage(p => (hasMore ? p + 1 : p))} disabled={!hasMore}>Next</button>
+            </div>
+            <div style={{ color: '#555', fontSize: '0.9em' }}>
+              Page {page} of {Math.max(1, Math.ceil((total||0) / pageSize))} • {total} total
+            </div>
+            <div>
+              <label style={{ marginRight: 6 }}>Page size:</label>
+              <select value={pageSize} onChange={e => setPageSize(parseInt(e.target.value) || 10)}>
+                {[10, 25, 50, 100].map(sz => <option key={sz} value={sz}>{sz}</option>)}
+              </select>
+            </div>
+          </div>
+
           {selectedDoc && (
             <div style={{ marginTop: '12px' }}>
               <div><strong>Saved Bias:</strong> {previousBias || 'N/A'}</div>
@@ -770,6 +1336,136 @@ const AnalysisPage = () => {
   const [availableModels, setAvailableModels] = useState([]);
   const [selectedModel, setSelectedModel] = useStickyState('gpt-5', 'selectedGptModel');
   const [fetchingModels, setFetchingModels] = useState(false);
+  const HISTORY_PAGE_SIZE = 5;
+  const HISTORY_SCOPE_ALL = 'all';
+  const HISTORY_SCOPE_CURRENT = 'current';
+  const [historyItems, setHistoryItems] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState('');
+  const [historyScope, setHistoryScope] = useStickyState(HISTORY_SCOPE_ALL, 'analysisHistoryScope');
+  const [historyPage, setHistoryPage] = useState(1);
+  const [historyHasMore, setHistoryHasMore] = useState(false);
+  const [historyTotal, setHistoryTotal] = useState(0);
+  const [historyReloadVersion, setHistoryReloadVersion] = useState(0);
+
+  const normalizedTickerForHistory = (ticker || '').trim().toUpperCase();
+  const hasHistoryTicker = normalizedTickerForHistory.length > 0;
+
+  useEffect(() => {
+    if (historyPage !== 1) {
+      setHistoryPage(1);
+    }
+  }, [normalizedTickerForHistory, historyScope, historyPage]);
+
+  const formatTimestamp = (isoString) => {
+    if (!isoString) return '';
+    const date = new Date(isoString);
+    if (Number.isNaN(date.getTime())) return '';
+    return date.toLocaleString();
+  };
+
+  const formatRiskFreeRate = (value) => {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric.toFixed(3) : '';
+  };
+
+  const formatExpiration = (value) => {
+    if (!value) return '';
+    if (/^\d{8}$/.test(value)) {
+      const year = value.slice(0, 4);
+      const month = value.slice(4, 6);
+      const day = value.slice(6, 8);
+      const date = new Date(`${year}-${month}-${day}T00:00:00Z`);
+      if (!Number.isNaN(date.getTime())) {
+        return date.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+      }
+    }
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime())
+      ? value
+      : parsed.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+  };
+
+  const totalHistoryPages = historyTotal > 0
+    ? Math.max(1, Math.ceil(historyTotal / HISTORY_PAGE_SIZE))
+    : (historyItems.length > 0 ? historyPage : 1);
+  const historyRangeStart = historyItems.length === 0 ? 0 : (historyPage - 1) * HISTORY_PAGE_SIZE + 1;
+  const historyRangeEnd = historyItems.length === 0 ? 0 : historyRangeStart + historyItems.length - 1;
+
+  const fetchHistory = useCallback(
+    async (targetTicker, scopeOverride) => {
+      const scope = scopeOverride || historyScope;
+      const normalizedTicker = (targetTicker || ticker || '').trim().toUpperCase();
+
+      if (scope === HISTORY_SCOPE_CURRENT && !normalizedTicker) {
+        setHistoryItems([]);
+        setHistoryHasMore(false);
+        setHistoryTotal(0);
+        setHistoryError('');
+        setHistoryLoading(false);
+        return;
+      }
+
+      setHistoryLoading(true);
+      setHistoryError('');
+      try {
+        const params = { page: historyPage, page_size: HISTORY_PAGE_SIZE };
+        if (scope === HISTORY_SCOPE_CURRENT) {
+          params.ticker = normalizedTicker;
+        }
+        const response = await axios.get('/api/analysis/history', { params });
+        const data = response.data || {};
+        const items = Array.isArray(data.items) ? data.items : [];
+        setHistoryItems(items);
+        setHistoryHasMore(Boolean(data.has_more));
+        const total = Number(data.total);
+        setHistoryTotal(Number.isFinite(total) ? total : Math.max(0, (historyPage - 1) * HISTORY_PAGE_SIZE + items.length));
+      } catch (err) {
+        console.error('Failed to fetch analysis history:', err);
+        setHistoryError('Unable to load analysis history.');
+        setHistoryItems([]);
+        setHistoryHasMore(false);
+        setHistoryTotal(0);
+      } finally {
+        setHistoryLoading(false);
+      }
+    },
+    [historyScope, ticker, historyPage]
+  );
+
+  const handleRemoveHistoryItem = async (entryId) => {
+    if (!entryId) return;
+
+    try {
+      await axios.delete(`/api/analysis/history/id/${encodeURIComponent(entryId)}`);
+      if (historyItems.length <= 1 && historyPage > 1) {
+        setHistoryPage((prev) => Math.max(1, prev - 1));
+      } else {
+        setHistoryReloadVersion((prev) => prev + 1);
+      }
+    } catch (err) {
+      console.error('Failed to delete history entry:', err);
+    }
+  };
+
+  const handleClearHistory = async () => {
+    if (historyScope !== HISTORY_SCOPE_CURRENT) {
+      return;
+    }
+    const normalizedTicker = (ticker || '').trim().toUpperCase();
+    if (!normalizedTicker) {
+      setHistoryItems([]);
+      return;
+    }
+
+    try {
+      await axios.delete(`/api/analysis/history/${encodeURIComponent(normalizedTicker)}`);
+      setHistoryPage(1);
+      setHistoryReloadVersion((prev) => prev + 1);
+    } catch (err) {
+      console.error('Failed to clear history:', err);
+    }
+  };
 
   // Fetch available GPT models
   const fetchGptModels = async () => {
@@ -804,6 +1500,53 @@ const AnalysisPage = () => {
     }
   }, [analysisMethod]);
 
+  useEffect(() => {
+    fetchHistory();
+  }, [fetchHistory, historyReloadVersion]);
+
+  const executeAnalysis = async ({ ticker: targetTicker, expiration: targetExpiration, riskFreeRate: targetRate, analysisMethod: targetMethod, gptModel: targetModel }) => {
+    const normalizedTicker = (targetTicker || '').trim().toUpperCase();
+    const normalizedExpiration = (targetExpiration || '').trim();
+
+    if (!normalizedTicker) {
+      setError('Please enter a ticker symbol.');
+      return;
+    }
+
+    if (!normalizedExpiration) {
+      setError('Please fetch and select an expiration date.');
+      return;
+    }
+
+    setTicker(normalizedTicker);
+    setSelectedExpiration(normalizedExpiration);
+
+    setLoading(true);
+    setError('');
+    setAnalysisResult(null);
+
+    try {
+      const response = await axios.post('/api/analysis/stock', {
+        ticker: normalizedTicker,
+        expiration_date: normalizedExpiration,
+        risk_free_rate: targetRate,
+        analysis_method: targetMethod,
+        gpt_model: targetModel,
+      });
+
+      const result = response.data;
+      const normalizedResult = (result && typeof result === 'object' && !Array.isArray(result)) ? [result] : result;
+      setAnalysisResult(normalizedResult);
+
+      setHistoryPage(1);
+      setHistoryReloadVersion((prev) => prev + 1);
+    } catch (err) {
+      setError(err.response?.data?.detail || 'An unexpected error occurred.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleFetchExpirations = async () => {
     if (!ticker) {
       setError('Please enter a ticker symbol first.');
@@ -832,34 +1575,56 @@ const AnalysisPage = () => {
 
   const handleAnalyze = async (e) => {
     e.preventDefault();
-    if (!selectedExpiration) {
-      setError('Please fetch and select an expiration date.');
-      return;
+    await executeAnalysis({
+      ticker,
+      expiration: selectedExpiration,
+      riskFreeRate,
+      analysisMethod,
+      gptModel: selectedModel,
+    });
+  };
+
+  const handleHistoryAnalyze = async (entry) => {
+    if (!entry) return;
+
+    const payload = entry.request_payload || {};
+    const rawTicker = payload.ticker || entry.ticker || '';
+    const rawExpiration = payload.expiration_date || entry.expiration_date_raw || entry.expiration_date || '';
+    const nextMethod = payload.analysis_method || entry.analysis_method || analysisMethod;
+    const nextRateCandidate = payload.risk_free_rate ?? entry.risk_free_rate ?? riskFreeRate;
+    const nextRate = Number(nextRateCandidate);
+    const needsGptModel = (nextMethod || '').includes('gpt');
+    const nextModel = needsGptModel
+      ? (payload.gpt_model || entry.gpt_model || selectedModel)
+      : selectedModel;
+
+    const normalizedTicker = rawTicker.trim().toUpperCase();
+
+    let normalizedExpiration = rawExpiration.trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(normalizedExpiration)) {
+      normalizedExpiration = normalizedExpiration.replace(/-/g, '');
     }
-    setLoading(true);
-    setError('');
-    setAnalysisResult(null);
-    try {
-      const response = await axios.post('/api/analysis/stock', {
-        ticker: ticker,
-        expiration_date: selectedExpiration, // Send as YYYYMMDD
-        risk_free_rate: riskFreeRate,
-        analysis_method: analysisMethod,
-        gpt_model: selectedModel, // Include selected GPT model
-      });
-      const result = response.data;
-      // The ResultsDisplay component expects an array. If the API returns a single object,
-      // wrap it in an array for consistent handling.
-      if (result && typeof result === 'object' && !Array.isArray(result)) {
-        setAnalysisResult([result]);
-      } else {
-        setAnalysisResult(result);
-      }
-    } catch (err) {
-      setError(err.response?.data?.detail || 'An unexpected error occurred.');
-    } finally {
-      setLoading(false);
+
+    setTicker(normalizedTicker);
+    setAnalysisMethod(nextMethod);
+    setRiskFreeRate(Number.isNaN(nextRate) ? riskFreeRate : nextRate);
+    setSelectedExpiration(normalizedExpiration);
+    setExpirations((prev) => {
+      if (!normalizedExpiration) return prev;
+      return prev.includes(normalizedExpiration) ? prev : [normalizedExpiration, ...prev];
+    });
+
+    if (needsGptModel && nextModel) {
+      setSelectedModel(nextModel);
     }
+
+    await executeAnalysis({
+      ticker: normalizedTicker,
+      expiration: normalizedExpiration,
+      riskFreeRate: Number.isNaN(nextRate) ? riskFreeRate : nextRate,
+      analysisMethod: nextMethod,
+      gptModel: nextModel,
+    });
   };
 
   return (
@@ -907,6 +1672,7 @@ const AnalysisPage = () => {
                       )}
                     </select>
                     <button 
+                      type="button"
                       onClick={fetchGptModels}
                       disabled={fetchingModels}
                       style={{ padding: '4px 8px', fontSize: '12px', cursor: 'pointer' }}
@@ -956,6 +1722,158 @@ const AnalysisPage = () => {
         {loading && <p>Loading analysis...</p>}
         {analysisResult && <ResultsDisplay analysisResult={analysisResult} />}
       </AnalysisCard>
+
+      <AnalysisCard title="Recent Analyses">
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', flexWrap: 'wrap', marginBottom: '12px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <label htmlFor="historyScopeSelect" style={{ fontSize: '0.9em', color: '#555' }}>Show:</label>
+            <select
+              id="historyScopeSelect"
+              value={historyScope}
+              onChange={e => {
+                const nextScope = e.target.value;
+                setHistoryScope(nextScope);
+                setHistoryPage(1);
+              }}
+              style={{ padding: '4px', height: '30px' }}
+            >
+              <option value={HISTORY_SCOPE_ALL}>All tickers</option>
+              <option value={HISTORY_SCOPE_CURRENT}>
+                {hasHistoryTicker ? `Current ticker (${normalizedTickerForHistory})` : 'Current ticker'}
+              </option>
+            </select>
+          </div>
+          {historyScope === HISTORY_SCOPE_CURRENT && (
+            <div style={{ fontSize: '0.85em', color: hasHistoryTicker ? '#555' : '#c0392b' }}>
+              {hasHistoryTicker ? `Filtering on ${normalizedTickerForHistory}` : 'Enter a ticker above to filter by symbol.'}
+            </div>
+          )}
+        </div>
+        {historyLoading ? (
+          <p style={{ margin: 0 }}>Loading history...</p>
+        ) : (
+          <>
+            {historyError && (
+              <p style={{ color: '#c0392b', margin: '0 0 10px 0' }}>{historyError}</p>
+            )}
+            {historyItems.length === 0 ? (
+              <p style={{ margin: 0 }}>
+                {historyScope === HISTORY_SCOPE_CURRENT
+                  ? (hasHistoryTicker ? 'No history found for this ticker yet.' : 'Enter a ticker to view its recent analyses.')
+                  : 'Run an analysis to build your personal history.'}
+              </p>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                {historyItems.map((entry) => (
+                  <div
+                    key={entry.id}
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      border: '1px solid #e3e3e3',
+                      borderRadius: '6px',
+                      padding: '8px 12px',
+                      background: '#fbfbfb',
+                    }}
+                  >
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                      <div style={{ fontWeight: 600 }}>
+                        {entry.ticker}
+                        {(entry.expiration_date || entry.expiration_date_raw) && (
+                          <span style={{ fontWeight: 400, color: '#555', marginLeft: '6px' }}>
+                            · Exp {formatExpiration(entry.expiration_date_raw || entry.expiration_date)}
+                          </span>
+                        )}
+                      </div>
+                      <div style={{ fontSize: '0.85em', color: '#555', display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+                        {entry.analysis_method && <span>{entry.analysis_method}</span>}
+                        {entry.gpt_model && <span>Model: {entry.gpt_model}</span>}
+                        {formatRiskFreeRate(entry.risk_free_rate) && (
+                          <span>RF: {formatRiskFreeRate(entry.risk_free_rate)}</span>
+                        )}
+                        {formatTimestamp(entry.created_at) && (
+                          <span>{formatTimestamp(entry.created_at)}</span>
+                        )}
+                        {entry.final_bias && (
+                          <span>Bias: {entry.final_bias}</span>
+                        )}
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px' }}>
+                      <button
+                        type="button"
+                        onClick={() => handleHistoryAnalyze(entry)}
+                        style={{ padding: '6px 10px', cursor: 'pointer' }}
+                      >
+                        Analyze Again
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveHistoryItem(entry.id)}
+                        style={{ padding: '6px 8px', cursor: 'pointer' }}
+                        title="Remove from history"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {historyItems.length > 0 && (
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  marginTop: '12px',
+                  gap: '8px',
+                  flexWrap: 'wrap',
+                }}
+              >
+                <div style={{ fontSize: '0.85em', color: '#555' }}>
+                  Showing {historyRangeStart}–{historyRangeEnd} of {historyTotal || historyRangeEnd}
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <button
+                    type="button"
+                    onClick={() => setHistoryPage((prev) => Math.max(1, prev - 1))}
+                    disabled={historyPage === 1 || historyLoading}
+                    style={{ padding: '4px 10px', cursor: historyPage === 1 || historyLoading ? 'not-allowed' : 'pointer' }}
+                  >
+                    Previous
+                  </button>
+                  <span style={{ fontSize: '0.85em', color: '#555' }}>
+                    Page {historyPage} of {totalHistoryPages}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setHistoryPage((prev) => prev + 1)}
+                    disabled={!historyHasMore || historyLoading}
+                    style={{ padding: '4px 10px', cursor: !historyHasMore || historyLoading ? 'not-allowed' : 'pointer' }}
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            )}
+            {historyItems.length > 0 && historyScope === HISTORY_SCOPE_CURRENT && hasHistoryTicker && (
+              <div style={{ textAlign: 'right', marginTop: '12px' }}>
+                <button type="button" onClick={handleClearHistory} style={{ padding: '4px 10px', cursor: 'pointer' }}>
+                  Clear History
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </AnalysisCard>
+
+      {/* Verdict History is accessible without running a new analysis */}
+      <SavedVerdictsControls
+        ticker={ticker}
+        currentResult={analysisResult && Array.isArray(analysisResult) ? analysisResult[0] : null}
+      />
     </div>
   );
 }
