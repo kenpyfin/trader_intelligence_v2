@@ -1355,7 +1355,8 @@ const AnalysisPage = () => {
     if (historyPage !== 1) {
       setHistoryPage(1);
     }
-  }, [normalizedTickerForHistory, historyScope, historyPage]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [normalizedTickerForHistory, historyScope]);
 
   const formatTimestamp = (isoString) => {
     if (!isoString) return '';
