@@ -620,8 +620,56 @@ def generate_holistic_conclusion(
     iv_sentiment = synthesis_data.get('iv_hv', {}).get('sentiment')
     strategy_rec = "<h5>Recommended Strategy:</h5>"
 
-    # This will hold the structured data for the recommended strategy for API consumers.
-    recommended_strategy = {"name": "None", "legs": [], "is_credit_spread": False}
+    # This will hold multiple recommended strategies for API consumers
+    recommended_strategies = []
+    
+    # Primary recommended strategy (kept for backward compatibility)
+    primary_strategy = {"name": "None", "legs": [], "is_credit_spread": False, "confidence": "Medium"}
+    
+    # Check for AI-generated recommendations in the synthesis data
+    gpt_verdict = synthesis_data.get('gpt_verdict', {})
+    ai_recommendations = []
+    
+    # Extract strategies from GPT verdict if available
+    if isinstance(gpt_verdict, dict):
+        # Check for execution_recommendations in the GPT verdict
+        exec_recommendations = gpt_verdict.get('execution_recommendations', {})
+        if isinstance(exec_recommendations, dict):
+            # Handle primary strategy hint
+            primary_hint = exec_recommendations.get('primary_strategy')
+            if primary_hint and isinstance(primary_hint, dict):
+                strategy_hint = primary_hint
+            
+            # Handle alternative strategies
+            alt_strategies = exec_recommendations.get('alternative_strategies', [])
+            if isinstance(alt_strategies, list):
+                ai_recommendations.extend(alt_strategies)
+    
+    # Process AI recommendations into strategy objects
+    for rec in ai_recommendations:
+        if not isinstance(rec, dict):
+            continue
+            
+        rec_type = rec.get('type')
+        if not rec_type:
+            continue
+            
+        # Build strategy from the recommendation
+        strategy = _build_strategy_from_name(rec_type)
+        if strategy:
+            # Add additional metadata from the recommendation
+            strategy.update({
+                'confidence': rec.get('confidence', 'Medium'),
+                'description': rec.get('description', ''),
+                'time_horizon': rec.get('time_horizon'),
+                'risk_level': rec.get('risk_level')
+            })
+            # Add to recommended strategies
+            recommended_strategies.append(strategy)
+    
+    # Add the primary strategy to the recommended strategies if it's not already there
+    if primary_strategy not in recommended_strategies:
+        recommended_strategies.append(primary_strategy)
 
     # Determine ATM and OTM strikes for constructing strategy legs
     atm_strike = strikes[np.argmin(np.abs(strikes - S_current))] if len(strikes) > 0 else S_current
@@ -970,7 +1018,30 @@ def generate_holistic_conclusion(
             }
     
     conclusion_html += strategy_rec
-    return conclusion_html, final_bias, recommended_strategy
+    # Ensure all strategies have required fields and are unique by name
+    unique_strategies = {}
+    for strategy in recommended_strategies:
+        if not isinstance(strategy, dict) or 'name' not in strategy:
+            continue
+        
+        # Ensure required fields exist
+        strategy.setdefault('legs', [])
+        strategy.setdefault('is_credit_spread', False)
+        strategy.setdefault('confidence', 'Medium')
+        
+        # Use the first occurrence of each strategy name
+        if strategy['name'] not in unique_strategies:
+            unique_strategies[strategy['name']] = strategy
+    
+    # Convert back to list and ensure primary strategy is first
+    recommended_strategies = list(unique_strategies.values())
+    if primary_strategy and primary_strategy['name'] != "None":
+        # Move primary strategy to the front
+        recommended_strategies = [s for s in recommended_strategies if s['name'] != primary_strategy['name']]
+        recommended_strategies.insert(0, primary_strategy)
+    
+    # Add the primary strategy to the return value
+    return conclusion_html, final_bias, primary_strategy, recommended_strategies
 
 def _sanitize_for_json(item):
     """
