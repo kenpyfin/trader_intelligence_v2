@@ -247,8 +247,20 @@ const StrategyOrder = ({ strategy, strategies = [], ticker, expirationDate, gptV
     const [orderStatus, setOrderStatus] = useState({});    
     const [showGptInsights, setShowGptInsights] = useState(false);
 
-    // If single strategy is passed, convert it to array for consistent handling
-    const allStrategies = strategies && strategies.length > 0 ? strategies : (strategy ? [strategy] : []);
+    // Consolidate strategies for execution from either GPT verdict or standard analysis
+    let allStrategies = [];
+    if (gptVerdict?.execution_recommendations) {
+        const { primary_strategy, alternative_strategies } = gptVerdict.execution_recommendations;
+        if (primary_strategy) {
+            allStrategies.push({ ...primary_strategy, is_primary: true });
+        }
+        if (alternative_strategies) {
+            allStrategies.push(...alternative_strategies);
+        }
+    } else {
+        // Fallback to non-GPT strategies if no executable GPT strategies are found
+        allStrategies = strategies && strategies.length > 0 ? strategies : (strategy ? [strategy] : []);
+    }
 
     const handleExecute = async (strategy, index) => {
         setIsOrdering(prev => ({ ...prev, [index]: true }));
@@ -301,7 +313,7 @@ const StrategyOrder = ({ strategy, strategies = [], ticker, expirationDate, gptV
 
         const legDescriptions = strategy.legs.map((leg, i) => (
             <li key={i}>
-                <strong>{leg.action}</strong> {leg.strike.toFixed(2)} {leg.right}
+                <strong>{leg.action}</strong> {leg.strike ? `$${leg.strike.toFixed(2)}` : leg.strike_offset} {leg.right}
             </li>
         ));
 
@@ -835,7 +847,7 @@ const StrategyOrder = ({ strategy, strategies = [], ticker, expirationDate, gptV
                                                         color: '#1f2937',
                                                         fontSize: '13px'
                                                     }}>
-                                                        {alt.type}
+                                                        {alt.name}
                                                     </strong>
                                                     <span style={{
                                                         padding: '2px 8px',
