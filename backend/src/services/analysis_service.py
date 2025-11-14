@@ -668,8 +668,9 @@ def generate_holistic_conclusion(
             recommended_strategies.append(strategy)
     
     # Add the primary strategy to the recommended strategies if it's not already there
-    if primary_strategy not in recommended_strategies:
-        recommended_strategies.append(primary_strategy)
+    # This is handled at the end of the function.
+    # if primary_strategy not in recommended_strategies:
+    #     recommended_strategies.append(primary_strategy)
 
     # Determine ATM and OTM strikes for constructing strategy legs
     atm_strike = strikes[np.argmin(np.abs(strikes - S_current))] if len(strikes) > 0 else S_current
@@ -842,7 +843,7 @@ def generate_holistic_conclusion(
     if normalized_hint_name:
         hinted_strategy = _build_strategy_from_name(normalized_hint_name)
         if hinted_strategy:
-            recommended_strategy = hinted_strategy
+            primary_strategy = hinted_strategy
             hint_applied = True
             desc_segments = []
             if hint_description:
@@ -864,7 +865,7 @@ def generate_holistic_conclusion(
             if iv_sentiment == 'high_vol':
                 strategy_rec += "<p><b>Sell Premium (High IV) - Iron Condor.</b> The analysis is neutral and implied volatility is high. An Iron Condor profits if the stock price remains within a defined range, benefiting from time decay and a potential decrease in IV. This is a defined-risk, high-probability trade.</p>"
                 if len(otm_puts) >= 2 and len(otm_calls) >= 2:
-                    recommended_strategy = {
+                    primary_strategy = {
                         "name": "Iron Condor",
                         "is_credit_spread": True,
                         "legs": [
@@ -876,7 +877,7 @@ def generate_holistic_conclusion(
                     }
                 else:
                     # Fallback when insufficient strikes for Iron Condor
-                    recommended_strategy = {
+                    primary_strategy = {
                         "name": "Short Straddle",
                         "is_credit_spread": False,
                         "legs": [
@@ -886,7 +887,7 @@ def generate_holistic_conclusion(
                     }
             elif iv_sentiment == 'low_vol':
                 strategy_rec += "<p><b>Buy Premium (Low IV) - Long Straddle.</b> The analysis is neutral but a large move is possible, especially if a catalyst is near. A Long Straddle profits from a significant price move in either direction and benefits from the currently cheap option premiums.</p>"
-                recommended_strategy = {
+                primary_strategy = {
                     "name": "Long Straddle",
                     "is_credit_spread": False,
                     "legs": [
@@ -897,7 +898,7 @@ def generate_holistic_conclusion(
             else:
                 strategy_rec += "<p><b>Wait for a clearer signal.</b> The directional bias is neutral and IV is not at an extreme. It may be prudent to wait for a better entry point or a clearer market sentiment before committing capital.</p>"
                 # Provide a basic watch strategy so execution section appears
-                recommended_strategy = {
+                primary_strategy = {
                     "name": "Watch and Wait",
                     "is_credit_spread": False,
                     "legs": [
@@ -908,7 +909,7 @@ def generate_holistic_conclusion(
             if iv_sentiment == 'high_vol':
                 strategy_rec += "<p><b>Defined-Risk Bullish (High IV) - Bull Put Spread.</b> With a bullish bias and high IV, selling a credit spread is advantageous. A Bull Put Spread profits if the stock moves up, sideways, or even slightly down. It benefits from time decay and high premiums, while defining your maximum risk.</p>"
                 if len(otm_puts) >= 2:
-                    recommended_strategy = {
+                    primary_strategy = {
                         "name": "Bull Put Spread",
                         "is_credit_spread": True,
                         "legs": [
@@ -918,7 +919,7 @@ def generate_holistic_conclusion(
                     }
                 else:
                     # Fallback when insufficient strikes for spread
-                    recommended_strategy = {
+                    primary_strategy = {
                         "name": "Cash Secured Put",
                         "is_credit_spread": False,
                         "legs": [
@@ -928,7 +929,7 @@ def generate_holistic_conclusion(
             else:
                 strategy_rec += "<p><b>Defined-Risk Bullish (Low/Mid IV) - Bull Call Spread.</b> With a bullish bias and cheaper premiums, a debit spread is attractive. A Bull Call Spread profits from a rise in the stock price with a lower cost and less time decay sensitivity than buying a call outright. Your risk and reward are both capped.</p>"
                 if len(itm_calls) >= 1 and len(otm_calls) >= 1:
-                    recommended_strategy = {
+                    primary_strategy = {
                         "name": "Bull Call Spread",
                         "is_credit_spread": False,
                         "legs": [
@@ -938,7 +939,7 @@ def generate_holistic_conclusion(
                     }
                 else:
                     # Fallback when insufficient strikes for spread
-                    recommended_strategy = {
+                    primary_strategy = {
                         "name": "Long Call",
                         "is_credit_spread": False,
                         "legs": [
@@ -949,7 +950,7 @@ def generate_holistic_conclusion(
             if iv_sentiment == 'high_vol':
                 strategy_rec += "<p><b>Defined-Risk Bearish (High IV) - Bear Call Spread.</b> With a bearish bias and high IV, a credit spread is a strong choice. A Bear Call Spread profits if the stock moves down, sideways, or slightly up. It benefits from rich option premiums and time decay.</p>"
                 if len(otm_calls) >= 2:
-                    recommended_strategy = {
+                    primary_strategy = {
                         "name": "Bear Call Spread",
                         "is_credit_spread": True,
                         "legs": [
@@ -959,7 +960,7 @@ def generate_holistic_conclusion(
                     }
                 else:
                     # Fallback when insufficient strikes for spread
-                    recommended_strategy = {
+                    primary_strategy = {
                         "name": "Short Call",
                         "is_credit_spread": False,
                         "legs": [
@@ -969,7 +970,7 @@ def generate_holistic_conclusion(
             else:
                 strategy_rec += "<p><b>Defined-Risk Bearish (Low/Mid IV) - Bear Put Spread.</b> With a bearish bias and low IV, a debit spread is a good way to express a directional view. A Bear Put Spread profits from a fall in the stock price while having a lower cost and defined risk compared to buying a put.</p>"
                 if len(itm_puts) >= 1 and len(otm_puts) >= 1:
-                    recommended_strategy = {
+                    primary_strategy = {
                         "name": "Bear Put Spread",
                         "is_credit_spread": False,
                         "legs": [
@@ -979,7 +980,7 @@ def generate_holistic_conclusion(
                     }
                 else:
                     # Fallback when insufficient strikes for spread
-                    recommended_strategy = {
+                    primary_strategy = {
                         "name": "Long Put",
                         "is_credit_spread": False,
                         "legs": [
@@ -988,10 +989,10 @@ def generate_holistic_conclusion(
                     }
     
     # Final safety check - ensure we always have a valid strategy for execution section
-    if recommended_strategy["name"] == "None" or len(recommended_strategy["legs"]) == 0:
+    if primary_strategy["name"] == "None" or len(primary_strategy["legs"]) == 0:
         # Provide a basic directional strategy as ultimate fallback
         if "Bullish" in final_bias:
-            recommended_strategy = {
+            primary_strategy = {
                 "name": "Long Call (Basic)",
                 "is_credit_spread": False,
                 "legs": [
@@ -999,7 +1000,7 @@ def generate_holistic_conclusion(
                 ]
             }
         elif "Bearish" in final_bias:
-            recommended_strategy = {
+            primary_strategy = {
                 "name": "Long Put (Basic)",
                 "is_credit_spread": False,
                 "legs": [
@@ -1008,7 +1009,7 @@ def generate_holistic_conclusion(
             }
         else:
             # Neutral fallback
-            recommended_strategy = {
+            primary_strategy = {
                 "name": "Long Straddle (Basic)",
                 "is_credit_spread": False,
                 "legs": [
