@@ -175,14 +175,33 @@ def _build_messages(ticker: str, analysis_payload: Dict[str, Any], use_web_searc
         "Remember: Return ONLY the JSON object, no other text or formatting."
     )
 
-    user = {
-        "ticker": ticker,
-        "sub_analyses": analysis_payload
-    }
+    prompt_parts = [f"Analyze the provided data for ticker {ticker} and generate a trading verdict as per the system instructions."]
+    
+    # Key sections mentioned in the system prompt for clear separation
+    main_sections = [
+        "market_data", 
+        "stock_fundamentals", 
+        "volatility_structure", 
+        "parity_analysis", 
+        "options_positioning"
+    ]
+    
+    for section in main_sections:
+        if section in analysis_payload and analysis_payload[section] is not None:
+            data = analysis_payload[section]
+            # Using compact JSON format
+            prompt_parts.append(f"\n<{section}>\n{json.dumps(data)}\n</{section}>")
+            
+    # Add other analyses under a generic tag to provide full context
+    other_analyses = {k: v for k, v in analysis_payload.items() if k not in main_sections and v is not None}
+    if other_analyses:
+        prompt_parts.append(f"\n<additional_context>\n{json.dumps(other_analyses)}\n</additional_context>")
+        
+    user_content = "\n".join(prompt_parts)
 
     return [
         {"role": "system", "content": system},
-        {"role": "user", "content": json.dumps(user)}
+        {"role": "user", "content": user_content}
     ]
 
 
