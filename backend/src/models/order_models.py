@@ -3,7 +3,8 @@ from typing import List, Optional, Dict, Any
 
 class OrderLeg(BaseModel):
     action: str  # 'BUY' or 'SELL'
-    strike: float
+    strike: Optional[float] = None
+    strike_offset: Optional[str] = None
     right: str   # 'C' or 'P'
 
 class StrategyOrderRequest(BaseModel):
