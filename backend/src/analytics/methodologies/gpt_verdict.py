@@ -70,7 +70,7 @@ def _sanitize_for_json(obj: Any, max_list_len: int = 200) -> Any:
     return str(obj)
 
 
-def _build_messages(ticker: str, analysis_payload: Dict[str, Any], use_web_search: bool = False) -> Dict[str, Any]:
+def _build_messages(ticker: str, expiration_date: str, analysis_payload: Dict[str, Any], use_web_search: bool = False) -> Dict[str, Any]:
     """
     Build system/user messages for the chat completion API.
     We instruct the model to return strict JSON so we can parse it reliably.
@@ -175,7 +175,7 @@ def _build_messages(ticker: str, analysis_payload: Dict[str, Any], use_web_searc
         "Remember: Return ONLY the JSON object, no other text or formatting."
     )
 
-    prompt_parts = [f"Analyze the provided data for ticker {ticker} and generate a trading verdict as per the system instructions."]
+    prompt_parts = [f"Analyze the provided data for ticker {ticker} for the options expiration date of {expiration_date}. Generate a trading verdict and strategy recommendations specifically for this expiration date, as per the system instructions."]
     
     # Key sections mentioned in the system prompt for clear separation
     main_sections = [
@@ -625,7 +625,7 @@ def _openai_chat_completion(messages, model: str = "gpt-5", temperature: float =
     }
 
 
-def generate_gpt_verdict(ticker: str, analysis_result: Dict[str, Any], model: str = "gpt-5", use_web_search: bool = False) -> Dict[str, Any]:
+def generate_gpt_verdict(ticker: str, expiration_date: str, analysis_result: Dict[str, Any], model: str = "gpt-5", use_web_search: bool = False) -> Dict[str, Any]:
     """
     Compose a prompt from the existing sub-analyses and call the LLM to obtain a final verdict.
     Returns a dict with keys:
@@ -662,7 +662,7 @@ def generate_gpt_verdict(ticker: str, analysis_result: Dict[str, Any], model: st
         # "risk_exposure"
     ]
     payload = {k: _sanitize_for_json(analysis_result.get(k)) for k in keys_of_interest if k in analysis_result}
-    messages = _build_messages(ticker, payload, use_web_search=use_web_search)
+    messages = _build_messages(ticker, expiration_date, payload, use_web_search=use_web_search)
 
     try:
         ai = _openai_chat_completion(messages, model=model)
