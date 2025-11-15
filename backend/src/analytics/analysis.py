@@ -780,7 +780,7 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
         print(f"DEBUG: Running GPT Verdict analysis for {ticker} (method: {analysis_method})")
         use_web = 'web' in analysis_method
         # Pass the sub-analyses to the AI
-        gpt_verdict = generate_gpt_verdict(ticker, analysis_result_package, model=gpt_model or 'gpt-5', use_web_search=use_web)
+        gpt_verdict = generate_gpt_verdict(ticker, expiration_date.isoformat(), analysis_result_package, model=gpt_model or 'gpt-5', use_web_search=use_web)
         print(f"DEBUG: GPT Verdict response received: {gpt_verdict}")
 
         # Populate the package with AI results
