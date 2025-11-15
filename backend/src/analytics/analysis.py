@@ -788,20 +788,30 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
         analysis_result_package['final_conclusion_html'] = gpt_verdict.get('summary_html', '<p>Failed to retrieve AI summary.</p>')
         analysis_result_package['gpt_verdict'] = gpt_verdict
         
-        # Generate recommended strategy based on the GPT bias and analysis data
-        # Use the holistic conclusion function to generate strategy, but override the HTML and bias with GPT results
-        _, _, recommended_strategy = generate_holistic_conclusion(synthesis_data, strikes, S_current)
-        analysis_result_package['recommended_strategy'] = _sanitize_for_json_serialization(recommended_strategy)
-        print(f"DEBUG: Generated recommended strategy for GPT analysis: {recommended_strategy.get('name', 'None')}")
+        # Generate recommended strategy based on the GPT bias and guidance hints
+        primary_hint = (gpt_verdict.get('execution_recommendations') or {}).get('primary_strategy')
+        _, _, primary_strategy, recommended_strategies = generate_holistic_conclusion(
+            synthesis_data,
+            strikes,
+            S_current,
+            bias_override=gpt_verdict.get('final_bias'),
+            strategy_hint=primary_hint,
+        )
+        # Store both the primary strategy and all recommended strategies
+        analysis_result_package['recommended_strategy'] = _sanitize_for_json_serialization(primary_strategy)
+        analysis_result_package['recommended_strategies'] = _sanitize_for_json_serialization(recommended_strategies)
+        print(f"DEBUG: Generated {len(recommended_strategies)} recommended strategies for GPT analysis")
     else:
         print(f"DEBUG: Running Holistic Market Edge analysis for {ticker}")
-        # Generate the rule-based conclusion - fix to handle 3 return values
-        final_conclusion_html, final_bias, recommended_strategy = generate_holistic_conclusion(synthesis_data, strikes, S_current)
+        # Generate the rule-based conclusion - handle 4 return values
+        final_conclusion_html, final_bias, primary_strategy, recommended_strategies = generate_holistic_conclusion(synthesis_data, strikes, S_current)
         analysis_result_package['final_conclusion_html'] = final_conclusion_html
         analysis_result_package['final_bias'] = final_bias
-        analysis_result_package['recommended_strategy'] = _sanitize_for_json_serialization(recommended_strategy)
+        # Store both the primary strategy and all recommended strategies
+        analysis_result_package['recommended_strategy'] = _sanitize_for_json_serialization(primary_strategy)
+        analysis_result_package['recommended_strategies'] = _sanitize_for_json_serialization(recommended_strategies)
         analysis_result_package['gpt_verdict'] = None # Ensure it's not present for rule-based analysis
-        print(f"DEBUG: Generated recommended strategy for Holistic analysis: {recommended_strategy.get('name', 'None')}")
+        print(f"DEBUG: Generated {len(recommended_strategies)} recommended strategies for Holistic analysis")
 
     # Serialize DataFrame for API response after all internal processing is done
     results_df_value = analysis_result_package.get('results_df')
