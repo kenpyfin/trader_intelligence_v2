@@ -473,6 +473,46 @@ def analyze_candlestick_patterns(df):
     primary_trend = "Uptrend" if last_row['Close'] > last_row['SMA200'] else "Downtrend"
     market_context = {"primary_trend": primary_trend, "secondary_trend": secondary_trend}
 
+    # --- Volume Analysis ---
+    volume_analysis = {}
+    last_vol = last_row.get('Volume')
+    avg_vol_10 = last_row.get('AvgVol10')
+    if pd.notna(last_vol) and pd.notna(avg_vol_10) and avg_vol_10 > 0:
+        vol_ratio = last_vol / avg_vol_10
+        volume_analysis['vol_ratio_10d'] = vol_ratio
+        if vol_ratio > 1.5:
+            volume_analysis['summary'] = f"Recent volume was significantly above average ({vol_ratio:.1f}x), indicating strong participation."
+        elif vol_ratio < 0.7:
+            volume_analysis['summary'] = f"Recent volume was below average ({vol_ratio:.1f}x), suggesting a lack of conviction."
+        else:
+            volume_analysis['summary'] = f"Recent volume was near the 10-day average ({vol_ratio:.1f}x)."
+
+        # Trend confirmation with volume
+        df['price_change'] = df['Close'].diff()
+        recent_df = df.tail(10)
+        up_days = recent_df[recent_df['price_change'] > 0]
+        down_days = recent_df[recent_df['price_change'] < 0]
+
+        if secondary_trend == "Uptrend":
+            if not up_days.empty and not down_days.empty:
+                avg_vol_up = up_days['Volume'].mean()
+                avg_vol_down = down_days['Volume'].mean()
+                if avg_vol_up > avg_vol_down:
+                    volume_analysis['trend_confirmation'] = "Volume confirms the uptrend (higher on up days)."
+                else:
+                    volume_analysis['trend_confirmation'] = "Volume shows divergence from uptrend (higher on down days)."
+        elif secondary_trend == "Downtrend":
+            if not up_days.empty and not down_days.empty:
+                avg_vol_up = up_days['Volume'].mean()
+                avg_vol_down = down_days['Volume'].mean()
+                if avg_vol_down > avg_vol_up:
+                    volume_analysis['trend_confirmation'] = "Volume confirms the downtrend (higher on down days)."
+                else:
+                    volume_analysis['trend_confirmation'] = "Volume shows divergence from downtrend (higher on up days)."
+    else:
+        volume_analysis['summary'] = "Volume data not sufficient for analysis."
+
+
     # --- Pattern Recognition Setup ---
     max_lookback = min(4, len(df))
     get_iloc = lambda col, i: df[col].iloc[-1-i]
@@ -523,7 +563,7 @@ def analyze_candlestick_patterns(df):
     if 'index' in plot_data_dict and hasattr(plot_data_dict['index'][0], 'strftime'):
         plot_data_dict['index'] = [ts.strftime('%Y-%m-%d') for ts in plot_data_dict['index']]
 
-    return {"patterns": found_patterns, "context": market_context, "plot_data": plot_data_dict}
+    return {"patterns": found_patterns, "context": market_context, "plot_data": plot_data_dict, "volume_analysis": volume_analysis}
 
 def generate_holistic_conclusion(
     synthesis_data,

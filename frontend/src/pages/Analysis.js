@@ -119,6 +119,27 @@ const CandlestickChart = ({ plotData, ticker }) => {
     });
   }
 
+  // Add Volume trace
+  const volumeIdx = findCol('Volume');
+  const closeIdx = findCol('Close');
+  if (volumeIdx !== -1 && closeIdx !== -1) {
+    traces.push({
+      x: dates,
+      y: data.map(row => row[volumeIdx]),
+      type: 'bar',
+      name: 'Volume',
+      yaxis: 'y2',
+      marker: {
+        color: data.map((d, i) => {
+          if (i > 0) {
+            return data[i][closeIdx] >= data[i - 1][closeIdx] ? 'rgba(44, 160, 44, 0.7)' : 'rgba(214, 39, 40, 0.7)';
+          }
+          return 'rgba(156, 156, 156, 0.7)';
+        }),
+      },
+    });
+  }
+
   const layout = {
     title: `${ticker} Price Chart`,
     xaxis: {
@@ -127,10 +148,12 @@ const CandlestickChart = ({ plotData, ticker }) => {
       tickformat: '%Y-%m-%d',
       rangeslider: { visible: false },
     },
-    yaxis: { title: 'Price' },
-    margin: { t: 40, b: 40, l: 50, r: 20 },
+    yaxis: { title: 'Price', domain: [0.3, 1] },
+    yaxis2: { title: 'Volume', domain: [0, 0.25], showticklabels: true },
+    margin: { t: 40, b: 40, l: 50, r: 50 },
     height: 420,
     legend: { orientation: 'h' },
+    showlegend: false,
   };
 
   return <Plot data={traces} layout={layout} style={{ width: '100%' }} />;
@@ -986,6 +1009,12 @@ const AnalysisDetails = ({ data }) => {
         }
         <p><strong>Primary Trend:</strong> {data.candlestick_analysis?.context?.primary_trend}</p>
         <p><strong>Secondary Trend:</strong> {data.candlestick_analysis?.context?.secondary_trend}</p>
+        {data.candlestick_analysis?.volume_analysis?.summary && (
+            <p><strong>Volume:</strong> {data.candlestick_analysis.volume_analysis.summary}</p>
+        )}
+        {data.candlestick_analysis?.volume_analysis?.trend_confirmation && (
+            <p><strong>Trend Confirmation:</strong> {data.candlestick_analysis.volume_analysis.trend_confirmation}</p>
+        )}
       </AnalysisCard>
       
       <StrategyOrder 
