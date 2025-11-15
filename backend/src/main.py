@@ -267,6 +267,7 @@ async def analyze_stock_with_gpt(request: AnalysisRequest):
             "search_performed": bool(ai.get("search_performed", False)),
             "sources": sources,
         }
+        result['expiration_date'] = request.expiration_date
         result['dte'] = (expiration_date - date.today()).days
 
         payload_to_persist = {
@@ -422,6 +423,7 @@ async def analyze_stock(request: AnalysisRequest):
 
         # The frontend expects an array of results, so we wrap the single result in a list.
         # We also calculate and add the DTE (days to expiration) for display purposes.
+        analysis_result['expiration_date'] = request.expiration_date
         analysis_result['dte'] = (expiration_date - date.today()).days
 
         payload_to_persist = {
