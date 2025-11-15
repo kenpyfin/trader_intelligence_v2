@@ -284,7 +284,7 @@ const PortfolioPage = () => {
     const legsToClose = portfolioData.positions.options[symbol].map(leg => ({
         symbol: leg.symbol,
         secType: 'OPT',
-        expiry_date: leg.expiry,
+        expiry_date: leg.expiry?.replace(/-/g, ''),
         strike: leg.strike,
         right: leg.right,
         exchange: leg.exchange,
