@@ -636,6 +636,25 @@ class PriceDataFetcher:
         
         return {} # Fallback if all retries fail
 
+    async def get_current_price_from_broker_async(self, ticker: str) -> float | None:
+        """
+        Asynchronously fetches the current market price for a ticker from the broker (Alpaca).
+        """
+        trader = IBTrader() if self.trader is None else self.trader
+        price = None
+        try:
+            # AlpacaTrader's methods are async.
+            price = await trader.get_current_price(symbol=ticker)
+            if price is not None and isinstance(price, (int, float)) and price > 0:
+                logging.info(f"Fetched current price for {ticker} from broker: {price}")
+                return float(price)
+            else:
+                logging.warning(f"Broker returned invalid price for {ticker}: {price}")
+                return None
+        except Exception as e:
+            logging.info(f"Could not fetch current price for {ticker} from broker: {e}")
+        return None
+
     def get_futures_data_finviz(self, max_retries=2):
         """
         Fetches futures market data from Finviz Elite API.

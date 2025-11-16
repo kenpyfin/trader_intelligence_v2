@@ -236,6 +236,23 @@ async def analyze_stock_with_gpt(request: AnalysisRequest):
 
         if base_result.get("status") != "success":
             error_message = base_result.get("message", "Analysis failed for the selected date.")
+            if "Could not fetch valid current price" in error_message:
+                print(f"INFO: Price fetch failed for {request.ticker}, attempting broker fallback.")
+                fetcher = PriceDataFetcher()
+                new_price = await fetcher.get_current_price_from_broker_async(request.ticker.upper())
+                if new_price:
+                    print(f"INFO: Retrying analysis for {request.ticker} with broker price: {new_price}")
+                    base_result = await run_full_analysis(
+                        ticker=request.ticker.upper(),
+                        expiration_date=expiration_date,
+                        r_current=request.risk_free_rate,
+                        methodology='gpt-verdict',  # Use the gpt-verdict methodology
+                        gpt_model=request.gpt_model,
+                        override_price=new_price
+                    )
+
+        if base_result.get("status") != "success":
+            error_message = base_result.get("message", "Analysis failed for the selected date.")
             raise HTTPException(status_code=400, detail=error_message)
 
         # The GPT verdict is now part of the base_result.
@@ -419,7 +436,24 @@ async def analyze_stock(request: AnalysisRequest):
         # Check if the single analysis was successful
         if analysis_result.get("status") != "success":
             error_message = analysis_result.get("message", "Analysis failed for the selected date.")
-            raise HTTPException(status_code=400, detail=error_message)
+            if "Could not fetch valid current price" in error_message:
+                print(f"INFO: Price fetch failed for {request.ticker}, attempting broker fallback.")
+                fetcher = PriceDataFetcher()
+                new_price = await fetcher.get_current_price_from_broker_async(request.ticker.upper())
+                if new_price:
+                    print(f"INFO: Retrying analysis for {request.ticker} with broker price: {new_price}")
+                    analysis_result = await run_full_analysis(
+                        ticker=request.ticker.upper(),
+                        expiration_date=expiration_date,
+                        r_current=request.risk_free_rate,
+                        methodology=request.analysis_method,
+                        gpt_model=request.gpt_model,
+                        override_price=new_price
+                    )
+
+            if analysis_result.get("status") != "success":
+                error_message = analysis_result.get("message", "Analysis failed for the selected date.")
+                raise HTTPException(status_code=400, detail=error_message)
 
         # The frontend expects an array of results, so we wrap the single result in a list.
         # We also calculate and add the DTE (days to expiration) for display purposes.
