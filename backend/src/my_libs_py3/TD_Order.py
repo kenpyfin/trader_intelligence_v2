@@ -242,7 +242,9 @@ class AlpacaTrader:
         sell_tokens: Set[str] = {"SELL", "SHORT", "WRITE"}
         buy_tokens: Set[str] = {"BUY", "LONG"}
 
-        leg_specs: List[Dict[str, Any]] = []
+        option_leg_specs: List[Dict[str, Any]] = []
+        stock_leg_specs: List[Dict[str, Any]] = []
+
         for leg in legs_data:
             base_qty = int(leg.get("quantity", 1))
             if base_qty == 0:
@@ -251,18 +253,29 @@ class AlpacaTrader:
             if leg_action not in sell_tokens and leg_action not in buy_tokens:
                 raise ValueError(f"Unsupported leg action '{leg_action}'.")
             leg_sign = -1 if leg_action in sell_tokens else 1
+            per_leg_qty = int(base_qty * absolute_size * leg_sign)
+            if per_leg_qty == 0:
+                continue
+
+            sec_type = leg.get("secType", "OPT")
+            if sec_type == "STK":
+                stock_leg_specs.append(
+                    {
+                        "per_leg_qty": per_leg_qty,
+                        "action": leg_action,
+                    }
+                )
+                continue
+
             expiry = leg.get("expiry_date") or leg.get("expiry")
             strike = leg.get("strike")
             right = leg.get("right")
             if not all([expiry, strike, right]):
-                raise ValueError("Each leg requires expiry, strike, and right fields.")
+                raise ValueError("Each option leg requires expiry, strike, and right fields.")
             occ_symbol = leg.get("option_symbol") or build_occ_symbol(symbol, expiry, _to_decimal(strike), right)
             ratio_qty = float(base_qty * leg_sign)
-            per_leg_qty = int(base_qty * absolute_size * leg_sign)
-            if per_leg_qty == 0:
-                continue
             position_intent = _leg_position_intent(open_position=open_position, leg_sign=leg_sign)
-            leg_specs.append(
+            option_leg_specs.append(
                 {
                     "occ_symbol": occ_symbol,
                     "ratio_qty": ratio_qty,
@@ -275,12 +288,13 @@ class AlpacaTrader:
                 }
             )
 
-        if not leg_specs:
+        if not option_leg_specs and not stock_leg_specs:
             raise ValueError("No executable legs were produced for strategy order.")
 
-        multi_leg_requested = len(leg_specs) > 1
-        if multi_leg_requested:
-            order_side = _strategy_side_from_legs(leg_specs, size)
+        # Alpaca multi-leg orders only support options. If stock is involved, submit individually.
+        use_multi_leg_order = len(option_leg_specs) > 1 and not stock_leg_specs
+        if use_multi_leg_order:
+            order_side = _strategy_side_from_legs(option_leg_specs, size)
             multi_contract = {"asset_type": "option", "symbol": symbol.upper()}
             multi_payload: Dict[str, Any] = {
                 "asset_type": "option",
@@ -296,11 +310,11 @@ class AlpacaTrader:
                         "side": spec["action"],
                         "position_intent": spec["position_intent"],
                     }
-                    for spec in leg_specs
+                    for spec in option_leg_specs
                 ],
             }
             if final_limit is None:
-                final_limit = await self._derive_strategy_limit_price(symbol, leg_specs)
+                final_limit = await self._derive_strategy_limit_price(symbol, option_leg_specs)
             if final_limit is None:
                 raise RuntimeError("Unable to determine limit price for multi-leg strategy order.")
             multi_payload["limit_price"] = float(final_limit)
@@ -311,7 +325,12 @@ class AlpacaTrader:
             except Exception as exc:
                 raise RuntimeError(f"Multi-leg order submission failed: {exc}") from exc
 
-        for spec in leg_specs:
+        # Fallback to individual orders if not a pure multi-leg option strategy
+        for spec in stock_leg_specs:
+            trade = await self.place_stock_market_order(symbol=symbol, size=spec["per_leg_qty"])
+            contracts.append(trade)
+
+        for spec in option_leg_specs:
             trade = await self.place_option_order(
                 symbol=symbol,
                 size=spec["per_leg_qty"],
