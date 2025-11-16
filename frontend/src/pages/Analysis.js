@@ -336,7 +336,7 @@ const StrategyOrder = ({ strategy, strategies = [], ticker, expirationDate, gptV
 
         const legDescriptions = strategy.legs.map((leg, i) => (
             <li key={i}>
-                <strong>{leg.action}</strong> {leg.strike ? `$${leg.strike.toFixed(2)}` : leg.strike_offset} {leg.right}
+                <strong>{leg.action}</strong> {leg.strike ? `$${leg.strike.toFixed(2)}` : ''} {leg.right}
             </li>
         ));
 

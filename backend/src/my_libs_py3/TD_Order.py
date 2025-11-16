@@ -271,14 +271,6 @@ class AlpacaTrader:
             strike = leg.get("strike")
             right = leg.get("right")
 
-            if strike is None and expiry:
-                strike_offset = leg.get("strike_offset")
-                if strike_offset:
-                    resolved_strike = await self._resolve_strike_from_offset(symbol, expiry, strike_offset)
-                    if resolved_strike is None:
-                        raise ValueError(f"Could not resolve strike for offset '{strike_offset}' on {expiry}.")
-                    strike = resolved_strike
-
             if not all([expiry, strike, right]):
                 raise ValueError("Each option leg requires expiry, strike, and right fields.")
             occ_symbol = leg.get("option_symbol") or build_occ_symbol(symbol, expiry, _to_decimal(strike), right)
@@ -376,37 +368,6 @@ class AlpacaTrader:
         if not observed:
             return None
         return round(abs(total_value), 2)
-
-    async def _resolve_strike_from_offset(self, symbol: str, expiry_date: str, offset: str) -> Optional[float]:
-        """Resolves a strike offset like 'ATM' to a concrete strike price."""
-        offset_str = (offset or "").upper().strip()
-        if not offset_str:
-            return None
-
-        # Basic ATM resolution
-        if offset_str == "ATM":
-            current_price = await self.get_current_price(symbol, "STK")
-            if current_price is None:
-                print(f"DEBUG(TD_Order): Could not get current price for {symbol} to resolve ATM strike.")
-                return None
-
-            chain_df = await self.get_option_chain_df(symbol, expiry_date)
-            if chain_df.empty or "Strike" not in chain_df.columns:
-                print(f"DEBUG(TD_Order): Could not get option chain for {symbol}/{expiry_date} to resolve ATM strike.")
-                return None
-
-            available_strikes = sorted(chain_df["Strike"].unique())
-            if not available_strikes:
-                return None
-
-            # Find strike closest to current price
-            closest_strike = min(available_strikes, key=lambda s: abs(float(s) - current_price))
-            print(f"DEBUG(TD_Order): Resolved ATM for {symbol} to strike {closest_strike} (current price: {current_price})")
-            return float(closest_strike)
-        
-        # Placeholder for more complex offsets, e.g., "ATM+5"
-        print(f"WARNING(TD_Order): Strike offset '{offset}' is not yet supported.")
-        return None
 
     async def wait_for_order_fill(self, trade, timeout=TIMEOUT, cancel_on_timeout: bool = False):
         await self.connect()

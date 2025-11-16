@@ -5,7 +5,6 @@ class OrderLeg(BaseModel):
     secType: Literal['STK', 'OPT'] = 'OPT'
     action: str  # 'BUY' or 'SELL'
     strike: Optional[float] = None
-    strike_offset: Optional[str] = None
     right: Optional[Literal['C', 'P']] = None
     expiry: Optional[str] = None # YYYY-MM-DD
 
@@ -13,13 +12,12 @@ class OrderLeg(BaseModel):
     def check_leg_type_consistency(cls, values):
         secType = values.get('secType')
         strike = values.get('strike')
-        strike_offset = values.get('strike_offset')
         right = values.get('right')
         expiry = values.get('expiry')
 
         if secType == 'OPT':
-            if strike is None and strike_offset is None:
-                raise ValueError("'strike' or 'strike_offset' is required for option legs")
+            if strike is None:
+                raise ValueError("'strike' is required for option legs")
             if right is None:
                 raise ValueError("'right' is required for option legs")
             if expiry is None:
@@ -27,8 +25,6 @@ class OrderLeg(BaseModel):
         elif secType == 'STK':
             if strike is not None:
                 raise ValueError("'strike' must not be provided for stock legs")
-            if strike_offset is not None:
-                raise ValueError("'strike_offset' must not be provided for stock legs")
             if right is not None:
                 raise ValueError("'right' must not be provided for stock legs")
             if expiry is not None:
