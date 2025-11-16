@@ -293,7 +293,7 @@ const StrategyOrder = ({ strategy, strategies = [], ticker, expirationDate, gptV
             const payload = {
                 ticker: ticker,
                 expiration_date: expirationDate, // "YYYY-MM-DD"
-                legs: strategy.legs.map(leg => ({ ...leg, expiry_date: expirationDate })),
+                legs: strategy.legs,
                 is_credit_spread: strategy.is_credit_spread,
                 size: 1, // Default to 1 for now
                 // Include GPT verdict insights for enhanced order context
