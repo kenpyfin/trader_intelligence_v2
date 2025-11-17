@@ -387,6 +387,32 @@ const StrategyOrder = ({ strategy, strategies = [], ticker, expirationDate, gptV
                     </ul>
                 </div>
                 
+                {(strategy.profit_target || strategy.stop_loss) && (
+                    <div style={{ 
+                        marginBottom: '15px', 
+                        display: 'grid', 
+                        gridTemplateColumns: '1fr 1fr', 
+                        gap: '10px', 
+                        fontSize: '14px',
+                        padding: '10px',
+                        backgroundColor: '#f8f9fa',
+                        borderRadius: '6px'
+                    }}>
+                        {typeof strategy.profit_target === 'number' && (
+                            <div>
+                                <strong style={{ color: '#2e7d32' }}>Profit Target:</strong>
+                                <div style={{ fontWeight: 'bold' }}>${strategy.profit_target.toFixed(2)}</div>
+                            </div>
+                        )}
+                        {typeof strategy.stop_loss === 'number' && (
+                            <div>
+                                <strong style={{ color: '#c62828' }}>Stop Loss:</strong>
+                                <div style={{ fontWeight: 'bold' }}>${strategy.stop_loss.toFixed(2)}</div>
+                            </div>
+                        )}
+                    </div>
+                )}
+                
                 <button 
                     onClick={() => handleExecute(strategy, index)}
                     disabled={isOrdering[index]}

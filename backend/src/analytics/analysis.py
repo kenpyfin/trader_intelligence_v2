@@ -451,7 +451,7 @@ def analyze_candlestick_patterns(df):
     return {"patterns": found_patterns, "context": market_context, "plot_data": plot_data}
 
 
-def generate_holistic_conclusion(synthesis_data):
+def generate_holistic_conclusion(synthesis_data, strikes, S_current, option_chain_df, bias_override=None, strategy_hint=None):
     sentiments = {'bullish': 0, 'bearish': 0, 'neutral': 0}
     components, bullish_drivers, bearish_drivers = [], [], []
 
@@ -470,17 +470,90 @@ def generate_holistic_conclusion(synthesis_data):
             process_component(name, synthesis_data[key])
 
     bull_score, bear_score = sentiments['bullish'], sentiments['bearish']
-    if bull_score > bear_score + 1: final_bias = "Bullish"
-    elif bear_score > bull_score + 1: final_bias = "Bearish"
-    elif bull_score > bear_score: final_bias = "Slightly Bullish"
-    elif bear_score > bull_score: final_bias = "Slightly Bearish"
-    else: final_bias = "Neutral"
+    
+    if bias_override:
+        final_bias = bias_override
+    else:
+        if bull_score > bear_score + 1: final_bias = "Bullish"
+        elif bear_score > bull_score + 1: final_bias = "Bearish"
+        elif bull_score > bear_score: final_bias = "Slightly Bullish"
+        elif bear_score > bull_score: final_bias = "Slightly Bearish"
+        else: final_bias = "Neutral"
     
     conclusion_html = "<h5>Summary of Findings:</h5><ul>" + "".join(components) + "</ul>"
     # Detailed text generation omitted for brevity but would follow logic from option_trade.py
     conclusion_html += f"<h5>Holistic Conclusion:</h5><p>The overall directional bias is <b>{final_bias}</b>.</p>"
 
-    return conclusion_html, final_bias
+    # NEW STRATEGY LOGIC
+    primary_strategy = {}
+    recommended_strategies = []
+    
+    atm_strike_idx = np.argmin(np.abs(strikes - S_current))
+    atm_strike = strikes[atm_strike_idx]
+
+    # Helper to create strategy with SL/PT
+    def create_strategy(name, legs, confidence, is_credit_spread=False):
+        strategy = {'name': name, 'legs': legs, 'confidence': confidence, 'is_credit_spread': is_credit_spread}
+        
+        total_price = 0
+        valid_legs = True
+        for leg in legs:
+            price = _get_market_price_from_finviz_df(option_chain_df, leg['strike'], leg['right'][0].upper())
+            if price is None:
+                valid_legs = False
+                break
+            
+            if leg['action'].lower() == 'buy':
+                total_price -= price
+            else: # sell
+                total_price += price
+
+        if valid_legs:
+            if is_credit_spread: # Credit strategy
+                credit = total_price
+                if credit > 0:
+                    strategy['profit_target'] = credit * 0.8  # Target 80% of max profit
+                    strategy['stop_loss'] = credit * 2.0  # Stop loss at 2x credit received
+            else: # Debit strategy
+                debit = -total_price
+                if debit > 0:
+                    strategy['profit_target'] = debit * 1.0  # Target 100% of debit paid
+                    strategy['stop_loss'] = debit * 0.5  # Stop loss at 50% of debit paid
+        
+        return strategy if valid_legs else None
+
+    if 'Bullish' in final_bias:
+        # Bull Call Spread
+        if atm_strike_idx + 1 < len(strikes):
+            buy_strike = atm_strike
+            sell_strike = strikes[atm_strike_idx + 1]
+            legs = [
+                {'action': 'Buy', 'right': 'Call', 'strike': buy_strike},
+                {'action': 'Sell', 'right': 'Call', 'strike': sell_strike}
+            ]
+            strat = create_strategy('Bull Call Spread', legs, 'Medium')
+            if strat:
+                recommended_strategies.append(strat)
+
+    elif 'Bearish' in final_bias:
+        # Bear Put Spread
+        if atm_strike_idx > 0:
+            buy_strike = atm_strike
+            sell_strike = strikes[atm_strike_idx - 1]
+            legs = [
+                {'action': 'Buy', 'right': 'Put', 'strike': buy_strike},
+                {'action': 'Sell', 'right': 'Put', 'strike': sell_strike}
+            ]
+            strat = create_strategy('Bear Put Spread', legs, 'Medium')
+            if strat:
+                recommended_strategies.append(strat)
+
+    if recommended_strategies:
+        primary_strategy = recommended_strategies[0]
+    else:
+        primary_strategy = {'name': 'None', 'legs': []}
+
+    return conclusion_html, final_bias, primary_strategy, recommended_strategies
 
 
 def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, rate_source: str = 'etf', analysis_method: str = 'holistic-market-edge', override_price: float = None, gpt_model: str = 'gpt-5'):
@@ -773,9 +846,6 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
         })
     }
 
-    # Import the generate_holistic_conclusion function  
-    from ..services.analysis_service import generate_holistic_conclusion
-    
     if (('gpt' in analysis_method) and ('verdict' in analysis_method)) or ('gpt-verdict' in analysis_method):
         print(f"DEBUG: Running GPT Verdict analysis for {ticker} (method: {analysis_method})")
         use_web = 'web' in analysis_method
@@ -794,6 +864,7 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
             synthesis_data,
             strikes,
             S_current,
+            option_chain_df,
             bias_override=gpt_verdict.get('final_bias'),
             strategy_hint=primary_hint,
         )
@@ -804,7 +875,7 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
     else:
         print(f"DEBUG: Running Holistic Market Edge analysis for {ticker}")
         # Generate the rule-based conclusion - handle 4 return values
-        final_conclusion_html, final_bias, primary_strategy, recommended_strategies = generate_holistic_conclusion(synthesis_data, strikes, S_current)
+        final_conclusion_html, final_bias, primary_strategy, recommended_strategies = generate_holistic_conclusion(synthesis_data, strikes, S_current, option_chain_df)
         analysis_result_package['final_conclusion_html'] = final_conclusion_html
         analysis_result_package['final_bias'] = final_bias
         # Store both the primary strategy and all recommended strategies
