@@ -4,6 +4,7 @@ pydantic
 motor<3
 numpy
 pandas
+alpaca-py
 ib_insync
 python-dotenv
 requests
@@ -24,3 +25,6 @@ backtrader
 lxml
 nest_asyncio
 plotly
+# Install ib_async when running on Python >= 3.9
+ib_async; python_version >= "3.9"
+ibapi>=9.81.1
