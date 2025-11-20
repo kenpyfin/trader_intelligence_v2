@@ -3,49 +3,98 @@ import {
   BrowserRouter as Router,
   Routes,
   Route,
-  NavLink
+  NavLink,
+  useLocation
 } from 'react-router-dom';
+import { createTheme, ThemeProvider } from '@mui/material/styles';
+import CssBaseline from '@mui/material/CssBaseline';
+import AppBar from '@mui/material/AppBar';
+import Toolbar from '@mui/material/Toolbar';
+import Typography from '@mui/material/Typography';
+import Button from '@mui/material/Button';
+import Container from '@mui/material/Container';
+import Box from '@mui/material/Box';
 
 import AnalysisPage from './pages/Analysis';
 import PortfolioPage from './pages/Portfolio';
 import YieldCurvePage from './pages/YieldCurve';
 
-const App = () => {
-  const navStyle = ({ isActive }) => ({
-    textDecoration: 'none',
-    color: isActive ? '#007bff' : 'black',
-    fontWeight: 'bold',
-    padding: '10px 15px',
-    borderBottom: isActive ? '3px solid #007bff' : '3px solid transparent'
-  });
+const theme = createTheme({
+  palette: {
+    mode: 'light',
+    primary: {
+      main: '#1976d2',
+    },
+    secondary: {
+      main: '#dc004e',
+    },
+    background: {
+      default: '#f5f5f5',
+    },
+  },
+  components: {
+    MuiCard: {
+      styleOverrides: {
+        root: {
+          borderRadius: 8,
+        },
+      },
+    },
+  },
+});
+
+const Navigation = () => {
+  const location = useLocation();
+  
+  const getButtonStyle = (path) => {
+    const isActive = location.pathname === path;
+    return {
+      color: 'white',
+      borderBottom: isActive ? '2px solid white' : '2px solid transparent',
+      borderRadius: 0,
+      '&:hover': {
+        borderBottom: '2px solid rgba(255,255,255,0.7)',
+      }
+    };
+  };
 
   return (
-    <Router>
-      <div style={{ padding: '20px', fontFamily: 'sans-serif', maxWidth: '1200px', margin: 'auto' }}>
-        <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #ddd', paddingBottom: '10px' }}>
-          <h1>Trader Intelligence</h1>
-          <nav>
-            <NavLink to="/" style={navStyle}>
-              Analysis
-            </NavLink>
-            <NavLink to="/portfolio" style={navStyle}>
-              Portfolio
-            </NavLink>
-            <NavLink to="/rates" style={navStyle}>
-              Rates
-            </NavLink>
-          </nav>
-        </header>
+    <AppBar position="static" elevation={2}>
+      <Toolbar>
+        <Typography variant="h6" component="div" sx={{ flexGrow: 1, fontWeight: 'bold' }}>
+          Trader Intelligence
+        </Typography>
+        <Box sx={{ display: 'flex', gap: 2 }}>
+          <Button component={NavLink} to="/" sx={getButtonStyle('/')}>
+            Analysis
+          </Button>
+          <Button component={NavLink} to="/portfolio" sx={getButtonStyle('/portfolio')}>
+            Portfolio
+          </Button>
+          <Button component={NavLink} to="/rates" sx={getButtonStyle('/rates')}>
+            Rates
+          </Button>
+        </Box>
+      </Toolbar>
+    </AppBar>
+  );
+};
 
-        <main style={{ paddingTop: '20px' }}>
+const App = () => {
+  return (
+    <ThemeProvider theme={theme}>
+      <CssBaseline />
+      <Router>
+        <Navigation />
+        <Container maxWidth="xl" sx={{ mt: 4, mb: 4 }}>
           <Routes>
             <Route path="/" element={<AnalysisPage />} />
             <Route path="/portfolio" element={<PortfolioPage />} />
             <Route path="/rates" element={<YieldCurvePage />} />
           </Routes>
-        </main>
-      </div>
-    </Router>
+        </Container>
+      </Router>
+    </ThemeProvider>
   );
 };
 

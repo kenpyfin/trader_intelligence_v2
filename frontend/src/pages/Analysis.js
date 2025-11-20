@@ -1,6 +1,53 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import Plot from 'react-plotly.js';
+import {
+  Box,
+  Button,
+  Card,
+  CardContent,
+  CardHeader,
+  Chip,
+  CircularProgress,
+  Collapse,
+  Divider,
+  FormControl,
+  Grid,
+  IconButton,
+  InputLabel,
+  List,
+  ListItem,
+  ListItemText,
+  MenuItem,
+  Paper,
+  Select,
+  Stack,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  TextField,
+  Typography,
+  Alert,
+  Tooltip
+} from '@mui/material';
+import {
+  ExpandMore as ExpandMoreIcon,
+  ExpandLess as ExpandLessIcon,
+  Refresh as RefreshIcon,
+  Delete as DeleteIcon,
+  SmartToy as SmartToyIcon,
+  TrendingUp as TrendingUpIcon,
+  TrendingDown as TrendingDownIcon,
+  Warning as WarningIcon,
+  Lightbulb as LightbulbIcon,
+  Shield as ShieldIcon,
+  CheckCircle as CheckCircleIcon,
+  Search as SearchIcon,
+  History as HistoryIcon
+} from '@mui/icons-material';
 
 // A custom hook to keep state in localStorage
 function useStickyState(defaultValue, key) {
@@ -30,16 +77,23 @@ function useStickyState(defaultValue, key) {
 
 // --- Helper Components for Display ---
 
-const AnalysisCard = ({ title, children }) => (
-  <div style={{ border: '1px solid #ddd', borderRadius: '8px', padding: '16px', marginBottom: '16px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>
-    <h3 style={{ marginTop: 0, borderBottom: '2px solid #eee', paddingBottom: '8px' }}>{title}</h3>
-    {children}
-  </div>
+const AnalysisCard = ({ title, children, action }) => (
+  <Card sx={{ mb: 3, boxShadow: 3 }}>
+    <CardHeader 
+      title={title} 
+      action={action}
+      titleTypographyProps={{ variant: 'h6', fontWeight: 'bold' }}
+      sx={{ borderBottom: '1px solid #eee', pb: 1 }}
+    />
+    <CardContent>
+      {children}
+    </CardContent>
+  </Card>
 );
 
 const CandlestickChart = ({ plotData, ticker }) => {
   if (!plotData || !plotData.data) {
-    return <p>Chart data is not available.</p>;
+    return <Typography color="text.secondary">Chart data is not available.</Typography>;
   }
 
   const { index: dates, columns, data } = plotData;
@@ -205,62 +259,72 @@ const MacroInsights = ({ onRateCalculated }) => {
   };
 
   const renderFuturesTable = () => {
-    if (loading) return <p>Loading futures data...</p>;
-    if (!futures || futures.error || Object.keys(futures).length === 0) return <p>Could not load futures data.</p>;
+    if (loading) return <CircularProgress size={24} />;
+    if (!futures || futures.error || Object.keys(futures).length === 0) return <Typography color="error">Could not load futures data.</Typography>;
 
     return (
-      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.9em' }}>
-        <thead>
-          <tr style={{ background: '#f4f4f4' }}>
-            {Object.keys(futures[Object.keys(futures)[0]]).map(header => <th key={header} style={{ padding: '8px', border: '1px solid #ddd' }}>{header}</th>)}
-          </tr>
-        </thead>
-        <tbody>
-          {Object.entries(futures).map(([ticker, data]) => (
-            <tr key={ticker}>
-              {Object.entries(data).map(([key, value]) => (
-                <td key={key} style={{ padding: '8px', border: '1px solid #ddd', color: key === 'Change' && (value.startsWith('+') ? 'green' : 'red') }}>
-                  {value}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <TableContainer component={Paper} variant="outlined">
+        <Table size="small">
+          <TableHead>
+            <TableRow sx={{ backgroundColor: '#f5f5f5' }}>
+              {Object.keys(futures[Object.keys(futures)[0]]).map(header => <TableCell key={header} sx={{ fontWeight: 'bold' }}>{header}</TableCell>)}
+            </TableRow>
+          </TableHead>
+          <TableBody>
+            {Object.entries(futures).map(([ticker, data]) => (
+              <TableRow key={ticker}>
+                {Object.entries(data).map(([key, value]) => (
+                  <TableCell key={key} sx={{ color: key === 'Change' && (value.startsWith('+') ? 'success.main' : 'error.main') }}>
+                    {value}
+                  </TableCell>
+                ))}
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </TableContainer>
     );
   };
 
   return (
     <AnalysisCard title="Macro Economy Insights">
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
-        <div>
-          <h4>Market Futures (Finviz)</h4>
+      <Grid container spacing={3}>
+        <Grid item xs={12} md={6}>
+          <Typography variant="subtitle1" gutterBottom>Market Futures (Finviz)</Typography>
           {renderFuturesTable()}
-        </div>
-        <div>
-          <h4>Implied Risk-Free Rate Calculator</h4>
-          <form onSubmit={handleCalculateRate}>
-            <div style={{ marginBottom: '10px' }}>
-              <label>Tickers (comma-separated):</label><br/>
-              <input type="text" value={rfTickers} onChange={e => setRfTickers(e.target.value)} style={{ width: '95%' }}/>
-            </div>
-            <button type="submit" disabled={calculating}>
+        </Grid>
+        <Grid item xs={12} md={6}>
+          <Typography variant="subtitle1" gutterBottom>Implied Risk-Free Rate Calculator</Typography>
+          <Box component="form" onSubmit={handleCalculateRate} sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            <TextField
+              label="Tickers (comma-separated)"
+              value={rfTickers}
+              onChange={e => setRfTickers(e.target.value)}
+              fullWidth
+              size="small"
+            />
+            <Button 
+              type="submit" 
+              variant="contained" 
+              disabled={calculating}
+              startIcon={calculating ? <CircularProgress size={20} /> : <SmartToyIcon />}
+            >
               {calculating ? 'Calculating...' : 'Calculate Implied Rate'}
-            </button>
-          </form>
+            </Button>
+          </Box>
           {calcResult !== null && (
-            <div style={{ marginTop: '10px', background: '#e8f5e9', padding: '10px', borderRadius: '5px' }}>
-              <strong>Calculated Rate: <span style={{color: 'green'}}>{(calcResult * 100).toFixed(3)}%</span></strong>
-            </div>
+            <Alert severity="success" sx={{ mt: 2 }}>
+              Calculated Rate: <strong>{(calcResult * 100).toFixed(3)}%</strong>
+            </Alert>
           )}
           {calcLogs.length > 0 && (
-            <div style={{ marginTop: '10px', maxHeight: '150px', overflowY: 'auto', background: '#f4f4f4', padding: '5px', fontSize: '0.8em', border: '1px solid #ddd' }}>
-              <strong>Calculation Log:</strong>
-              {calcLogs.map((log, i) => <p key={i} style={{margin: '2px 0'}}>{log}</p>)}
-            </div>
+            <Paper variant="outlined" sx={{ mt: 2, p: 1, maxHeight: 150, overflowY: 'auto', bgcolor: '#f9f9f9' }}>
+              <Typography variant="caption" fontWeight="bold">Calculation Log:</Typography>
+              {calcLogs.map((log, i) => <Typography key={i} variant="caption" display="block" sx={{ fontFamily: 'monospace' }}>{log}</Typography>)}
+            </Paper>
           )}
-        </div>
-      </div>
+        </Grid>
+      </Grid>
     </AnalysisCard>
   );
 };
@@ -334,125 +398,81 @@ const StrategyOrder = ({ strategy, strategies = [], ticker, expirationDate, gptV
             return null;
         }
 
-        const legDescriptions = strategy.legs.map((leg, i) => (
-            <li key={i}>
-                <strong>{leg.action}</strong> {leg.strike ? `$${leg.strike.toFixed(2)}` : ''} {leg.right}
-            </li>
-        ));
-
         const confidence = strategy.confidence || 'Medium';
         const confidenceColor = {
-            'High': 'green',
-            'Medium': 'orange',
-            'Low': 'red'
-        }[confidence] || 'gray';
+            'High': 'success',
+            'Medium': 'warning',
+            'Low': 'error'
+        }[confidence] || 'default';
 
         return (
-            <div key={index} style={{
-                marginBottom: '20px',
-                padding: '15px',
-                border: '1px solid #e0e0e0',
-                borderRadius: '8px',
-                backgroundColor: '#fff'
-            }}>
-                <div style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    marginBottom: '10px',
-                    paddingBottom: '10px',
-                    borderBottom: '1px solid #f0f0f0'
-                }}>
-                    <h4 style={{ margin: 0 }}>{strategy.name}</h4>
-                    <span style={{
-                        padding: '2px 8px',
-                        borderRadius: '10px',
-                        backgroundColor: `${confidenceColor}20`,
-                        color: confidenceColor,
-                        fontSize: '12px',
-                        fontWeight: 'bold'
-                    }}>
-                        {confidence} Confidence
-                    </span>
-                </div>
-                
-                <div style={{ marginBottom: '15px' }}>
-                    <strong>Strategy Legs:</strong>
-                    <ul style={{ 
-                        margin: '5px 0 0 0', 
-                        paddingLeft: '20px',
-                        fontSize: '14px'
-                    }}>
-                        {legDescriptions}
-                    </ul>
-                </div>
-                
-                {(strategy.profit_target || strategy.stop_loss) && (
-                    <div style={{ 
-                        marginBottom: '15px', 
-                        display: 'grid', 
-                        gridTemplateColumns: '1fr 1fr', 
-                        gap: '10px', 
-                        fontSize: '14px',
-                        padding: '10px',
-                        backgroundColor: '#f8f9fa',
-                        borderRadius: '6px'
-                    }}>
-                        {typeof strategy.profit_target === 'number' && (
-                            <div>
-                                <strong style={{ color: '#2e7d32' }}>Profit Target:</strong>
-                                <div style={{ fontWeight: 'bold' }}>${strategy.profit_target.toFixed(2)}</div>
-                            </div>
-                        )}
-                        {typeof strategy.stop_loss === 'number' && (
-                            <div>
-                                <strong style={{ color: '#c62828' }}>Stop Loss:</strong>
-                                <div style={{ fontWeight: 'bold' }}>${strategy.stop_loss.toFixed(2)}</div>
-                            </div>
-                        )}
-                    </div>
-                )}
-                
-                <button 
-                    onClick={() => handleExecute(strategy, index)}
-                    disabled={isOrdering[index]}
-                    style={{
-                        padding: '8px 16px',
-                        backgroundColor: isOrdering[index] ? '#cccccc' : '#4CAF50',
-                        color: 'white',
-                        border: 'none',
-                        borderRadius: '4px',
-                        cursor: 'pointer',
-                        fontSize: '14px',
-                        width: '100%',
-                        transition: 'background-color 0.3s',
-                        ':hover': {
-                            backgroundColor: isOrdering[index] ? '#cccccc' : '#45a049'
-                        }
-                    }}
-                >
-                    {isOrdering[index] ? 'Placing Order...' : `Execute ${strategy.name}`}
-                </button>
-                
-                {orderStatus[index] && (
-                    <div style={{
-                        marginTop: '10px',
-                        padding: '10px',
-                        borderRadius: '5px',
-                        background: orderStatus[index].status === 'error' ? '#ffebee' : '#e8f5e9',
-                        borderLeft: `4px solid ${orderStatus[index].status === 'error' ? '#f44336' : '#4CAF50'}`
-                    }}>
-                        <p style={{ margin: '0', color: orderStatus[index].status === 'error' ? '#d32f2f' : '#2e7d32' }}>
-                            <strong>{orderStatus[index].status === 'error' ? 'Error:' : 'Success:'}</strong> {orderStatus[index].message}
-                        </p>
-                        {orderStatus[index].status === 'success' && orderStatus[index].order_status && (
-                            <p style={{ margin: '5px 0 0 0', fontSize: '13px' }}>
-                                <strong>Order Status:</strong> {orderStatus[index].order_status}
-                            </p>
-                        )}
-                    </div>
-                )}
-            </div>
+            <Card key={index} variant="outlined" sx={{ mb: 2 }}>
+                <CardContent>
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                        <Typography variant="h6">{strategy.name}</Typography>
+                        <Chip label={`${confidence} Confidence`} color={confidenceColor} size="small" variant="outlined" />
+                    </Box>
+                    
+                    <Typography variant="subtitle2" gutterBottom>Strategy Legs:</Typography>
+                    <List dense disablePadding sx={{ mb: 2, bgcolor: '#f5f5f5', borderRadius: 1 }}>
+                        {strategy.legs.map((leg, i) => (
+                            <ListItem key={i}>
+                                <ListItemText 
+                                    primary={
+                                        <Typography variant="body2">
+                                            <strong>{leg.action}</strong> {leg.strike ? `$${leg.strike.toFixed(2)}` : ''} {leg.right}
+                                        </Typography>
+                                    } 
+                                />
+                            </ListItem>
+                        ))}
+                    </List>
+                    
+                    {(strategy.profit_target || strategy.stop_loss) && (
+                        <Grid container spacing={2} sx={{ mb: 2 }}>
+                            {typeof strategy.profit_target === 'number' && (
+                                <Grid item xs={6}>
+                                    <Paper variant="outlined" sx={{ p: 1, bgcolor: '#f0fdf4', borderColor: '#bbf7d0' }}>
+                                        <Typography variant="caption" color="success.main" fontWeight="bold">Profit Target</Typography>
+                                        <Typography variant="body1" fontWeight="bold">${strategy.profit_target.toFixed(2)}</Typography>
+                                    </Paper>
+                                </Grid>
+                            )}
+                            {typeof strategy.stop_loss === 'number' && (
+                                <Grid item xs={6}>
+                                    <Paper variant="outlined" sx={{ p: 1, bgcolor: '#fef2f2', borderColor: '#fecaca' }}>
+                                        <Typography variant="caption" color="error.main" fontWeight="bold">Stop Loss</Typography>
+                                        <Typography variant="body1" fontWeight="bold">${strategy.stop_loss.toFixed(2)}</Typography>
+                                    </Paper>
+                                </Grid>
+                            )}
+                        </Grid>
+                    )}
+                    
+                    <Button 
+                        variant="contained" 
+                        color="success" 
+                        fullWidth 
+                        onClick={() => handleExecute(strategy, index)}
+                        disabled={isOrdering[index]}
+                        startIcon={isOrdering[index] ? <CircularProgress size={20} color="inherit" /> : <CheckCircleIcon />}
+                    >
+                        {isOrdering[index] ? 'Placing Order...' : `Execute ${strategy.name}`}
+                    </Button>
+                    
+                    {orderStatus[index] && (
+                        <Alert severity={orderStatus[index].status === 'error' ? 'error' : 'success'} sx={{ mt: 2 }}>
+                            <AlertTitle>{orderStatus[index].status === 'error' ? 'Error' : 'Success'}</AlertTitle>
+                            {orderStatus[index].message}
+                            {orderStatus[index].status === 'success' && orderStatus[index].order_status && (
+                                <Typography variant="caption" display="block" sx={{ mt: 1 }}>
+                                    Order Status: {orderStatus[index].order_status}
+                                </Typography>
+                            )}
+                        </Alert>
+                    )}
+                </CardContent>
+            </Card>
         );
     };
 
@@ -461,482 +481,162 @@ const StrategyOrder = ({ strategy, strategies = [], ticker, expirationDate, gptV
             
             {/* GPT Insights Section */}
             {gptVerdict && (
-                <div style={{ 
-                    marginBottom: '20px', 
-                    padding: '15px', 
-                    border: '1px solid #e0e0e0', 
-                    borderRadius: '8px', 
-                    backgroundColor: '#f8f9fa' 
-                }}>
-                    <div style={{ 
-                        display: 'flex', 
-                        justifyContent: 'space-between', 
-                        alignItems: 'center', 
-                        marginBottom: '10px' 
-                    }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                            <span style={{ fontSize: '18px' }}>🤖</span>
-                            <h3 style={{ margin: 0 }}>AI Trading Insights</h3>
-                        </div>
-                        <button 
+                <Paper variant="outlined" sx={{ mb: 3, p: 2, bgcolor: '#f8f9fa' }}>
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                            <SmartToyIcon color="primary" />
+                            <Typography variant="h6">AI Trading Insights</Typography>
+                        </Box>
+                        <Button 
+                            size="small" 
+                            variant="outlined" 
                             onClick={() => setShowGptInsights(!showGptInsights)}
-                            style={{ 
-                                padding: '4px 12px', 
-                                fontSize: '13px', 
-                                cursor: 'pointer',
-                                backgroundColor: 'transparent',
-                                border: '1px solid #d0d0d0',
-                                borderRadius: '4px',
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '5px'
-                            }}
+                            endIcon={showGptInsights ? <ExpandLessIcon /> : <ExpandMoreIcon />}
                         >
-                            {showGptInsights ? (
-                                <>
-                                    <span>Hide Details</span>
-                                    <span>▲</span>
-                                </>
-                            ) : (
-                                <>
-                                    <span>Show Details</span>
-                                    <span>▼</span>
-                                </>
-                            )}
-                        </button>
-                    </div>
+                            {showGptInsights ? 'Hide Details' : 'Show Details'}
+                        </Button>
+                    </Box>
                     
-                    <div style={{ 
-                        display: 'flex', 
-                        alignItems: 'center', 
-                        marginBottom: showGptInsights ? '15px' : 0,
-                        paddingBottom: showGptInsights ? '15px' : 0,
-                        borderBottom: showGptInsights ? '1px solid #e8e8e8' : 'none'
-                    }}>
-                        <strong style={{ marginRight: '5px' }}>Market Bias:</strong>
-                        <span style={{ 
-                            padding: '2px 8px',
-                            borderRadius: '10px',
-                            backgroundColor: gptVerdict.final_bias?.includes('Bull') ? '#e8f5e9' : 
-                                           gptVerdict.final_bias?.includes('Bear') ? '#ffebee' : '#e3f2fd',
-                            color: gptVerdict.final_bias?.includes('Bull') ? '#2e7d32' : 
-                                  gptVerdict.final_bias?.includes('Bear') ? '#c62828' : '#1565c0',
-                            fontWeight: '500',
-                            fontSize: '13px'
-                        }}>
-                            {gptVerdict.final_bias || 'Neutral'}
-                        </span>
-                    </div>
+                    <Box sx={{ display: 'flex', alignItems: 'center', mb: showGptInsights ? 2 : 0 }}>
+                        <Typography variant="subtitle2" sx={{ mr: 1 }}>Market Bias:</Typography>
+                        <Chip 
+                            label={gptVerdict.final_bias || 'Neutral'} 
+                            color={gptVerdict.final_bias?.includes('Bull') ? 'success' : gptVerdict.final_bias?.includes('Bear') ? 'error' : 'default'}
+                            size="small"
+                        />
+                    </Box>
                     
-                    {showGptInsights && (
-                        <div style={{ marginTop: '15px' }}>
+                    <Collapse in={showGptInsights}>
+                        <Box sx={{ mt: 2 }}>
                             {gptVerdict.execution_recommendations?.primary_strategy && (
-                                <div style={{ 
-                                    backgroundColor: '#f0f7ff',
-                                    padding: '12px',
-                                    borderRadius: '6px',
-                                    marginBottom: '15px',
-                                    borderLeft: '4px solid #4a90e2'
-                                }}>
-                                    <div style={{ 
-                                        display: 'flex', 
-                                        alignItems: 'center', 
-                                        marginBottom: '8px' 
-                                    }}>
-                                        <span style={{ 
-                                            backgroundColor: '#4a90e2', 
-                                            color: 'white', 
-                                            borderRadius: '50%', 
-                                            width: '24px', 
-                                            height: '24px', 
-                                            display: 'flex', 
-                                            alignItems: 'center', 
-                                            justifyContent: 'center',
-                                            marginRight: '10px',
-                                            fontSize: '14px',
-                                            fontWeight: 'bold'
-                                        }}>
-                                            ✓
-                                        </span>
-                                        <h4 style={{ margin: 0, color: '#1a365d' }}>Recommended Strategy</h4>
-                                    </div>
-                                    <div style={{ paddingLeft: '34px' }}>
-                                        <p style={{ 
-                                            margin: '0 0 8px 0', 
-                                            fontSize: '14px',
-                                            lineHeight: '1.5',
-                                            color: '#2d3748'
-                                        }}>
-                                            {gptVerdict.execution_recommendations.primary_strategy.description || 
-                                             'No specific strategy description available.'}
-                                        </p>
-                                        <div style={{ 
-                                            display: 'flex', 
-                                            alignItems: 'center',
-                                            fontSize: '13px',
-                                            color: '#4a5568'
-                                        }}>
-                                            <span style={{ marginRight: '15px' }}>
-                                                <strong>Confidence:</strong> 
-                                                <span style={{
-                                                    color: gptVerdict.execution_recommendations.primary_strategy.confidence === 'High' ? 'green' : 
-                                                          gptVerdict.execution_recommendations.primary_strategy.confidence === 'Medium' ? 'orange' : 'red',
-                                                    marginLeft: '5px'
-                                                }}>
-                                                    {gptVerdict.execution_recommendations.primary_strategy.confidence}
-                                                </span>
-                                            </span>
-                                            {gptVerdict.execution_recommendations.primary_strategy.time_horizon && (
-                                                <span>
-                                                    <strong>Timeframe:</strong> {gptVerdict.execution_recommendations.primary_strategy.time_horizon}
-                                                </span>
-                                            )}
-                                        </div>
-                                    </div>
-                                </div>
+                                <Paper elevation={0} sx={{ p: 2, mb: 2, bgcolor: '#f0f7ff', borderLeft: '4px solid #1976d2' }}>
+                                    <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
+                                        <CheckCircleIcon color="primary" sx={{ mr: 1 }} />
+                                        <Typography variant="subtitle1" color="primary.main" fontWeight="bold">Recommended Strategy</Typography>
+                                    </Box>
+                                    <Typography variant="body2" paragraph>
+                                        {gptVerdict.execution_recommendations.primary_strategy.description || 'No specific strategy description available.'}
+                                    </Typography>
+                                    <Stack direction="row" spacing={2}>
+                                        <Typography variant="caption">
+                                            <strong>Confidence:</strong> {gptVerdict.execution_recommendations.primary_strategy.confidence}
+                                        </Typography>
+                                        {gptVerdict.execution_recommendations.primary_strategy.time_horizon && (
+                                            <Typography variant="caption">
+                                                <strong>Timeframe:</strong> {gptVerdict.execution_recommendations.primary_strategy.time_horizon}
+                                            </Typography>
+                                        )}
+                                    </Stack>
+                                </Paper>
                             )}
                             
                             {gptVerdict.execution_recommendations?.position_sizing && (
-                                <div style={{ 
-                                    backgroundColor: '#f8f9ff',
-                                    border: '1px solid #e0e0ff',
-                                    borderRadius: '6px',
-                                    padding: '12px',
-                                    marginBottom: '15px'
-                                }}>
-                                    <h5 style={{ 
-                                        margin: '0 0 10px 0', 
-                                        color: '#4a4a8a',
-                                        fontSize: '14px',
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        gap: '8px'
-                                    }}>
-                                        <span>📊</span>
-                                        Position Sizing
-                                    </h5>
-                                    <div style={{
-                                        display: 'grid',
-                                        gridTemplateColumns: '1fr 1fr',
-                                        gap: '15px',
-                                        fontSize: '13px'
-                                    }}>
-                                        <div>
-                                            <div style={{ color: '#6b7280', marginBottom: '4px' }}>Suggested Allocation</div>
-                                            <div style={{ fontWeight: '500' }}>
+                                <Paper variant="outlined" sx={{ p: 2, mb: 2, bgcolor: '#f8f9ff' }}>
+                                    <Typography variant="subtitle2" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                        <TrendingUpIcon fontSize="small" /> Position Sizing
+                                    </Typography>
+                                    <Grid container spacing={2}>
+                                        <Grid item xs={6}>
+                                            <Typography variant="caption" color="text.secondary">Suggested Allocation</Typography>
+                                            <Typography variant="body2" fontWeight="medium">
                                                 {gptVerdict.execution_recommendations.position_sizing.suggested_allocation}
-                                            </div>
-                                        </div>
-                                        <div>
-                                            <div style={{ color: '#6b7280', marginBottom: '4px' }}>Risk Level</div>
-                                            <div>
-                                                <span style={{
-                                                    padding: '2px 8px',
-                                                    borderRadius: '10px',
-                                                    backgroundColor: gptVerdict.execution_recommendations.position_sizing.risk_level === 'Conservative' ? '#e6f6e6' : 
-                                                                  gptVerdict.execution_recommendations.position_sizing.risk_level === 'Moderate' ? '#fff3e0' : '#ffebee',
-                                                    color: gptVerdict.execution_recommendations.position_sizing.risk_level === 'Conservative' ? '#2e7d32' : 
-                                                          gptVerdict.execution_recommendations.position_sizing.risk_level === 'Moderate' ? '#e65100' : '#c62828',
-                                                    fontSize: '12px',
-                                                    fontWeight: '500'
-                                                }}>
-                                                    {gptVerdict.execution_recommendations.position_sizing.risk_level}
-                                                </span>
-                                            </div>
-                                        </div>
+                                            </Typography>
+                                        </Grid>
+                                        <Grid item xs={6}>
+                                            <Typography variant="caption" color="text.secondary">Risk Level</Typography>
+                                            <Chip 
+                                                label={gptVerdict.execution_recommendations.position_sizing.risk_level} 
+                                                size="small" 
+                                                color={gptVerdict.execution_recommendations.position_sizing.risk_level === 'Conservative' ? 'success' : 'warning'}
+                                                variant="outlined"
+                                            />
+                                        </Grid>
                                         {gptVerdict.execution_recommendations.position_sizing.justification && (
-                                            <div style={{ gridColumn: '1 / -1' }}>
-                                                <div style={{ color: '#6b7280', marginBottom: '4px' }}>Rationale</div>
-                                                <div style={{ fontStyle: 'italic', fontSize: '12px' }}>
+                                            <Grid item xs={12}>
+                                                <Typography variant="caption" color="text.secondary">Rationale</Typography>
+                                                <Typography variant="body2" fontStyle="italic">
                                                     "{gptVerdict.execution_recommendations.position_sizing.justification}"
-                                                </div>
-                                            </div>
+                                                </Typography>
+                                            </Grid>
                                         )}
-                                    </div>
-                                </div>
+                                    </Grid>
+                                </Paper>
                             )}
                             
-                            <div style={{
-                                display: 'grid',
-                                gridTemplateColumns: '1fr 1fr',
-                                gap: '15px',
-                                marginBottom: '15px'
-                            }}>
+                            <Grid container spacing={2} sx={{ mb: 2 }}>
                                 {gptVerdict.execution_recommendations?.entry_conditions?.length > 0 && (
-                                    <div style={{
-                                        backgroundColor: '#f0fdf4',
-                                        border: '1px solid #dcfce7',
-                                        borderRadius: '6px',
-                                        padding: '12px'
-                                    }}>
-                                        <h5 style={{
-                                            margin: '0 0 10px 0',
-                                            color: '#166534',
-                                            fontSize: '14px',
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            gap: '8px'
-                                        }}>
-                                            <span>📈</span>
-                                            Entry Conditions
-                                        </h5>
-                                        <ul style={{
-                                            margin: '0',
-                                            paddingLeft: '20px',
-                                            fontSize: '13px',
-                                            color: '#1f2937'
-                                        }}>
-                                            {gptVerdict.execution_recommendations.entry_conditions.slice(0, 3).map((condition, i) => (
-                                                <li key={i} style={{ marginBottom: '6px', lineHeight: '1.4' }}>
-                                                    {condition}
-                                                </li>
-                                            ))}
-                                        </ul>
-                                    </div>
+                                    <Grid item xs={12} md={6}>
+                                        <Paper variant="outlined" sx={{ p: 2, height: '100%', bgcolor: '#f0fdf4', borderColor: '#bbf7d0' }}>
+                                            <Typography variant="subtitle2" color="success.dark" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                                <TrendingUpIcon fontSize="small" /> Entry Conditions
+                                            </Typography>
+                                            <List dense disablePadding>
+                                                {gptVerdict.execution_recommendations.entry_conditions.slice(0, 3).map((condition, i) => (
+                                                    <ListItem key={i} disablePadding sx={{ mb: 0.5 }}>
+                                                        <ListItemText primary={condition} primaryTypographyProps={{ variant: 'caption', lineHeight: 1.4 }} />
+                                                    </ListItem>
+                                                ))}
+                                            </List>
+                                        </Paper>
+                                    </Grid>
                                 )}
                                 
                                 {gptVerdict.execution_recommendations?.exit_conditions?.length > 0 && (
-                                    <div style={{
-                                        backgroundColor: '#fff7ed',
-                                        border: '1px solid #ffedd5',
-                                        borderRadius: '6px',
-                                        padding: '12px'
-                                    }}>
-                                        <h5 style={{
-                                            margin: '0 0 10px 0',
-                                            color: '#9a3412',
-                                            fontSize: '14px',
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            gap: '8px'
-                                        }}>
-                                            <span>📉</span>
-                                            Exit Conditions
-                                        </h5>
-                                        <ul style={{
-                                            margin: '0',
-                                            paddingLeft: '20px',
-                                            fontSize: '13px',
-                                            color: '#1f2937'
-                                        }}>
-                                            {gptVerdict.execution_recommendations.exit_conditions.slice(0, 3).map((condition, i) => (
-                                                <li key={i} style={{ marginBottom: '6px', lineHeight: '1.4' }}>
-                                                    {condition}
-                                                </li>
-                                            ))}
-                                        </ul>
-                                    </div>
+                                    <Grid item xs={12} md={6}>
+                                        <Paper variant="outlined" sx={{ p: 2, height: '100%', bgcolor: '#fff7ed', borderColor: '#ffedd5' }}>
+                                            <Typography variant="subtitle2" color="warning.dark" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                                <TrendingDownIcon fontSize="small" /> Exit Conditions
+                                            </Typography>
+                                            <List dense disablePadding>
+                                                {gptVerdict.execution_recommendations.exit_conditions.slice(0, 3).map((condition, i) => (
+                                                    <ListItem key={i} disablePadding sx={{ mb: 0.5 }}>
+                                                        <ListItemText primary={condition} primaryTypographyProps={{ variant: 'caption', lineHeight: 1.4 }} />
+                                                    </ListItem>
+                                                ))}
+                                            </List>
+                                        </Paper>
+                                    </Grid>
                                 )}
-                                
-                                {gptVerdict.execution_recommendations?.stop_loss_guidance && (
-                                    <div style={{
-                                        backgroundColor: '#fef2f2',
-                                        border: '1px solid #fee2e2',
-                                        borderRadius: '6px',
-                                        padding: '12px'
-                                    }}>
-                                        <h5 style={{
-                                            margin: '0 0 10px 0',
-                                            color: '#b91c1c',
-                                            fontSize: '14px',
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            gap: '8px'
-                                        }}>
-                                            <span>🛡️</span>
-                                            Stop Loss
-                                        </h5>
-                                        <p style={{
-                                            margin: '0',
-                                            fontSize: '13px',
-                                            color: '#1f2937',
-                                            lineHeight: '1.5'
-                                        }}>
-                                            {gptVerdict.execution_recommendations.stop_loss_guidance}
-                                        </p>
-                                    </div>
-                                )}
-                                
-                                {gptVerdict.execution_recommendations?.profit_target_guidance && (
-                                    <div style={{
-                                        backgroundColor: '#f0fdf4',
-                                        border: '1px solid #dcfce7',
-                                        borderRadius: '6px',
-                                        padding: '12px'
-                                    }}>
-                                        <h5 style={{
-                                            margin: '0 0 10px 0',
-                                            color: '#166534',
-                                            fontSize: '14px',
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            gap: '8px'
-                                        }}>
-                                            <span>🎯</span>
-                                            Profit Target
-                                        </h5>
-                                        <p style={{
-                                            margin: '0',
-                                            fontSize: '13px',
-                                            color: '#1f2937',
-                                            lineHeight: '1.5'
-                                        }}>
-                                            {gptVerdict.execution_recommendations.profit_target_guidance}
-                                        </p>
-                                    </div>
-                                )}
-                            </div>
+                            </Grid>
                             
                             {gptVerdict.actionable_ideas?.length > 0 && (
-                                <div style={{
-                                    backgroundColor: '#f0f9ff',
-                                    border: '1px solid #e0f2fe',
-                                    borderRadius: '6px',
-                                    padding: '12px',
-                                    marginBottom: '15px'
-                                }}>
-                                    <h5 style={{
-                                        margin: '0 0 10px 0',
-                                        color: '#075985',
-                                        fontSize: '14px',
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        gap: '8px'
-                                    }}>
-                                        <span>💡</span>
-                                        Key Trading Ideas
-                                    </h5>
-                                    <ul style={{
-                                        margin: '0',
-                                        paddingLeft: '20px',
-                                        fontSize: '13px',
-                                        color: '#1f2937'
-                                    }}>
+                                <Paper variant="outlined" sx={{ p: 2, mb: 2, bgcolor: '#f0f9ff' }}>
+                                    <Typography variant="subtitle2" color="info.main" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                        <LightbulbIcon fontSize="small" /> Key Trading Ideas
+                                    </Typography>
+                                    <List dense disablePadding>
                                         {gptVerdict.actionable_ideas.slice(0, 3).map((idea, i) => (
-                                            <li key={i} style={{ marginBottom: '6px', lineHeight: '1.5' }}>
-                                                {idea}
-                                            </li>
+                                            <ListItem key={i} disablePadding sx={{ mb: 0.5 }}>
+                                                <ListItemText primary={idea} primaryTypographyProps={{ variant: 'body2' }} />
+                                            </ListItem>
                                         ))}
-                                    </ul>
-                                </div>
+                                    </List>
+                                </Paper>
                             )}
                             
                             {gptVerdict.risk_factors?.length > 0 && (
-                                <div style={{
-                                    backgroundColor: '#fef2f2',
-                                    border: '1px solid #fee2e2',
-                                    borderRadius: '6px',
-                                    padding: '12px',
-                                    marginBottom: '10px'
-                                }}>
-                                    <h5 style={{
-                                        margin: '0 0 10px 0',
-                                        color: '#b91c1c',
-                                        fontSize: '14px',
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        gap: '8px'
-                                    }}>
-                                        <span>⚠️</span>
-                                        Risk Factors
-                                    </h5>
-                                    <ul style={{
-                                        margin: '0',
-                                        paddingLeft: '20px',
-                                        fontSize: '13px',
-                                        color: '#1f2937'
-                                    }}>
+                                <Paper variant="outlined" sx={{ p: 2, mb: 2, bgcolor: '#fef2f2', borderColor: '#fecaca' }}>
+                                    <Typography variant="subtitle2" color="error.main" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                        <WarningIcon fontSize="small" /> Risk Factors
+                                    </Typography>
+                                    <List dense disablePadding>
                                         {gptVerdict.risk_factors.slice(0, 3).map((risk, i) => (
-                                            <li key={i} style={{ marginBottom: '6px', lineHeight: '1.5' }}>
-                                                {risk}
-                                            </li>
+                                            <ListItem key={i} disablePadding sx={{ mb: 0.5 }}>
+                                                <ListItemText primary={risk} primaryTypographyProps={{ variant: 'body2' }} />
+                                            </ListItem>
                                         ))}
-                                    </ul>
-                                </div>
+                                    </List>
+                                </Paper>
                             )}
-                            
-                            {gptVerdict.execution_recommendations?.alternative_strategies?.length > 0 && (
-                                <div style={{
-                                    backgroundColor: '#f9fafb',
-                                    border: '1px solid #e5e7eb',
-                                    borderRadius: '6px',
-                                    padding: '12px',
-                                    marginTop: '15px'
-                                }}>
-                                    <h5 style={{
-                                        margin: '0 0 10px 0',
-                                        color: '#4b5563',
-                                        fontSize: '14px',
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        gap: '8px'
-                                    }}>
-                                        <span>🔄</span>
-                                        Alternative Strategies
-                                    </h5>
-                                    <div style={{
-                                        display: 'grid',
-                                        gap: '10px'
-                                    }}>
-                                        {gptVerdict.execution_recommendations.alternative_strategies.slice(0, 2).map((alt, i) => (
-                                            <div key={i} style={{
-                                                backgroundColor: 'white',
-                                                border: '1px solid #e5e7eb',
-                                                borderRadius: '6px',
-                                                padding: '10px',
-                                                fontSize: '13px'
-                                            }}>
-                                                <div style={{
-                                                    display: 'flex',
-                                                    justifyContent: 'space-between',
-                                                    alignItems: 'center',
-                                                    marginBottom: '6px'
-                                                }}>
-                                                    <strong style={{
-                                                        color: '#1f2937',
-                                                        fontSize: '13px'
-                                                    }}>
-                                                        {alt.name}
-                                                    </strong>
-                                                    <span style={{
-                                                        padding: '2px 8px',
-                                                        borderRadius: '10px',
-                                                        backgroundColor: alt.confidence === 'High' ? '#e6f6e6' : 
-                                                                      alt.confidence === 'Medium' ? '#fff3e0' : '#ffebee',
-                                                        color: alt.confidence === 'High' ? '#2e7d32' : 
-                                                              alt.confidence === 'Medium' ? '#e65100' : '#c62828',
-                                                        fontSize: '11px',
-                                                        fontWeight: '500'
-                                                    }}>
-                                                        {alt.confidence} Confidence
-                                                    </span>
-                                                </div>
-                                                <p style={{
-                                                    margin: '0',
-                                                    color: '#4b5563',
-                                                    lineHeight: '1.5',
-                                                    fontSize: '12px'
-                                                }}>
-                                                    {alt.description}
-                                                </p>
-                                            </div>
-                                        ))}
-                                    </div>
-                                </div>
-                            )}
-                        </div>
-                    )}
-                </div>
+                        </Box>
+                    </Collapse>
+                </Paper>
             )}
             
             {/* Strategy Cards */}
-            <div style={{
-                display: 'grid',
-                gap: '15px',
-                marginTop: '20px'
-            }}>
+            <Box sx={{ mt: 2 }}>
                 {allStrategies.map((strat, idx) => renderStrategyCard(strat, idx))}
-            </div>
+            </Box>
         </AnalysisCard>
     );
 };
@@ -947,48 +647,77 @@ const GptVerdictCard = ({ verdict }) => {
   return (
     <AnalysisCard title="GPT-Powered Verdict & Rationale">
       {verdict.key_reasoning_points && verdict.key_reasoning_points.length > 0 && (
-        <>
-          <h5>Key Analysis Points</h5>
-          <ul style={{ backgroundColor: '#f8f9fa', padding: '10px', borderRadius: '4px', marginBottom: '15px' }}>
-            {verdict.key_reasoning_points.map((point, i) => <li key={i} style={{ marginBottom: '5px' }}><strong>{point}</strong></li>)}
-          </ul>
-        </>
+        <Box sx={{ mb: 3 }}>
+          <Typography variant="subtitle1" gutterBottom fontWeight="bold">Key Analysis Points</Typography>
+          <Paper variant="outlined" sx={{ p: 2, bgcolor: '#f8f9fa' }}>
+            <List dense disablePadding>
+              {verdict.key_reasoning_points.map((point, i) => (
+                <ListItem key={i} disablePadding sx={{ mb: 1 }}>
+                  <ListItemText primary={point} primaryTypographyProps={{ variant: 'body2', fontWeight: 'medium' }} />
+                </ListItem>
+              ))}
+            </List>
+          </Paper>
+        </Box>
       )}
       
       {verdict.rationale && (
-        <>
-          <h5>Detailed Reasoning</h5>
-          <p style={{ lineHeight: '1.6', backgroundColor: '#fff', padding: '12px', border: '1px solid #e9ecef', borderRadius: '4px' }}>
-            {verdict.rationale}
-          </p>
-        </>
+        <Box sx={{ mb: 3 }}>
+          <Typography variant="subtitle1" gutterBottom fontWeight="bold">Detailed Reasoning</Typography>
+          <Paper variant="outlined" sx={{ p: 2 }}>
+            <Typography variant="body2" sx={{ lineHeight: 1.6 }}>
+              {verdict.rationale}
+            </Typography>
+          </Paper>
+        </Box>
       )}
       
-      {verdict.actionable_ideas && verdict.actionable_ideas.length > 0 && (
-        <>
-          <h5>Actionable Ideas</h5>
-          <ul>
-            {verdict.actionable_ideas.map((idea, i) => <li key={i}>{idea}</li>)}
-          </ul>
-        </>
-      )}
+      <Grid container spacing={3}>
+        {verdict.actionable_ideas && verdict.actionable_ideas.length > 0 && (
+          <Grid item xs={12} md={6}>
+            <Typography variant="subtitle1" gutterBottom fontWeight="bold">Actionable Ideas</Typography>
+            <List dense>
+              {verdict.actionable_ideas.map((idea, i) => (
+                <ListItem key={i} disablePadding sx={{ mb: 0.5 }}>
+                  <ListItemText primary={`• ${idea}`} />
+                </ListItem>
+              ))}
+            </List>
+          </Grid>
+        )}
 
-      {verdict.risk_factors && verdict.risk_factors.length > 0 && (
-        <>
-          <h5>Risk Factors</h5>
-          <ul>
-            {verdict.risk_factors.map((risk, i) => <li key={i}>{risk}</li>)}
-          </ul>
-        </>
-      )}
+        {verdict.risk_factors && verdict.risk_factors.length > 0 && (
+          <Grid item xs={12} md={6}>
+            <Typography variant="subtitle1" gutterBottom fontWeight="bold">Risk Factors</Typography>
+            <List dense>
+              {verdict.risk_factors.map((risk, i) => (
+                <ListItem key={i} disablePadding sx={{ mb: 0.5 }}>
+                  <ListItemText primary={`• ${risk}`} />
+                </ListItem>
+              ))}
+            </List>
+          </Grid>
+        )}
+      </Grid>
 
       {verdict.search_performed && verdict.sources && verdict.sources.length > 0 && (
-        <>
-          <h5>Sources Consulted</h5>
-          <ul>
-            {verdict.sources.map((source, i) => <li key={i}><a href={source} target="_blank" rel="noopener noreferrer">{source}</a></li>)}
-          </ul>
-        </>
+        <Box sx={{ mt: 3 }}>
+          <Typography variant="subtitle2" gutterBottom>Sources Consulted</Typography>
+          <List dense disablePadding>
+            {verdict.sources.map((source, i) => (
+              <ListItem key={i} disablePadding>
+                <ListItemText 
+                  primary={
+                    <a href={source} target="_blank" rel="noopener noreferrer" style={{ color: '#1976d2', textDecoration: 'none' }}>
+                      {source}
+                    </a>
+                  } 
+                  primaryTypographyProps={{ variant: 'caption' }}
+                />
+              </ListItem>
+            ))}
+          </List>
+        </Box>
       )}
     </AnalysisCard>
   );
@@ -996,7 +725,7 @@ const GptVerdictCard = ({ verdict }) => {
 
 const AnalysisDetails = ({ data }) => {
   const finalBias = data.final_bias || '';
-  const biasColor = finalBias.includes('Bullish') ? 'green' : finalBias.includes('Bearish') ? 'red' : 'orange';
+  const biasColor = finalBias.includes('Bullish') ? 'success.main' : finalBias.includes('Bearish') ? 'error.main' : 'warning.main';
 
   const isGptResult = !!data.gpt_verdict;
   const conclusionTitle = isGptResult
@@ -1006,24 +735,29 @@ const AnalysisDetails = ({ data }) => {
   const renderUOA = (uoaList, type) => {
     if (!uoaList || uoaList.length === 0) return null;
     return (
-      <div style={{marginTop: '10px'}}>
-        <strong>Unusual {type} Activity:</strong>
-        <ul style={{ margin: '5px 0', paddingLeft: '20px' }}>
+      <Box sx={{ mt: 2 }}>
+        <Typography variant="subtitle2" gutterBottom>Unusual {type} Activity:</Typography>
+        <List dense disablePadding>
           {uoaList.map((item, i) => (
-            <li key={i}>
-              {item.Type || type} @ ${item.Strike.toFixed(2)} (Vol: {item.Volume}, OI: {item['Open Int.']})
-            </li>
+            <ListItem key={i} disablePadding>
+              <ListItemText 
+                primary={`${item.Type || type} @ $${item.Strike.toFixed(2)}`}
+                secondary={`Vol: ${item.Volume}, OI: ${item['Open Int.']}`}
+              />
+            </ListItem>
           ))}
-        </ul>
-      </div>
+        </List>
+      </Box>
     );
   };
 
   return (
-    <div>
+    <Box>
       <AnalysisCard title={conclusionTitle}>
-        <h4 style={{ color: biasColor }}>Final Bias: {finalBias}</h4>
-        <div dangerouslySetInnerHTML={{ __html: data.final_conclusion_html }} />
+        <Typography variant="h5" sx={{ color: biasColor, mb: 2, fontWeight: 'bold' }}>
+          Final Bias: {finalBias}
+        </Typography>
+        <Box dangerouslySetInnerHTML={{ __html: data.final_conclusion_html }} sx={{ '& ul': { pl: 2 }, '& li': { mb: 0.5 } }} />
       </AnalysisCard>
 
       {data.gpt_verdict && <GptVerdictCard verdict={data.gpt_verdict} />}
@@ -1031,16 +765,24 @@ const AnalysisDetails = ({ data }) => {
       <AnalysisCard title="Price Chart (Candlesticks + MAs)">
         {data.candlestick_analysis?.plot_data ? 
           <CandlestickChart plotData={data.candlestick_analysis.plot_data} ticker={data.ticker} /> :
-          <p>{data.candlestick_analysis?.error || "No chart data."}</p>
+          <Typography color="text.secondary">{data.candlestick_analysis?.error || "No chart data."}</Typography>
         }
-        <p><strong>Primary Trend:</strong> {data.candlestick_analysis?.context?.primary_trend}</p>
-        <p><strong>Secondary Trend:</strong> {data.candlestick_analysis?.context?.secondary_trend}</p>
-        {data.candlestick_analysis?.volume_analysis?.summary && (
-            <p><strong>Volume:</strong> {data.candlestick_analysis.volume_analysis.summary}</p>
-        )}
-        {data.candlestick_analysis?.volume_analysis?.trend_confirmation && (
-            <p><strong>Trend Confirmation:</strong> {data.candlestick_analysis.volume_analysis.trend_confirmation}</p>
-        )}
+        <Grid container spacing={2} sx={{ mt: 2 }}>
+          <Grid item xs={6} md={3}>
+            <Typography variant="caption" display="block" color="text.secondary">Primary Trend</Typography>
+            <Typography variant="body2" fontWeight="bold">{data.candlestick_analysis?.context?.primary_trend}</Typography>
+          </Grid>
+          <Grid item xs={6} md={3}>
+            <Typography variant="caption" display="block" color="text.secondary">Secondary Trend</Typography>
+            <Typography variant="body2" fontWeight="bold">{data.candlestick_analysis?.context?.secondary_trend}</Typography>
+          </Grid>
+          {data.candlestick_analysis?.volume_analysis?.summary && (
+            <Grid item xs={12} md={6}>
+              <Typography variant="caption" display="block" color="text.secondary">Volume</Typography>
+              <Typography variant="body2">{data.candlestick_analysis.volume_analysis.summary}</Typography>
+            </Grid>
+          )}
+        </Grid>
       </AnalysisCard>
       
       <StrategyOrder 
@@ -1054,85 +796,107 @@ const AnalysisDetails = ({ data }) => {
         <>
           <AnalysisCard title="1. Candlestick Patterns (Context)">
             {data.candlestick_analysis?.patterns && data.candlestick_analysis.patterns.length > 0 ? (
-              <div style={{marginTop: '5px'}}>
-                <strong>Recent Patterns Identified:</strong>
-                <ul style={{ margin: '5px 0', paddingLeft: '20px' }}>
+              <Box sx={{ mt: 1 }}>
+                <Typography variant="subtitle2" gutterBottom>Recent Patterns Identified:</Typography>
+                <List dense>
                   {data.candlestick_analysis.patterns.map((p, i) => (
-                    <li key={i}>
-                      <strong>{p.name}</strong> (Strength: {p.strength}) - {p.interpretation}
-                    </li>
+                    <ListItem key={i}>
+                      <ListItemText 
+                        primary={`${p.name} (Strength: ${p.strength})`}
+                        secondary={p.interpretation}
+                      />
+                    </ListItem>
                   ))}
-                </ul>
-              </div>
+                </List>
+              </Box>
             ) : (
-              <p style={{marginTop: '5px'}}><strong>Patterns:</strong> No significant candlestick patterns identified in the last few periods.</p>
+              <Typography variant="body2" sx={{ mt: 1 }}>No significant candlestick patterns identified in the last few periods.</Typography>
             )}
           </AnalysisCard>
 
           <AnalysisCard title="2. Sentiment Analysis (Volume & OI)">
-            <p><strong>Put/Call Ratio (Volume):</strong> {data.volume_oi_analysis?.pc_ratio?.toFixed(2) || 'N/A'}</p>
-            {data.volume_oi_analysis?.oi_put_wall && <p><strong>Put Wall (Support):</strong> ${data.volume_oi_analysis.oi_put_wall.Strike.toFixed(2)} (OI: {data.volume_oi_analysis.oi_put_wall['Open Int.']})</p>}
-            {data.volume_oi_analysis?.oi_call_wall && <p><strong>Call Wall (Resistance):</strong> ${data.volume_oi_analysis.oi_call_wall.Strike.toFixed(2)} (OI: {data.volume_oi_analysis.oi_call_wall['Open Int.']})</p>}
+            <Grid container spacing={2}>
+              <Grid item xs={12} md={4}>
+                <Typography variant="subtitle2">Put/Call Ratio (Volume)</Typography>
+                <Typography variant="body1">{data.volume_oi_analysis?.pc_ratio?.toFixed(2) || 'N/A'}</Typography>
+              </Grid>
+              {data.volume_oi_analysis?.oi_put_wall && (
+                <Grid item xs={12} md={4}>
+                  <Typography variant="subtitle2">Put Wall (Support)</Typography>
+                  <Typography variant="body1">${data.volume_oi_analysis.oi_put_wall.Strike.toFixed(2)} (OI: {data.volume_oi_analysis.oi_put_wall['Open Int.']})</Typography>
+                </Grid>
+              )}
+              {data.volume_oi_analysis?.oi_call_wall && (
+                <Grid item xs={12} md={4}>
+                  <Typography variant="subtitle2">Call Wall (Resistance)</Typography>
+                  <Typography variant="body1">${data.volume_oi_analysis.oi_call_wall.Strike.toFixed(2)} (OI: {data.volume_oi_analysis.oi_call_wall['Open Int.']})</Typography>
+                </Grid>
+              )}
+            </Grid>
             {renderUOA(data.volume_oi_analysis?.uoa_calls, 'Call')}
             {renderUOA(data.volume_oi_analysis?.uoa_puts, 'Put')}
           </AnalysisCard>
 
           <AnalysisCard title="3. Volatility & Movement Analysis">
-            <p><strong>Market-Implied Move:</strong> {data.movement_analysis?.expected_move_pct?.toFixed(2) || 'N/A'}%</p>
-            {data.movement_analysis?.vol_compression_text && <p><strong>Volatility Compression:</strong> {data.movement_analysis.vol_compression_text}</p>}
-            {data.movement_analysis?.earnings_note && <p><strong>Catalyst Event:</strong> {data.movement_analysis.earnings_note}</p>}
+            <Typography variant="body1" gutterBottom><strong>Market-Implied Move:</strong> {data.movement_analysis?.expected_move_pct?.toFixed(2) || 'N/A'}%</Typography>
+            {data.movement_analysis?.vol_compression_text && <Typography variant="body2" paragraph><strong>Volatility Compression:</strong> {data.movement_analysis.vol_compression_text}</Typography>}
+            {data.movement_analysis?.earnings_note && <Typography variant="body2" paragraph><strong>Catalyst Event:</strong> {data.movement_analysis.earnings_note}</Typography>}
           </AnalysisCard>
           
           <AnalysisCard title="4. Quantitative Valuation (Undervalued Options)">
             {data.results_df && data.results_df.length > 0 ? (
-              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                <thead>
-                  <tr style={{ background: '#f4f4f4' }}>
-                    <th style={{ padding: '8px', border: '1px solid #ddd' }}>Strike</th>
-                    <th style={{ padding: '8px', border: '1px solid #ddd' }}>Type</th>
-                    <th style={{ padding: '8px', border: '1px solid #ddd' }}>Market Price</th>
-                    <th style={{ padding: '8px', border: '1px solid #ddd' }}>Model Price</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.results_df.map((opt, i) => (
-                    <tr key={i}>
-                      <td style={{ padding: '8px', border: '1px solid #ddd' }}>${opt.Strike.toFixed(2)}</td>
-                      <td style={{ padding: '8px', border: '1px solid #ddd' }}>{opt.Type}</td>
-                      <td style={{ padding: '8px', border: '1px solid #ddd' }}>${opt['Market Price'].toFixed(2)}</td>
-                      <td style={{ padding: '8px', border: '1px solid #ddd' }}>${opt['Model Price'].toFixed(2)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : <p>No significantly undervalued options were found.</p>}
+              <TableContainer component={Paper} variant="outlined">
+                <Table size="small">
+                  <TableHead>
+                    <TableRow sx={{ bgcolor: '#f5f5f5' }}>
+                      <TableCell>Strike</TableCell>
+                      <TableCell>Type</TableCell>
+                      <TableCell>Market Price</TableCell>
+                      <TableCell>Model Price</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {data.results_df.map((opt, i) => (
+                      <TableRow key={i}>
+                        <TableCell>${opt.Strike.toFixed(2)}</TableCell>
+                        <TableCell>{opt.Type}</TableCell>
+                        <TableCell>${opt['Market Price'].toFixed(2)}</TableCell>
+                        <TableCell>${opt['Model Price'].toFixed(2)}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+            ) : <Typography variant="body2">No significantly undervalued options were found.</Typography>}
           </AnalysisCard>
         </>
       }
-    </div>
+    </Box>
   );
 };
 
 const ResultsDisplay = ({ analysisResult }) => {
   if (!analysisResult || !Array.isArray(analysisResult) || analysisResult.length === 0) {
-    return <p>No analysis results to display.</p>;
+    return <Typography color="text.secondary">No analysis results to display.</Typography>;
   }
   
   const commonData = analysisResult[0]; // Use first result for common data like ticker and price
 
   return (
-    <div style={{ marginTop: '20px' }}>
-      <h2>Analysis for {commonData.ticker?.toUpperCase()}</h2>
-      <p>Current Price: <strong>{typeof commonData.S_current === 'number' ? `$${commonData.S_current.toFixed(2)}` : 'N/A'}</strong></p>
+    <Box sx={{ mt: 4 }}>
+      <Box sx={{ display: 'flex', alignItems: 'baseline', gap: 2, mb: 2 }}>
+        <Typography variant="h4" component="h2">Analysis for {commonData.ticker?.toUpperCase()}</Typography>
+        <Typography variant="h6" color="text.secondary">
+          Current Price: <strong>{typeof commonData.S_current === 'number' ? `$${commonData.S_current.toFixed(2)}` : 'N/A'}</strong>
+        </Typography>
+      </Box>
 
       {analysisResult.map((result, index) => (
-        <div key={index} style={{ borderTop: index > 0 ? '3px solid #007bff' : 'none', paddingTop: index > 0 ? '20px' : '0', marginTop: index > 0 ? '20px' : '0' }}>
+        <Box key={index} sx={{ mt: index > 0 ? 4 : 0, pt: index > 0 ? 4 : 0, borderTop: index > 0 ? '1px solid #e0e0e0' : 'none' }}>
           <AnalysisDetails data={result} />
-        </div>
+        </Box>
       ))}
-
-      {/* Verdict history moved outside the results box */}
-    </div>
+    </Box>
   );
 };
 
@@ -1234,38 +998,48 @@ const SavedVerdictsControls = ({ ticker, currentResult }) => {
 
   return (
     <AnalysisCard title="Verdict History">
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '16px' }}>
-        <div>
-          <h4>Add Current Verdict to History</h4>
-          <div style={{ marginBottom: '8px' }}>
-            <label>Label (optional):</label><br/>
-            <input type="text" value={saveLabel} onChange={e => setSaveLabel(e.target.value)} placeholder="e.g., Before Earnings" style={{ width: '95%' }} />
-          </div>
-          <button onClick={handleSave} disabled={saving || !ticker || !currentResult} style={{ padding: '6px 12px' }}>
-            {saving ? 'Saving...' : 'Add to History'}
-          </button>
-          {saveMsg && <div style={{ marginTop: '8px', fontSize: '0.9em' }}>{saveMsg}</div>}
-        </div>
+      <Grid container spacing={3}>
+        <Grid item xs={12} md={4}>
+          <Typography variant="subtitle1" gutterBottom>Add Current Verdict to History</Typography>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            <TextField
+              label="Label (optional)"
+              placeholder="e.g., Before Earnings"
+              value={saveLabel}
+              onChange={e => setSaveLabel(e.target.value)}
+              fullWidth
+              size="small"
+            />
+            <Button 
+              variant="contained" 
+              onClick={handleSave} 
+              disabled={saving || !ticker || !currentResult}
+            >
+              {saving ? 'Saving...' : 'Add to History'}
+            </Button>
+            {saveMsg && <Typography variant="caption" color={saveMsg.includes('failed') ? 'error' : 'success.main'}>{saveMsg}</Typography>}
+          </Box>
+        </Grid>
 
-        <div>
-          <h4>History</h4>
+        <Grid item xs={12} md={8}>
+          <Typography variant="subtitle1" gutterBottom>History</Typography>
           {listLoading ? (
-            <p>Loading verdict history...</p>
+            <CircularProgress size={24} />
           ) : (
-            <div style={{ maxHeight: '320px', overflow: 'auto', border: '1px solid #e0e0e0', borderRadius: 4 }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                <thead>
-                  <tr style={{ background: '#f7f7f7' }}>
-                    <th style={{ textAlign: 'left', padding: '6px', borderBottom: '1px solid #e0e0e0' }}>Saved At</th>
-                    <th style={{ textAlign: 'left', padding: '6px', borderBottom: '1px solid #e0e0e0' }}>Label</th>
-                    <th style={{ textAlign: 'left', padding: '6px', borderBottom: '1px solid #e0e0e0' }}>Type</th>
-                    <th style={{ textAlign: 'left', padding: '6px', borderBottom: '1px solid #e0e0e0' }}>Bias</th>
-                    <th style={{ textAlign: 'left', padding: '6px', borderBottom: '1px solid #e0e0e0' }}>Expiration</th>
-                    <th style={{ textAlign: 'right', padding: '6px', borderBottom: '1px solid #e0e0e0' }}>DTE</th>
-                    <th style={{ textAlign: 'right', padding: '6px', borderBottom: '1px solid #e0e0e0' }}>Price</th>
-                  </tr>
-                </thead>
-                <tbody>
+            <TableContainer component={Paper} variant="outlined" sx={{ maxHeight: 320 }}>
+              <Table size="small" stickyHeader>
+                <TableHead>
+                  <TableRow>
+                    <TableCell>Saved At</TableCell>
+                    <TableCell>Label</TableCell>
+                    <TableCell>Type</TableCell>
+                    <TableCell>Bias</TableCell>
+                    <TableCell>Expiration</TableCell>
+                    <TableCell align="right">DTE</TableCell>
+                    <TableCell align="right">Price</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
                   {savedList && savedList.length > 0 ? (
                     savedList.map(item => {
                       const ts = item.created_at?.slice(0, 19).replace('T',' ');
@@ -1275,61 +1049,60 @@ const SavedVerdictsControls = ({ ticker, currentResult }) => {
                         : 'Model Verdict');
                       const isSelected = selectedId === item.id;
                       return (
-                        <tr
+                        <TableRow
                           key={item.id}
                           onClick={() => handleSelect(item.id)}
-                          style={{ cursor: 'pointer', background: isSelected ? '#eef6ff' : 'transparent' }}
+                          sx={{ cursor: 'pointer', bgcolor: isSelected ? 'action.selected' : 'inherit', '&:hover': { bgcolor: 'action.hover' } }}
                         >
-                          <td style={{ padding: '6px', borderBottom: '1px solid #f0f0f0' }}>{ts}</td>
-                          <td style={{ padding: '6px', borderBottom: '1px solid #f0f0f0' }}>{item.label || ''}</td>
-                          <td style={{ padding: '6px', borderBottom: '1px solid #f0f0f0' }}>{typeText}</td>
-                          <td style={{ padding: '6px', borderBottom: '1px solid #f0f0f0' }}>{item.final_bias || ov.final_bias || ''}</td>
-                          <td style={{ padding: '6px', borderBottom: '1px solid #f0f0f0' }}>{item.expiration_date || ov.expiration_date || ''}</td>
-                          <td style={{ padding: '6px', borderBottom: '1px solid #f0f0f0', textAlign: 'right' }}>{ov.dte ?? ''}</td>
-                          <td style={{ padding: '6px', borderBottom: '1px solid #f0f0f0', textAlign: 'right' }}>{typeof ov.S_current === 'number' ? `$${ov.S_current.toFixed(2)}` : ''}</td>
-                        </tr>
+                          <TableCell>{ts}</TableCell>
+                          <TableCell>{item.label || ''}</TableCell>
+                          <TableCell>{typeText}</TableCell>
+                          <TableCell>{item.final_bias || ov.final_bias || ''}</TableCell>
+                          <TableCell>{item.expiration_date || ov.expiration_date || ''}</TableCell>
+                          <TableCell align="right">{ov.dte ?? ''}</TableCell>
+                          <TableCell align="right">{typeof ov.S_current === 'number' ? `$${ov.S_current.toFixed(2)}` : ''}</TableCell>
+                        </TableRow>
                       );
                     })
                   ) : (
-                    <tr>
-                      <td colSpan="7" style={{ padding: '10px', textAlign: 'center', color: '#777' }}>No saved verdicts yet.</td>
-                    </tr>
+                    <TableRow>
+                      <TableCell colSpan={7} align="center">No saved verdicts yet.</TableCell>
+                    </TableRow>
                   )}
-                </tbody>
-              </table>
-            </div>
+                </TableBody>
+              </Table>
+            </TableContainer>
           )}
 
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 8 }}>
-            <div>
-              <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page <= 1} style={{ marginRight: 8 }}>Prev</button>
-              <button onClick={() => setPage(p => (hasMore ? p + 1 : p))} disabled={!hasMore}>Next</button>
-            </div>
-            <div style={{ color: '#555', fontSize: '0.9em' }}>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mt: 2 }}>
+            <Box>
+              <Button size="small" onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page <= 1} sx={{ mr: 1 }}>Prev</Button>
+              <Button size="small" onClick={() => setPage(p => (hasMore ? p + 1 : p))} disabled={!hasMore}>Next</Button>
+            </Box>
+            <Typography variant="caption" color="text.secondary">
               Page {page} of {Math.max(1, Math.ceil((total||0) / pageSize))} • {total} total
-            </div>
-            <div>
-              <label style={{ marginRight: 6 }}>Page size:</label>
-              <select value={pageSize} onChange={e => setPageSize(parseInt(e.target.value) || 10)}>
-                {[10, 25, 50, 100].map(sz => <option key={sz} value={sz}>{sz}</option>)}
-              </select>
-            </div>
-          </div>
+            </Typography>
+            <FormControl size="small" sx={{ minWidth: 80 }}>
+              <Select value={pageSize} onChange={e => setPageSize(parseInt(e.target.value) || 10)} variant="standard">
+                {[10, 25, 50, 100].map(sz => <MenuItem key={sz} value={sz}>{sz}</MenuItem>)}
+              </Select>
+            </FormControl>
+          </Box>
 
           {selectedDoc && (
-            <div style={{ marginTop: '12px' }}>
-              <div><strong>Saved Bias:</strong> {previousBias || 'N/A'}</div>
+            <Paper variant="outlined" sx={{ mt: 2, p: 2, bgcolor: '#f9f9f9' }}>
+              <Typography variant="subtitle2">Saved Bias: {previousBias || 'N/A'}</Typography>
               {biasChanged && (
-                <div style={{ color: '#d9534f' }}><strong>Changed vs Current:</strong> {currentBias || 'N/A'}</div>
+                <Typography variant="subtitle2" color="error">Changed vs Current: {currentBias || 'N/A'}</Typography>
               )}
-              <div style={{ marginTop: '8px' }}>
-                <strong>Saved Summary</strong>
-                <div dangerouslySetInnerHTML={{ __html: selectedDoc?.data?.final_conclusion_html || '<p>No saved summary.</p>' }} />
-              </div>
-            </div>
+              <Box sx={{ mt: 1 }}>
+                <Typography variant="subtitle2" gutterBottom>Saved Summary</Typography>
+                <Box dangerouslySetInnerHTML={{ __html: selectedDoc?.data?.final_conclusion_html || '<p>No saved summary.</p>' }} />
+              </Box>
+            </Paper>
           )}
-        </div>
-      </div>
+        </Grid>
+      </Grid>
     </AnalysisCard>
   );
 };
@@ -1338,12 +1111,12 @@ const MethodologyExplanation = ({ methodology }) => {
   if (methodology === 'gpt-5-web-verdict') {
     return (
       <AnalysisCard title="About: GPT-5 Web Verdict Analysis">
-        <p>
+        <Typography paragraph>
           The <strong>GPT-5 Web Verdict</strong> methodology enhances the standard GPT Verdict by empowering the AI model with real-time web search capabilities.
-        </p>
-        <p>
+        </Typography>
+        <Typography paragraph>
           In addition to synthesizing the quantitative data provided by our internal analysis, the model will actively search for the latest news, analyst ratings, and market chatter related to the stock. This allows it to incorporate breaking developments and qualitative insights that are not captured in the raw market data, providing the most up-to-date and contextually-aware verdict possible.
-        </p>
+        </Typography>
       </AnalysisCard>
     );
   }
@@ -1351,12 +1124,12 @@ const MethodologyExplanation = ({ methodology }) => {
   if (methodology === 'gpt-verdict') {
     return (
       <AnalysisCard title="About: GPT Verdict Analysis">
-        <p>
+        <Typography paragraph>
           The <strong>GPT Verdict</strong> methodology leverages a powerful Large Language Model (LLM) to synthesize the output of all standard sub-analyses.
-        </p>
-        <p>
+        </Typography>
+        <Typography paragraph>
           Instead of relying on a rules-based scoring system, this approach provides the AI with the complete, structured data from the Trend, Sentiment, Volatility, and Quantitative analyses. The model then acts as an expert analyst, weighing the evidence, identifying nuanced connections, and generating a final verdict that includes a detailed rationale, actionable ideas, and key risk factors. This provides a qualitative, expert-level second opinion on the quantitative data.
-        </p>
+        </Typography>
       </AnalysisCard>
     );
   }
@@ -1364,23 +1137,33 @@ const MethodologyExplanation = ({ methodology }) => {
   if (methodology === 'holistic-market-edge') {
     return (
       <AnalysisCard title="About: Holistic Market Edge Analysis">
-        <p>
+        <Typography paragraph>
           The <strong>Holistic Market Edge</strong> methodology is a multi-faceted approach to stock and option analysis, designed to synthesize a wide range of market data into a single, actionable conclusion. It avoids relying on a single indicator and instead builds a &quot;weight of the evidence&quot; verdict.
-        </p>
-        <h5>How the Final Verdict is Generated:</h5>
-        <p>
+        </Typography>
+        <Typography variant="subtitle2" gutterBottom>How the Final Verdict is Generated:</Typography>
+        <Typography paragraph>
           The final bias (e.g., Bullish, Bearish, Neutral) is determined by a scoring system that aggregates sentiment from several core analytical components:
-        </p>
-        <ol>
-          <li><strong>Price Trend &amp; Candlesticks:</strong> Establishes the market&apos;s primary and secondary trends using moving averages and identifies recent, psychologically significant candlestick patterns for short-term sentiment.</li>
-          <li><strong>Sentiment Analysis:</strong> Gauges market sentiment by analyzing put/call ratios, unusual options activity (UOA), and significant open interest levels (support/resistance walls).</li>
-          <li><strong>Volatility Analysis:</strong> Compares implied volatility (IV) to historical volatility (HV) to determine if options are &quot;cheap&quot; or &quot;expensive.&quot; It also checks for volatility compression, which often precedes large price moves.</li>
-          <li><strong>Catalyst Events:</strong> Checks for upcoming earnings reports before the option&apos;s expiration date, as these are significant drivers of volatility and price movement.</li>
-          <li><strong>Quantitative Valuation:</strong> Uses a binomial pricing model to calculate a theoretical option price, which is then compared to the market price to find potentially undervalued opportunities.</li>
-        </ol>
-        <p>
+        </Typography>
+        <List dense>
+          <ListItem>
+            <ListItemText primary="Price Trend & Candlesticks" secondary="Establishes the market's primary and secondary trends using moving averages and identifies recent, psychologically significant candlestick patterns for short-term sentiment." />
+          </ListItem>
+          <ListItem>
+            <ListItemText primary="Sentiment Analysis" secondary="Gauges market sentiment by analyzing put/call ratios, unusual options activity (UOA), and significant open interest levels (support/resistance walls)." />
+          </ListItem>
+          <ListItem>
+            <ListItemText primary="Volatility Analysis" secondary="Compares implied volatility (IV) to historical volatility (HV) to determine if options are 'cheap' or 'expensive.' It also checks for volatility compression, which often precedes large price moves." />
+          </ListItem>
+          <ListItem>
+            <ListItemText primary="Catalyst Events" secondary="Checks for upcoming earnings reports before the option's expiration date, as these are significant drivers of volatility and price movement." />
+          </ListItem>
+          <ListItem>
+            <ListItemText primary="Quantitative Valuation" secondary="Uses a binomial pricing model to calculate a theoretical option price, which is then compared to the market price to find potentially undervalued opportunities." />
+          </ListItem>
+        </List>
+        <Typography paragraph>
           Each component contributes a bullish, bearish, or neutral signal to the final score. A strong bias is formed only when the evidence from multiple, diverse components points in the same direction. This comprehensive approach aims to provide a robust and well-rounded trading edge.
-        </p>
+        </Typography>
       </AnalysisCard>
     );
   }
@@ -1696,242 +1479,251 @@ const AnalysisPage = () => {
   };
 
   return (
-    <div>
+    <Box>
       <MacroInsights onRateCalculated={setRiskFreeRate} />
       
       <MethodologyExplanation methodology={analysisMethod} />
 
       <AnalysisCard title="Stock and Option Analysis">
-        <form onSubmit={handleAnalyze} style={{ marginBottom: '20px' }}>
-          <div style={{ display: 'flex', gap: '15px', alignItems: 'flex-end', flexWrap: 'wrap' }}>
-              <div>
-                <label>Ticker:</label><br/>
-                <input type="text" value={ticker} onChange={(e) => setTicker(e.target.value)} required />
-              </div>
+        <Box component="form" onSubmit={handleAnalyze} sx={{ mb: 3 }}>
+          <Grid container spacing={2} alignItems="flex-end">
+            <Grid item xs={12} sm={6} md={2}>
+              <TextField
+                label="Ticker"
+                value={ticker}
+                onChange={(e) => setTicker(e.target.value)}
+                required
+                fullWidth
+                size="small"
+              />
+            </Grid>
 
-              <div>
-                <label>Analysis Methodology:</label><br/>
-                <select value={analysisMethod} onChange={e => setAnalysisMethod(e.target.value)} style={{ padding: '4px', height: '29px' }}>
-                    <option value="holistic-market-edge">Holistic Market Edge</option>
-                    <option value="gpt-verdict">GPT Verdict</option>
-                    <option value="gpt-5-web-verdict">GPT-5 Web Verdict</option>
-                </select>
-              </div>
-              
-              {/* Show GPT model selector only for GPT-based methodologies */}
-              {analysisMethod.includes('gpt') && (
-                <div>
-                  <label>GPT Model:</label><br/>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                    <select 
-                      value={selectedModel} 
-                      onChange={e => setSelectedModel(e.target.value)} 
-                      style={{ padding: '4px', height: '29px', flex: 1 }}
+            <Grid item xs={12} sm={6} md={3}>
+              <FormControl fullWidth size="small">
+                <InputLabel>Analysis Methodology</InputLabel>
+                <Select
+                  value={analysisMethod}
+                  label="Analysis Methodology"
+                  onChange={e => setAnalysisMethod(e.target.value)}
+                >
+                  <MenuItem value="holistic-market-edge">Holistic Market Edge</MenuItem>
+                  <MenuItem value="gpt-verdict">GPT Verdict</MenuItem>
+                  <MenuItem value="gpt-5-web-verdict">GPT-5 Web Verdict</MenuItem>
+                </Select>
+              </FormControl>
+            </Grid>
+            
+            {/* Show GPT model selector only for GPT-based methodologies */}
+            {analysisMethod.includes('gpt') && (
+              <Grid item xs={12} sm={6} md={3}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                  <FormControl fullWidth size="small">
+                    <InputLabel>GPT Model</InputLabel>
+                    <Select
+                      value={selectedModel}
+                      label="GPT Model"
+                      onChange={e => setSelectedModel(e.target.value)}
                       disabled={fetchingModels}
                     >
                       {fetchingModels ? (
-                        <option>Loading models...</option>
+                        <MenuItem disabled>Loading models...</MenuItem>
                       ) : (
                         availableModels.map(model => (
-                          <option key={model.id} value={model.id}>
+                          <MenuItem key={model.id} value={model.id}>
                             {model.name}
-                          </option>
+                          </MenuItem>
                         ))
                       )}
-                    </select>
-                    <button 
-                      type="button"
-                      onClick={fetchGptModels}
-                      disabled={fetchingModels}
-                      style={{ padding: '4px 8px', fontSize: '12px', cursor: 'pointer' }}
-                      title="Refresh models list"
-                    >
-                      🔄
-                    </button>
-                  </div>
-                  {fetchingModels && <div style={{ fontSize: '0.8em', color: '#666' }}>Fetching available models...</div>}
-                  {availableModels.some(m => m.name.includes('Fallback')) && (
-                    <div style={{ fontSize: '0.8em', color: '#ff6600' }}>
-                      ⚠️ Using fallback models - click 🔄 to retry loading from server
-                    </div>
-                  )}
-                </div>
-              )}
+                    </Select>
+                  </FormControl>
+                  <Tooltip title="Refresh models list">
+                    <IconButton onClick={fetchGptModels} disabled={fetchingModels} size="small">
+                      <RefreshIcon />
+                    </IconButton>
+                  </Tooltip>
+                </Box>
+                {availableModels.some(m => m.name.includes('Fallback')) && (
+                  <Typography variant="caption" color="warning.main">
+                    ⚠️ Using fallback models
+                  </Typography>
+                )}
+              </Grid>
+            )}
 
-              <button type="button" onClick={handleFetchExpirations} disabled={fetchingExpirations || !ticker.trim()} style={{ padding: '5px 15px', cursor: 'pointer', height: 'fit-content' }}>
-                {fetchingExpirations ? 'Fetching...' : '1. Fetch Expirations'}
-              </button>
+            <Grid item xs={12} sm={6} md={2}>
+              <Button 
+                variant="outlined" 
+                onClick={handleFetchExpirations} 
+                disabled={fetchingExpirations || !ticker.trim()}
+                fullWidth
+                startIcon={fetchingExpirations ? <CircularProgress size={20} /> : <SearchIcon />}
+              >
+                1. Fetch Expirations
+              </Button>
+            </Grid>
 
-              {expirations.length > 0 && (
-                <div>
-                  <label>Expiration Date:</label><br/>
-                  <select value={selectedExpiration} onChange={e => setSelectedExpiration(e.target.value)} style={{ padding: '4px', height: '29px' }}>
+            {expirations.length > 0 && (
+              <Grid item xs={12} sm={6} md={2}>
+                <FormControl fullWidth size="small">
+                  <InputLabel>Expiration Date</InputLabel>
+                  <Select
+                    value={selectedExpiration}
+                    label="Expiration Date"
+                    onChange={e => setSelectedExpiration(e.target.value)}
+                  >
                     {expirations.map(exp => (
-                      <option key={exp} value={exp}>
+                      <MenuItem key={exp} value={exp}>
                         {new Date(exp.replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3')).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' })}
-                      </option>
+                      </MenuItem>
                     ))}
-                  </select>
-                </div>
-              )}
+                  </Select>
+                </FormControl>
+              </Grid>
+            )}
 
-              <div>
-                <label>Risk-Free Rate:</label><br/>
-                <input type="number" step="0.001" value={riskFreeRate} onChange={(e) => setRiskFreeRate(parseFloat(e.target.value))} required style={{width: '80px'}}/>
-              </div>
+            <Grid item xs={6} md={2}>
+              <TextField
+                label="Risk-Free Rate"
+                type="number"
+                inputProps={{ step: "0.001" }}
+                value={riskFreeRate}
+                onChange={(e) => setRiskFreeRate(parseFloat(e.target.value))}
+                required
+                fullWidth
+                size="small"
+              />
+            </Grid>
 
-              <button type="submit" disabled={loading || !selectedExpiration} style={{ padding: '5px 15px', cursor: 'pointer', height: 'fit-content' }}>
-                {loading ? 'Analyzing...' : '2. Run Analysis'}
-              </button>
-          </div>
-        </form>
+            <Grid item xs={6} md={2}>
+              <Button 
+                type="submit" 
+                variant="contained" 
+                disabled={loading || !selectedExpiration}
+                fullWidth
+                startIcon={loading ? <CircularProgress size={20} color="inherit" /> : <SmartToyIcon />}
+              >
+                2. Run Analysis
+              </Button>
+            </Grid>
+          </Grid>
+        </Box>
 
-        {error && <p style={{ color: 'red', border: '1px solid red', padding: '10px', borderRadius: '5px' }}><strong>Error:</strong> {error}</p>}
-        {loading && <p>Loading analysis...</p>}
+        {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+        {loading && <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}><CircularProgress /></Box>}
         {analysisResult && <ResultsDisplay analysisResult={analysisResult} />}
       </AnalysisCard>
 
       <AnalysisCard title="Recent Analyses">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', flexWrap: 'wrap', marginBottom: '12px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <label htmlFor="historyScopeSelect" style={{ fontSize: '0.9em', color: '#555' }}>Show:</label>
-            <select
-              id="historyScopeSelect"
-              value={historyScope}
-              onChange={e => {
-                const nextScope = e.target.value;
-                setHistoryScope(nextScope);
-                setHistoryPage(1);
-              }}
-              style={{ padding: '4px', height: '30px' }}
-            >
-              <option value={HISTORY_SCOPE_ALL}>All tickers</option>
-              <option value={HISTORY_SCOPE_CURRENT}>
-                {hasHistoryTicker ? `Current ticker (${normalizedTickerForHistory})` : 'Current ticker'}
-              </option>
-            </select>
-          </div>
-          {historyScope === HISTORY_SCOPE_CURRENT && (
-            <div style={{ fontSize: '0.85em', color: hasHistoryTicker ? '#555' : '#c0392b' }}>
-              {hasHistoryTicker ? `Filtering on ${normalizedTickerForHistory}` : 'Enter a ticker above to filter by symbol.'}
-            </div>
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+            <FormControl size="small" sx={{ minWidth: 150 }}>
+              <InputLabel>Show</InputLabel>
+              <Select
+                value={historyScope}
+                label="Show"
+                onChange={e => {
+                  const nextScope = e.target.value;
+                  setHistoryScope(nextScope);
+                  setHistoryPage(1);
+                }}
+              >
+                <MenuItem value={HISTORY_SCOPE_ALL}>All tickers</MenuItem>
+                <MenuItem value={HISTORY_SCOPE_CURRENT}>
+                  {hasHistoryTicker ? `Current ticker (${normalizedTickerForHistory})` : 'Current ticker'}
+                </MenuItem>
+              </Select>
+            </FormControl>
+            {historyScope === HISTORY_SCOPE_CURRENT && (
+              <Typography variant="caption" color={hasHistoryTicker ? 'text.secondary' : 'error'}>
+                {hasHistoryTicker ? `Filtering on ${normalizedTickerForHistory}` : 'Enter a ticker above to filter by symbol.'}
+              </Typography>
+            )}
+          </Box>
+          {historyItems.length > 0 && historyScope === HISTORY_SCOPE_CURRENT && hasHistoryTicker && (
+            <Button size="small" color="error" startIcon={<DeleteIcon />} onClick={handleClearHistory}>
+              Clear History
+            </Button>
           )}
-        </div>
+        </Box>
+
         {historyLoading ? (
-          <p style={{ margin: 0 }}>Loading history...</p>
+          <Box sx={{ display: 'flex', justifyContent: 'center', p: 2 }}><CircularProgress size={24} /></Box>
         ) : (
           <>
-            {historyError && (
-              <p style={{ color: '#c0392b', margin: '0 0 10px 0' }}>{historyError}</p>
-            )}
+            {historyError && <Alert severity="error" sx={{ mb: 2 }}>{historyError}</Alert>}
+            
             {historyItems.length === 0 ? (
-              <p style={{ margin: 0 }}>
+              <Typography color="text.secondary" align="center" sx={{ py: 2 }}>
                 {historyScope === HISTORY_SCOPE_CURRENT
                   ? (hasHistoryTicker ? 'No history found for this ticker yet.' : 'Enter a ticker to view its recent analyses.')
                   : 'Run an analysis to build your personal history.'}
-              </p>
+              </Typography>
             ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <List>
                 {historyItems.map((entry) => (
-                  <div
-                    key={entry.id}
-                    style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      border: '1px solid #e3e3e3',
-                      borderRadius: '6px',
-                      padding: '8px 12px',
-                      background: '#fbfbfb',
-                    }}
-                  >
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                      <div style={{ fontWeight: 600 }}>
-                        {entry.ticker}
-                        {(entry.expiration_date || entry.expiration_date_raw) && (
-                          <span style={{ fontWeight: 400, color: '#555', marginLeft: '6px' }}>
-                            · Exp {formatExpiration(entry.expiration_date_raw || entry.expiration_date)}
-                          </span>
-                        )}
-                      </div>
-                      <div style={{ fontSize: '0.85em', color: '#555', display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
-                        {entry.analysis_method && <span>{entry.analysis_method}</span>}
-                        {entry.gpt_model && <span>Model: {entry.gpt_model}</span>}
-                        {formatRiskFreeRate(entry.risk_free_rate) && (
-                          <span>RF: {formatRiskFreeRate(entry.risk_free_rate)}</span>
-                        )}
-                        {formatTimestamp(entry.created_at) && (
-                          <span>{formatTimestamp(entry.created_at)}</span>
-                        )}
-                        {entry.final_bias && (
-                          <span>Bias: {entry.final_bias}</span>
-                        )}
-                      </div>
-                    </div>
-                    <div style={{ display: 'flex', gap: '8px' }}>
-                      <button
-                        type="button"
-                        onClick={() => handleHistoryAnalyze(entry)}
-                        style={{ padding: '6px 10px', cursor: 'pointer' }}
-                      >
-                        Analyze Again
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleRemoveHistoryItem(entry.id)}
-                        style={{ padding: '6px 8px', cursor: 'pointer' }}
-                        title="Remove from history"
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  </div>
+                  <Paper key={entry.id} variant="outlined" sx={{ mb: 1 }}>
+                    <ListItem
+                      secondaryAction={
+                        <Box>
+                          <Button size="small" onClick={() => handleHistoryAnalyze(entry)} sx={{ mr: 1 }}>
+                            Analyze Again
+                          </Button>
+                          <IconButton edge="end" size="small" onClick={() => handleRemoveHistoryItem(entry.id)}>
+                            <DeleteIcon fontSize="small" />
+                          </IconButton>
+                        </Box>
+                      }
+                    >
+                      <ListItemText
+                        primary={
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                            <Typography variant="subtitle2">{entry.ticker}</Typography>
+                            {(entry.expiration_date || entry.expiration_date_raw) && (
+                              <Typography variant="caption" color="text.secondary">
+                                · Exp {formatExpiration(entry.expiration_date_raw || entry.expiration_date)}
+                              </Typography>
+                            )}
+                          </Box>
+                        }
+                        secondary={
+                          <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', mt: 0.5 }}>
+                            <Typography variant="caption">{entry.analysis_method}</Typography>
+                            {entry.gpt_model && <Typography variant="caption">Model: {entry.gpt_model}</Typography>}
+                            {formatRiskFreeRate(entry.risk_free_rate) && (
+                              <Typography variant="caption">RF: {formatRiskFreeRate(entry.risk_free_rate)}</Typography>
+                            )}
+                            {formatTimestamp(entry.created_at) && (
+                              <Typography variant="caption">{formatTimestamp(entry.created_at)}</Typography>
+                            )}
+                            {entry.final_bias && (
+                              <Chip label={entry.final_bias} size="small" sx={{ height: 20, fontSize: '0.7rem' }} />
+                            )}
+                          </Box>
+                        }
+                      />
+                    </ListItem>
+                  </Paper>
                 ))}
-              </div>
+              </List>
             )}
+            
             {historyItems.length > 0 && (
-              <div
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  marginTop: '12px',
-                  gap: '8px',
-                  flexWrap: 'wrap',
-                }}
-              >
-                <div style={{ fontSize: '0.85em', color: '#555' }}>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mt: 2 }}>
+                <Typography variant="caption" color="text.secondary">
                   Showing {historyRangeStart}–{historyRangeEnd} of {historyTotal || historyRangeEnd}
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <button
-                    type="button"
-                    onClick={() => setHistoryPage((prev) => Math.max(1, prev - 1))}
-                    disabled={historyPage === 1 || historyLoading}
-                    style={{ padding: '4px 10px', cursor: historyPage === 1 || historyLoading ? 'not-allowed' : 'pointer' }}
-                  >
+                </Typography>
+                <Box>
+                  <Button size="small" onClick={() => setHistoryPage((prev) => Math.max(1, prev - 1))} disabled={historyPage === 1 || historyLoading} sx={{ mr: 1 }}>
                     Previous
-                  </button>
-                  <span style={{ fontSize: '0.85em', color: '#555' }}>
+                  </Button>
+                  <Typography variant="caption" sx={{ mx: 1 }}>
                     Page {historyPage} of {totalHistoryPages}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setHistoryPage((prev) => prev + 1)}
-                    disabled={!historyHasMore || historyLoading}
-                    style={{ padding: '4px 10px', cursor: !historyHasMore || historyLoading ? 'not-allowed' : 'pointer' }}
-                  >
+                  </Typography>
+                  <Button size="small" onClick={() => setHistoryPage((prev) => prev + 1)} disabled={!historyHasMore || historyLoading}>
                     Next
-                  </button>
-                </div>
-              </div>
-            )}
-            {historyItems.length > 0 && historyScope === HISTORY_SCOPE_CURRENT && hasHistoryTicker && (
-              <div style={{ textAlign: 'right', marginTop: '12px' }}>
-                <button type="button" onClick={handleClearHistory} style={{ padding: '4px 10px', cursor: 'pointer' }}>
-                  Clear History
-                </button>
-              </div>
+                  </Button>
+                </Box>
+              </Box>
             )}
           </>
         )}
@@ -1942,7 +1734,7 @@ const AnalysisPage = () => {
         ticker={ticker}
         currentResult={analysisResult && Array.isArray(analysisResult) ? analysisResult[0] : null}
       />
-    </div>
+    </Box>
   );
 }
 
