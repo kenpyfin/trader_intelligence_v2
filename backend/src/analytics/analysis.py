@@ -927,6 +927,15 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
         if price and sma200:
             trend = "Above" if price > sma200 else "Below"
             tech_summary_parts.append(f"Price vs SMA200: {trend}")
+        
+        # Add BB summary
+        bb_upper = tech_indicators.get('bb_upper')
+        bb_lower = tech_indicators.get('bb_lower')
+        if price and bb_upper and bb_lower:
+            if price > bb_upper:
+                tech_summary_parts.append("Price > BB Upper (Overextended)")
+            elif price < bb_lower:
+                tech_summary_parts.append("Price < BB Lower (Oversold)")
             
         tech_summary_parts.append(f"Support/Resistance (20d): {tech_indicators.get('recent_low_20d'):.2f} / {tech_indicators.get('recent_high_20d'):.2f}")
     
