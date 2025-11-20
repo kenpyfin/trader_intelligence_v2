@@ -120,9 +120,37 @@ def universal_binomial_pricer(S, K, expiration_date, r_input, sigma_input, model
             else:
                 intrinsic_value = np.maximum(0, stock_price_tree[j, i] - K if option_type == 'call' else K - stock_price_tree[j, i])
                 option_value_tree[j, i] = np.maximum(continuation_value, intrinsic_value)
-    # Greeks, alerts, and early exercise premium logic omitted for this phase for brevity.
-    # The full logic from option_trade.py can be migrated here in subsequent steps.
-    return option_value_tree[0,0], {}, [], 0
+    # Greeks calculation
+    greeks = {}
+    if N >= 2:
+        # Delta: (C_u - C_d) / (S_u - S_d) using nodes at t=1
+        delta_numerator = option_value_tree[0, 1] - option_value_tree[1, 1]
+        delta_denominator = stock_price_tree[0, 1] - stock_price_tree[1, 1]
+        delta = delta_numerator / delta_denominator if delta_denominator != 0 else (1.0 if option_type == 'call' else -1.0)
+
+        # Gamma: (delta_u - delta_d) / (0.5 * (S_uu - S_dd)) using nodes at t=2
+        delta_u_num = option_value_tree[0, 2] - option_value_tree[1, 2]
+        delta_u_den = stock_price_tree[0, 2] - stock_price_tree[1, 2]
+        delta_up = delta_u_num / delta_u_den if delta_u_den != 0 else delta
+
+        delta_d_num = option_value_tree[1, 2] - option_value_tree[2, 2]
+        delta_d_den = stock_price_tree[1, 2] - stock_price_tree[2, 2]
+        delta_down = delta_d_num / delta_d_den if delta_d_den != 0 else delta
+        
+        gamma_numerator = delta_up - delta_down
+        gamma_denominator = 0.5 * (stock_price_tree[0, 2] - stock_price_tree[2, 2])
+        gamma = gamma_numerator / gamma_denominator if gamma_denominator != 0 else 0.0
+
+        # Theta: (C_ud - C_initial) / (2 * dt)
+        theta = (option_value_tree[1, 2] - option_value_tree[0,0]) / (2 * dt)
+        greeks = {'delta': delta, 'gamma': gamma, 'theta': theta}
+    elif N == 1:
+        delta_numerator = option_value_tree[0, 1] - option_value_tree[1, 1]
+        delta_denominator = stock_price_tree[0, 1] - stock_price_tree[1, 1]
+        delta = delta_numerator / delta_denominator if delta_denominator != 0 else (1.0 if option_type == 'call' else -1.0)
+        greeks = {'delta': delta, 'gamma': 0, 'theta': 0}
+
+    return option_value_tree[0,0], greeks, [], 0
 
 def _parse_finviz_iv_string(iv_input):
     if pd.isna(iv_input): return None
@@ -668,19 +696,69 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
         r_input = build_treasury_curve(fmp)['rate_fn']
     else: r_input = r_current
 
-    results, parity_data = [], []
+    results, parity_data, greeks_by_strike = [], [], {}
     selected_strikes = strikes[(strikes > S_current * 0.8) & (strikes < S_current * 1.2)]
+    
+    # Vega calculation setup: bump volatility by 1%
+    vega_bump = 0.01
+    bumped_key_vols_iv = [(d, v + vega_bump) for d, v in key_vols_iv]
+    bumped_vol_term_structure = generate_forward_vol_structure(days_to_exp, bumped_key_vols_iv)
+    
     for K in selected_strikes:
         call_market_price = _get_market_price_from_finviz_df(option_chain_df, K, 'C')
         put_market_price = _get_market_price_from_finviz_df(option_chain_df, K, 'P')
+        
+        # Put-call parity analysis
         if call_market_price is not None and put_market_price is not None:
             T = days_to_exp / 365.0
             parity_diff = (call_market_price - put_market_price) - (S_current - K * np.exp(-r_current * T))
             parity_data.append({"Strike": K, "Parity Difference": parity_diff})
 
+        # Calculate Greeks for both calls and puts at this strike
+        strike_greeks = {}
         for option_type, market_price in [('call', call_market_price), ('put', put_market_price)]:
             if market_price is None: continue
-            model_price, _, _, _ = universal_binomial_pricer(S=S_current, K=K, expiration_date=expiration_date, r_input=r_input, sigma_input=vol_term_structure, option_type=option_type, div=div_current)
+            
+            # Get model price and Greeks
+            model_price, greeks, _, _ = universal_binomial_pricer(
+                S=S_current, K=K, expiration_date=expiration_date, 
+                r_input=r_input, sigma_input=vol_term_structure, 
+                option_type=option_type, div=div_current
+            )
+            
+            # Calculate Vega by re-pricing with bumped volatility
+            bumped_price, _, _, _ = universal_binomial_pricer(
+                S=S_current, K=K, expiration_date=expiration_date,
+                r_input=r_input, sigma_input=bumped_vol_term_structure,
+                option_type=option_type, div=div_current
+            )
+            vega = (bumped_price - model_price) if bumped_price is not None and model_price is not None else None
+            greeks['vega'] = vega
+            
+            # Get volume and OI for liquidity assessment
+            option_row = option_chain_df[
+                (option_chain_df['Strike'] == K) & 
+                (option_chain_df['Type'].str.lower() == option_type)
+            ]
+            volume = None
+            open_interest = None
+            if not option_row.empty:
+                volume = pd.to_numeric(option_row.iloc[0].get('Volume'), errors='coerce')
+                open_interest = pd.to_numeric(option_row.iloc[0].get('Open Int.'), errors='coerce')
+            
+            # Store Greeks with liquidity info
+            strike_greeks[option_type] = {
+                'market_price': market_price,
+                'model_price': model_price,
+                'delta': greeks.get('delta'),
+                'gamma': greeks.get('gamma'),
+                'theta': greeks.get('theta'),
+                'vega': vega,
+                'volume': volume,
+                'open_interest': open_interest
+            }
+            
+            # Check for undervalued options
             if model_price > market_price:
                 diff = model_price - market_price
                 diff_pct = (diff / market_price) * 100 if market_price > 0 else float('inf')
@@ -688,6 +766,9 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
                     "Strike": K, "Type": option_type.capitalize(), "Market Price": market_price,
                     "Model Price": model_price, "Undervalued By ($)": diff, "Undervalued By (%)": diff_pct
                 })
+        
+        if strike_greeks:
+            greeks_by_strike[float(K)] = strike_greeks
 
     synthesis_data = {}
     iv_available = bool(key_vols_iv)
@@ -841,8 +922,10 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
             "top_opportunity": results_df.iloc[0].to_dict() if (results_df is not None and not results_df.empty) else None,
             "strike_distribution": {
                 "analyzed_strikes": selected_strikes.tolist() if hasattr(selected_strikes, 'tolist') else list(selected_strikes),
-                "atm_strike": float(strikes[np.argmin(np.abs(strikes - S_current))]) if len(strikes) > 0 else None
-            }
+                "atm_strike": float(strikes[np.argmin(np.abs(strikes - S_current))]) if len(strikes) > 0 else None,
+                "valid_strikes": selected_strikes.tolist() if hasattr(selected_strikes, 'tolist') else list(selected_strikes)
+            },
+            "greeks_by_strike": greeks_by_strike
         })
     }
 
