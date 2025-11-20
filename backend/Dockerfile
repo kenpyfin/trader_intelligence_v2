@@ -4,12 +4,24 @@ FROM python:3.10-slim
 # Set the working directory in the container
 WORKDIR /app
 
+# Install system dependencies required for building Python packages
+# build-essential: for compiling C extensions (numpy, pandas, etc.)
+# curl: for health checks
+# libxml2-dev, libxslt-dev: for lxml
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    libxml2-dev \
+    libxslt-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy the requirements file into the container at /app
 COPY ./requirements.txt /app/requirements.txt
 
 # Install any needed packages specified in requirements.txt
 # Using --no-cache-dir reduces the image size.
-RUN pip install --no-cache-dir --upgrade -r /app/requirements.txt
+# Explicitly install requests, pandas, and numpy to ensure analysis dependencies are met
+RUN pip install --no-cache-dir --upgrade -r /app/requirements.txt requests pandas numpy
 
 # Copy the rest of the backend application's code into the container at /app
 COPY . /app
