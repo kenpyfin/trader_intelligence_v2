@@ -365,6 +365,37 @@ def analyze_volume_and_oi_signals(df, S_current):
 
     return analysis
 
+# --- Technical Analysis Helper Functions ---
+
+def calculate_rsi(series, period=14):
+    """Calculates RSI using Wilder's smoothing (EMA)."""
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    
+    # Use exponential moving average for Wilder's RSI approximation
+    avg_gain = gain.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+    
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def calculate_macd(series, fast=12, slow=26, signal=9):
+    """Calculates MACD and Signal line."""
+    exp1 = series.ewm(span=fast, adjust=False).mean()
+    exp2 = series.ewm(span=slow, adjust=False).mean()
+    macd = exp1 - exp2
+    signal_line = macd.ewm(span=signal, adjust=False).mean()
+    return macd, signal_line
+
+def calculate_bollinger_bands(series, window=20, num_std=2):
+    """Calculates Bollinger Bands."""
+    sma = series.rolling(window=window).mean()
+    std = series.rolling(window=window).std()
+    upper = sma + (std * num_std)
+    lower = sma - (std * num_std)
+    return upper, lower
 
 def analyze_candlestick_patterns(df):
     required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
@@ -399,6 +430,11 @@ def analyze_candlestick_patterns(df):
     df['SMA200'] = df['Close'].rolling(window=200).mean()
     # Shift AvgVol10 by 1 to compare today's volume vs prior average
     df['AvgVol10'] = df['Volume'].rolling(window=10).mean().shift(1)
+
+    # Add Advanced Technical Indicators
+    df['RSI'] = calculate_rsi(df['Close'])
+    df['MACD'], df['MACD_Signal'] = calculate_macd(df['Close'])
+    df['BB_Upper'], df['BB_Lower'] = calculate_bollinger_bands(df['Close'])
 
     if len(df) < 4:
         return {"error": "Not enough data after calculating indicators.", "context": {}}
@@ -476,7 +512,29 @@ def analyze_candlestick_patterns(df):
     if 'index' in plot_data and len(plot_data['index']) > 0 and hasattr(plot_data['index'][0], 'strftime'):
         plot_data['index'] = [ts.strftime('%Y-%m-%d') for ts in plot_data['index']]
 
-    return {"patterns": found_patterns, "context": market_context, "plot_data": plot_data}
+    # Prepare Technical Indicators Summary
+    recent_high_20d = df['High'].tail(20).max()
+    recent_low_20d = df['Low'].tail(20).min()
+    year_high = df['High'].tail(252).max()
+    year_low = df['Low'].tail(252).min()
+    
+    technical_indicators = {
+        "rsi": last_row.get('RSI'),
+        "macd": last_row.get('MACD'),
+        "macd_signal": last_row.get('MACD_Signal'),
+        "bb_upper": last_row.get('BB_Upper'),
+        "bb_lower": last_row.get('BB_Lower'),
+        "sma20": last_row.get('SMA20'),
+        "sma50": last_row.get('SMA50'),
+        "sma200": last_row.get('SMA200'),
+        "current_price": last_row.get('Close'),
+        "recent_high_20d": recent_high_20d,
+        "recent_low_20d": recent_low_20d,
+        "year_high": year_high,
+        "year_low": year_low
+    }
+
+    return {"patterns": found_patterns, "context": market_context, "plot_data": plot_data, "technical_indicators": technical_indicators}
 
 
 def generate_holistic_conclusion(synthesis_data, strikes, S_current, option_chain_df, bias_override=None, strategy_hint=None):
@@ -849,6 +907,31 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
     else:
         synthesis_data['undervalued'] = {'sentiment': 'neutral', 'summary': 'The model found no clearly undervalued options.'}
 
+    # Generate Technical Summary String
+    tech_indicators = candlestick_analysis.get('technical_indicators', {})
+    tech_summary_parts = []
+    if tech_indicators:
+        rsi = tech_indicators.get('rsi')
+        if rsi is not None:
+            state = "Overbought" if rsi > 70 else "Oversold" if rsi < 30 else "Neutral"
+            tech_summary_parts.append(f"RSI(14): {rsi:.1f} ({state})")
+        
+        macd = tech_indicators.get('macd')
+        sig = tech_indicators.get('macd_signal')
+        if macd is not None and sig is not None:
+            state = "Bullish" if macd > sig else "Bearish"
+            tech_summary_parts.append(f"MACD: {state} ({macd:.2f}/{sig:.2f})")
+            
+        price = tech_indicators.get('current_price')
+        sma200 = tech_indicators.get('sma200')
+        if price and sma200:
+            trend = "Above" if price > sma200 else "Below"
+            tech_summary_parts.append(f"Price vs SMA200: {trend}")
+            
+        tech_summary_parts.append(f"Support/Resistance (20d): {tech_indicators.get('recent_low_20d'):.2f} / {tech_indicators.get('recent_high_20d'):.2f}")
+    
+    technical_summary_str = "; ".join(tech_summary_parts)
+
     # This is the base package of sub-analyses
     analysis_result_package = {
         "status": "success", "ticker": ticker, "S_current": S_current, "expiration_date": expiration_date.isoformat(), "dte": days_to_exp,
@@ -858,6 +941,10 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
         "iv_high": iv_high,
         "iv_low": iv_low, 
         "candlestick_analysis": _sanitize_for_json_serialization(candlestick_analysis), 
+        "technical_analysis": _sanitize_for_json_serialization({
+            "indicators": tech_indicators,
+            "summary": technical_summary_str
+        }),
         "volume_oi_analysis": _sanitize_for_json_serialization(volume_oi_analysis),
         "movement_analysis_results": _sanitize_for_json_serialization(movement_analysis_results), 
         "results_df": results_df,

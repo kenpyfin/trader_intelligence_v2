@@ -84,7 +84,11 @@ def _build_messages(ticker: str, expiration_date: str, analysis_payload: Dict[st
 
         "ANALYSIS FRAMEWORK - Structure your reasoning using these key areas: "
         "1. SYNTHESIS & VERDICT: Start with a high-level summary. What is the overall market picture and your final bias? Acknowledge any conflicting indicators. "
-        "2. TECHNICAL ANALYSIS: What do charts and indicators suggest? (trends, patterns, momentum, support/resistance levels based on current_price). "
+        "2. TECHNICAL ANALYSIS: What do charts and indicators suggest? Use the provided 'technical_analysis' section. "
+        "   - Momentum: Check RSI (Overbought > 70, Oversold < 30) and MACD crossovers. "
+        "   - Trend: Compare Price vs SMA20/50/200. "
+        "   - Volatility/Range: Check Bollinger Bands (BB_Upper/Lower) for squeeze or breakout potential. "
+        "   - Support/Resistance: Use recent_high_20d and recent_low_20d. "
         "3. FUNDAMENTAL CONTEXT: What is the company's financial health? (valuation, growth, profitability). Is it justified by the current price? "
         "4. VOLATILITY & OPTIONS LANDSCAPE: What is the volatility environment (IV vs HV, term structure, skew)? Where are the opportunities in the options market (e.g., undervalued options, unusual activity)? "
         "5. RISK-REWARD ASSESSMENT: What are the primary risks to this thesis (e.g., earnings, macro events)? What is the potential reward if the thesis is correct? Quantify where possible. "
@@ -186,6 +190,7 @@ def _build_messages(ticker: str, expiration_date: str, analysis_payload: Dict[st
     main_sections = [
         "market_data", 
         "stock_fundamentals", 
+        "technical_analysis",
         "volatility_structure", 
         "parity_analysis", 
         "options_positioning"
@@ -648,6 +653,7 @@ def generate_gpt_verdict(ticker: str, expiration_date: str, analysis_result: Dic
     keys_of_interest = [
         "synthesis_data",
         "candlestick_analysis",
+        "technical_analysis",
         "volume_oi_analysis",
         "movement_analysis_results",
         "results_df",
