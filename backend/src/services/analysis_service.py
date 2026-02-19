@@ -691,6 +691,30 @@ def generate_holistic_conclusion(
         for leg in ai_legs:
             action = leg.get('action', '').upper()
             right = leg.get('right', '').upper()
+            
+            # Normalize right: "Call" -> "C", "Put" -> "P"
+            if right == 'CALL':
+                right = 'C'
+            elif right == 'PUT':
+                right = 'P'
+            
+            # Check if we have a direct strike value (new format)
+            strike = leg.get('strike')
+            if strike is not None:
+                # Direct strike value provided - use it
+                try:
+                    strike = float(strike)
+                    if action in ['BUY', 'SELL', 'WATCH'] and right in ['C', 'P', 'SIGNAL']:
+                        strategy_legs.append({'action': action, 'strike': strike, 'right': right})
+                        print(f"DEBUG: Successfully added leg: action={action}, strike={strike}, right={right}")
+                        continue
+                    else:
+                        print(f"DEBUG: Leg validation failed: action={action} (valid: {action in ['BUY', 'SELL', 'WATCH']}), right={right} (valid: {right in ['C', 'P', 'SIGNAL']})")
+                except (ValueError, TypeError) as e:
+                    print(f"DEBUG: Failed to convert strike to float: {strike}, error: {e}")
+                    pass
+            
+            # Fall back to old format with strike_offset
             offset_str = leg.get('strike_offset', '').upper()
             
             if not all([action in ['BUY', 'SELL', 'WATCH'], right in ['C', 'P', 'SIGNAL'], offset_str]):
@@ -751,8 +775,10 @@ def generate_holistic_conclusion(
 
     hint_applied = False
     if primary_strategy_rec:
+        print(f"DEBUG: Attempting to construct strategy from AI rec: {primary_strategy_rec}")
         strategy = _construct_strategy_from_ai_rec(primary_strategy_rec)
         if strategy:
+            print(f"DEBUG: Successfully constructed strategy: {strategy}")
             primary_strategy = strategy
             recommended_strategies.append(strategy)
             hint_applied = True
@@ -763,6 +789,8 @@ def generate_holistic_conclusion(
             if strategy.get('time_horizon'): desc_segments.append(f"Time horizon: {strategy.get('time_horizon')}.")
             desc_text = " ".join(desc_segments) or "Align execution with the AI recommended approach."
             strategy_rec += f"<p><b>AI Suggested Strategy - {strategy['name']}.</b> {desc_text}</p>"
+        else:
+            print(f"DEBUG: Failed to construct strategy from AI rec: {primary_strategy_rec}")
 
     if isinstance(alt_strategy_recs, list):
         for rec in alt_strategy_recs:
@@ -957,8 +985,8 @@ def generate_holistic_conclusion(
 def _sanitize_for_json(item):
     """
     Recursively walk a data structure and convert non-JSON-compliant types
-    (NaN, Infinity, numpy integers/floats) to standard Python types.
-    """
+    (NaN, Infinity, numpy integers/floats) to standard Python types.fffffff
+1    """
     if isinstance(item, dict):
         return {k: _sanitize_for_json(v) for k, v in item.items()}
     elif isinstance(item, list):

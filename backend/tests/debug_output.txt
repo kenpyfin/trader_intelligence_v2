@@ -1,0 +1,56 @@
+ERROR:root:400 Error: Probably not supported ticker VIX
+DEBUG: analysis module file: /home/ken/big_storage/projects/trader_intelligence_v2/backend/src/analytics/analysis.py
+Running analysis for AAPL...
+DEBUG: Fetching macro context for AAPL...
+Note: Price data 'Close' column might represent different values depending on the source (e.g., Adj Close for FMP/IB, Close for Finviz).
+Finished SPY from Finviz
+Note: Price data 'Close' column might represent different values depending on the source (e.g., Adj Close for FMP/IB, Close for Finviz).
+Note: Price data 'Close' column might represent different values depending on the source (e.g., Adj Close for FMP/IB, Close for Finviz).
+Finished AAPL from Finviz
+Note: Price data 'Close' column might represent different values depending on the source (e.g., Adj Close for FMP/IB, Close for Finviz).
+Finished AAPL from Finviz
+DEBUG: Running GPT Verdict analysis for AAPL (method: gpt-verdict)
+DEBUG: Generating GPT Verdict for AAPL (Model: gpt-5)
+DEBUG: Stage 1 - Analyst Agent...
+DEBUG: Using API base: https://kenai.kx-invest.com/api
+DEBUG: Using model: gpt-5
+DEBUG: Message count: 2
+DEBUG: Making chat completions request to https://kenai.kx-invest.com/api/chat/completions
+DEBUG: Payload keys (json mode): ['model', 'messages', 'max_tokens', 'stream', 'response_format']
+DEBUG: Model in payload: gpt-5
+DEBUG: Messages count: 2
+DEBUG: Response status (json mode): 200
+DEBUG: Response keys: ['id', 'object', 'created', 'model', 'choices', 'usage', 'service_tier', 'system_fingerprint']
+DEBUG: Raw content from OpenAI: {
+  "final_bias": "Bullish",
+  "confidence_level": "Medium",
+  "rationale": "Macro context is supportive: SPY is in an Uptrend with price 659.03 above its 200-day SMA 614.59, though broader sentiment is Mixed/Choppy and the VIX regime is Unknown. AAPL’s trend is constructive with price at 271.49 above the 20/50/200-day SMAs (270.07/259.49/226.27), indicating solid intermediate momentum. The RSI at 59.7 is neutral-to-bullish and not overbought, suggesting room for continuation. MACD is modestly b...
+WARNING: execution_recommendations missing from GPT response, adding default structure
+DEBUG: Final GPT verdict contains execution_recommendations: True
+DEBUG: Stage 2 - Trader Agent...
+DEBUG: Using API base: https://kenai.kx-invest.com/api
+DEBUG: Using model: gpt-5
+DEBUG: Message count: 2
+DEBUG: Making chat completions request to https://kenai.kx-invest.com/api/chat/completions
+DEBUG: Payload keys (json mode): ['model', 'messages', 'max_tokens', 'stream', 'response_format']
+DEBUG: Model in payload: gpt-5
+DEBUG: Messages count: 2
+DEBUG: Response status (json mode): 200
+DEBUG: Response keys: ['id', 'object', 'created', 'model', 'choices', 'usage', 'service_tier', 'system_fingerprint']
+DEBUG: Raw content from OpenAI: ...
+ERROR: Empty content extracted from choice
+ERROR: Trader Agent failed.
+DEBUG: GPT Verdict response received: {'final_bias': 'Bullish', 'confidence_level': 'Medium', 'rationale': 'Macro context is supportive: SPY is in an Uptrend with price 659.03 above its 200-day SMA 614.59, though broader sentiment is Mixed/Choppy and the VIX regime is Unknown. AAPL’s trend is constructive with price at 271.49 above the 20/50/200-day SMAs (270.07/259.49/226.27), indicating solid intermediate momentum. The RSI at 59.7 is neutral-to-bullish and not overbought, suggesting room for continuation. MACD is modestly bearish (3.11 vs signal 4.17), implying a near-term pause/mean reversion risk within an overall uptrend. Price sits inside Bollinger Bands (265.63–274.51) and just below the 20-day high/year high at 277.32, marking 275–280 as the immediate resistance zone. The 20-day support at 264.65 aligns with the lower band, creating a nearby technical floor. Options positioning is supportive: the put/call ratio is 0.47 (bullish), with a notable put wall at 230 (OI 22,579) and a sizable call wall at 300 (OI 44,894), implying range support near 230 and overhead resistance near 300. Volatility is benign: ATM IV term/forward near 15.5% is in line with realized, and HV Rank is only 9%, so there’s no clear long-vol edge. The market implies a 5.53% move into 12/19, placing a rough range of ~256 to ~287 around spot, which is below the 300 call wall. Skew appears pronounced: the 230 put shows IV ~37.45% while a 300 call shows ~21.75%, consistent with downside protection demand. Put–call parity deviations skew bearish (average deviation −0.18%, 7 flagged cases), indicating puts trade rich to calls, but this can reflect hedging demand rather than outright bearish direction. Fundamentally, AAPL remains high quality with a 26.9% profit margin and a 0.39% dividend yield, and there is no earnings event before this expiration (last on 10/30/2025). With SPY’s tailwind and AAPL near trend highs, the path of least resistance is modestly higher, albeit with resistance into 277–280 and a cap near 300. Given low ATM IV and tight realized vol, breakouts may be measured rather than explosive. The key tactical risk is rejection at 277–280 while MACD remains soft. Overall, constructive trend, supportive market, and bullish options breadth outweigh parity-skew concerns, leading to a Bullish bias with Medium confidence. Strategy selection should prioritize defined-risk bullish or neutral-bullish structures, taking advantage of downside skew and nearby support levels.', 'summary_html': "<h4>AAPL 2025-12-19 Thesis <span style='background:#2e7d32;color:#fff;padding:2px 6px;border-radius:4px;'>Bias: Bullish</span> <span style='background:#f9a825;color:#000;padding:2px 6px;border-radius:4px;'>Confidence: Medium</span></h4><ul><li><strong>Macro:</strong> SPY Uptrend; SPY 659.03 > 200d SMA 614.59; Market sentiment Mixed/Choppy; VIX regime Unknown.</li><li><strong>Trend/Technicals:</strong> AAPL 271.49 > 20/50/200d SMAs (270.07/259.49/226.27); RSI 59.7; MACD below signal; R/S: 264.65 / 277.32; near year high 277.32.</li><li><strong>Volatility:</strong> ATM IV ~15.5% ≈ HV (HV Rank 9%); implied move to expiry ~5.53%; downside skew elevated (230P IV ~37.45%).</li><li><strong>Options Positioning:</strong> P/C 0.47 (bullish); Put wall 230 (OI 22,579) as support; Call wall 300 (OI 44,894) as resistance.</li><li><strong>Parity/Sentiment:</strong> Puts rich vs calls (avg deviation −0.18%, 7 flags), likely hedging demand; quant flag on 300P undervaluation doesn’t negate trend.</li><li><strong>Fundamentals:</strong> Profit margin 26.9%; dividend yield ~0.39%; no earnings before 12/19.</li></ul>", 'key_reasoning_points': ['SPY in Uptrend with price above 200d SMA, providing macro tailwind.', 'AAPL trades above 20/50/200d SMAs and near year highs; RSI 59.7 supportive.', 'Immediate resistance 277–280; support near 264.65; call wall at 300 likely cap.', 'ATM IV ~15.5% in line with HV (HV Rank 9%), implying limited long-vol edge; skew favors selling downside.', 'Options breadth bullish (P/C 0.47); puts rich to calls indicates hedging rather than strong bearish consensus.'], 'risk_factors': ['Rejection at 277–280 or failure to sustain above 20d SMA with MACD still below signal.', 'Macro risk: SPY pullback or VIX spike from an Unknown regime reversing risk appetite.', 'Overhead supply at 300 call wall could cap upside near term.', 'Skew/hedge unwinds may amplify downside if spot breaks 265 support.', 'Low realized volatility raises breakout failure risk and time decay for outright longs.'], 'actionable_ideas': ['Neutral-bullish income: Sell a defined-risk put credit spread below support (e.g., 260/250 or 255/245) into 12/19 to harvest elevated downside skew while respecting the 5.53% implied move.', 'Bullish breakout but risk-controlled: Buy a call debit spread targeting the 277–300 zone (e.g., 275/290 or 280/295) to align with resistance tests while capping premium in low IV.', 'Accumulation stance: Consider cash-secured puts near the 230 put wall where IV (~37% on sample) is rich, accepting assignment risk well below the implied move envelope.'], 'execution_recommendations': {'primary_strategy': {'type': 'GPT Response Missing', 'description': 'GPT did not provide execution recommendations', 'confidence': 'Low', 'time_horizon': 'Unknown'}, 'alternative_strategies': [], 'position_sizing': {'suggested_allocation': 'Conservative allocation', 'risk_level': 'Conservative', 'justification': 'No GPT guidance provided'}, 'entry_conditions': [], 'exit_conditions': [], 'stop_loss_guidance': 'Use standard risk management', 'profit_target_guidance': 'Use standard profit targets'}, 'search_performed': False, 'sources': [], 'model': 'gpt-5'}
+DEBUG: Generated 1 recommended strategies for GPT analysis
+DEBUG: Final analysis package for AAPL: bias=Bullish
+DEBUG: Result keys: ['status', 'ticker', 'S_current', 'expiration_date', 'dte', 'analysis_method', 'gpt_model', 'synthesis_data', 'macro_context', 'iv_high', 'iv_low', 'candlestick_analysis', 'technical_analysis', 'volume_oi_analysis', 'movement_analysis_results', 'results_df', 'market_data', 'parity_analysis', 'stock_fundamentals', 'volatility_structure', 'options_positioning', 'final_bias', 'final_conclusion_html', 'gpt_verdict', 'recommended_strategy', 'recommended_strategies']
+
+Verifying Macro Context:
+PASS: macro_context found
+{'spy_trend': 'Uptrend', 'spy_price': 659.03, 'vix_level': None, 'vix_regime': 'Unknown', 'market_sentiment': 'Mixed/Choppy', 'spy_sma200': 614.59245}
+
+Verifying GPT Verdict:
+Saved gpt_verdict to verdict_debug.json
+
+Verifying HV Rank:
+PASS: hv_rank found in volatility_structure: 0.09153079564988562

@@ -7,6 +7,7 @@ import time
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+from typing import List, Dict, Any
 import logging
 import os
 import io
@@ -32,12 +33,16 @@ from dotenv import load_dotenv, find_dotenv
 
 ####  SORT THE PRICE SERIES ASCENDING
 class PriceDataFetcher:
-    def __init__(self, trader=None, fmp_switch=False, fall_back=True):
+    def __init__(self, trader=None, fmp_switch=False, fall_back=True, enable_intelligent_fallback=True):
         self.fmp_client = FMPClient()
         self.trader = trader
         self.fmp_switch = fmp_switch
         self.fall_back = fall_back
         self.finviz_key = self._read_finviz_key() # Initialize finviz key
+
+        # [NEW] Intelligent Fallback Configuration
+        self.enable_intelligent_fallback = enable_intelligent_fallback
+        self._fallback_manager = None  # Lazy initialization to avoid circular imports
 
     def _parse_finviz_value(self, value_str):
         if not isinstance(value_str, str) or value_str == '-':
@@ -710,5 +715,233 @@ class PriceDataFetcher:
             except Exception as e:
                  logging.error(f"An unexpected error occurred while processing Finviz futures data: {e}")
                  return pd.DataFrame()
-        
+
         return pd.DataFrame()
+
+    # ********************************************************
+    #   INTELLIGENT FALLBACK METHODS
+    # ********************************************************
+
+    def _get_fallback_manager(self):
+        """Lazy initialization of fallback manager to avoid circular imports."""
+        if self._fallback_manager is None:
+            try:
+                from src.analytics.data_quality_fallback_manager import DataQualityFallbackManager
+                from src.analytics.expiration_fallback_config import create_default_fallback_config
+                config = create_default_fallback_config()
+                self._fallback_manager = DataQualityFallbackManager(config)
+            except ImportError as e:
+                logging.warning(f"Failed to initialize fallback manager: {e}")
+                self._fallback_manager = None
+        return self._fallback_manager
+
+    async def get_option_data_with_intelligent_fallback(self, ticker: str, option_type: str,
+                                                       expiration_date: str, max_retries: int = 2,
+                                                       enable_fallback: bool = None) -> pd.DataFrame:
+        """
+        Enhanced version of get_option_data_finviz with intelligent fallback strategy.
+
+        This method implements the 'more active options' recommendation by:
+        1. Attempting the initial request
+        2. Assessing data quality using existing quality assessment system
+        3. If quality is insufficient, trying alternative expiration dates with better liquidity
+        4. Attempting different data sources if available
+
+        Args:
+            ticker (str): Stock ticker symbol
+            option_type (str): 'oc' for calls, 'op' for puts, 'o' for both
+            expiration_date (str): Target expiration date (YYYY-MM-DD format)
+            max_retries (int): Maximum retries for initial request
+            enable_fallback (bool): Override for enabling fallback (uses instance default if None)
+
+        Returns:
+            pandas.DataFrame: Option chain data with enhanced fallback strategy applied
+        """
+        # Use instance setting if not overridden
+        if enable_fallback is None:
+            enable_fallback = self.enable_intelligent_fallback
+
+        # First, try the original method
+        initial_data = self.get_option_data_finviz(ticker, option_type, expiration_date, max_retries)
+
+        # If fallback is disabled or manager unavailable, return initial result
+        if not enable_fallback:
+            return initial_data
+
+        fallback_manager = self._get_fallback_manager()
+        if fallback_manager is None:
+            logging.warning("Fallback manager not available, returning initial data")
+            return initial_data
+
+        # If initial data is good enough, return it
+        if initial_data is not None and not initial_data.empty:
+            quality_assessment = fallback_manager._assess_data_quality(initial_data, ticker)
+            should_fallback, triggers = fallback_manager.decision_engine.should_trigger_fallback(quality_assessment)
+
+            if not should_fallback:
+                logging.info(f"Initial data quality acceptable for {ticker}/{expiration_date}")
+                return initial_data
+
+            logging.info(f"Triggering intelligent fallback for {ticker}: {[t.value for t in triggers]}")
+
+        # Convert string date to date object
+        try:
+            from datetime import datetime
+            target_date = datetime.strptime(expiration_date, '%Y-%m-%d').date()
+        except ValueError:
+            logging.error(f"Invalid date format: {expiration_date}")
+            return initial_data
+
+        # Execute intelligent fallback
+        try:
+            from src.analytics.expiration_fallback_config import DataSource
+            fallback_result = await fallback_manager.execute_with_fallback(
+                ticker=ticker,
+                expiration_date=target_date,
+                data_fetcher=self,
+                initial_source=DataSource.FINVIZ_ELITE,
+                option_type=option_type
+            )
+
+            if fallback_result.final_success and fallback_result.final_data is not None:
+                logging.info(f"Intelligent fallback succeeded for {ticker}: "
+                           f"{fallback_result.final_expiration} via {fallback_result.final_source.value}")
+
+                # Log fallback execution summary for monitoring
+                summary = fallback_result.get_summary()
+                logging.info(f"Fallback execution summary: {summary['execution_stats']}")
+
+                return fallback_result.final_data
+            else:
+                logging.warning(f"Intelligent fallback failed for {ticker}, returning initial data")
+                return initial_data
+
+        except Exception as e:
+            logging.error(f"Intelligent fallback execution failed for {ticker}: {e}")
+            return initial_data
+
+    def get_recommended_expiration_dates(self, ticker: str, target_dte_list: List[int] = None) -> List[str]:
+        """
+        Get recommended expiration dates based on liquidity and activity patterns.
+
+        This method implements the 'more active options' recommendation by identifying
+        expiration dates that typically have higher liquidity and better data quality.
+
+        Args:
+            ticker (str): Stock ticker symbol
+            target_dte_list (List[int]): Target days to expiration. Defaults to [7, 30, 90]
+
+        Returns:
+            List[str]: List of recommended expiration dates in YYYY-MM-DD format
+        """
+        from datetime import date, timedelta
+
+        if target_dte_list is None:
+            target_dte_list = [7, 14, 21, 30, 60, 90]
+
+        recommended_dates = []
+        today = date.today()
+
+        for dte in target_dte_list:
+            target_date = today + timedelta(days=dte)
+
+            # Adjust to nearest Friday (weekly options) or third Friday (monthly)
+            if dte <= 30:  # Weekly options preference for shorter term
+                days_until_friday = (4 - target_date.weekday()) % 7
+                if days_until_friday == 0:
+                    days_until_friday = 7
+                adjusted_date = target_date + timedelta(days=days_until_friday)
+            else:  # Monthly options for longer term
+                # Find third Friday of the month
+                first_day = target_date.replace(day=1)
+                third_friday = first_day + timedelta(days=(4 - first_day.weekday()) % 7 + 14)
+
+                # If we've passed the third Friday, go to next month
+                if target_date > third_friday:
+                    next_month = (first_day + timedelta(days=32)).replace(day=1)
+                    adjusted_date = next_month + timedelta(days=(4 - next_month.weekday()) % 7 + 14)
+                else:
+                    adjusted_date = third_friday
+
+            recommended_dates.append(adjusted_date.strftime('%Y-%m-%d'))
+
+        return recommended_dates
+
+    def assess_data_quality_simple(self, option_data: pd.DataFrame, ticker: str) -> dict:
+        """
+        Simple data quality assessment for option chain data.
+
+        This provides a lightweight quality check that can be used independently
+        of the full fallback system.
+
+        Args:
+            option_data (pd.DataFrame): Option chain data to assess
+            ticker (str): Stock ticker symbol
+
+        Returns:
+            dict: Quality assessment with score and recommendations
+        """
+        if option_data is None or option_data.empty:
+            return {
+                "quality_score": 0.0,
+                "quality_level": "failed",
+                "recommendations": ["No data available - try different expiration date"],
+                "valid_strikes": 0,
+                "total_rows": 0
+            }
+
+        assessment = {
+            "total_rows": len(option_data),
+            "valid_strikes": 0,
+            "complete_greeks": 0,
+            "quality_score": 0.0,
+            "recommendations": []
+        }
+
+        # Count valid strikes
+        if 'Strike' in option_data.columns:
+            valid_strikes = option_data[option_data['Strike'].notna() & (option_data['Strike'] > 0)]
+            assessment["valid_strikes"] = len(valid_strikes)
+
+        # Check Greeks completeness
+        greek_columns = ['Delta', 'Gamma', 'Theta', 'Vega']
+        available_greeks = [col for col in greek_columns if col in option_data.columns]
+
+        if available_greeks:
+            complete_rows = option_data.dropna(subset=available_greeks)
+            assessment["complete_greeks"] = len(complete_rows)
+
+        # Calculate quality score
+        if assessment["total_rows"] > 0:
+            completeness_ratio = assessment["valid_strikes"] / assessment["total_rows"]
+            greeks_ratio = assessment["complete_greeks"] / assessment["total_rows"]
+            assessment["quality_score"] = (completeness_ratio * 0.6 + greeks_ratio * 0.4)
+
+        # Determine quality level and recommendations
+        if assessment["quality_score"] >= 0.8:
+            assessment["quality_level"] = "excellent"
+        elif assessment["quality_score"] >= 0.6:
+            assessment["quality_level"] = "good"
+        elif assessment["quality_score"] >= 0.4:
+            assessment["quality_level"] = "acceptable"
+        elif assessment["quality_score"] >= 0.2:
+            assessment["quality_level"] = "poor"
+            assessment["recommendations"].append("Consider trying shorter-term expiration for better liquidity")
+        else:
+            assessment["quality_level"] = "failed"
+            assessment["recommendations"].extend([
+                "Try different expiration date with more active options",
+                "Consider weekly expiration dates for higher liquidity",
+                "Check if ticker supports options trading"
+            ])
+
+        # Add specific recommendations based on data characteristics
+        if assessment["valid_strikes"] < 5:
+            assessment["recommendations"].append("Low number of strikes - try more liquid expiration date")
+
+        if 'Volume' in option_data.columns:
+            avg_volume = pd.to_numeric(option_data['Volume'], errors='coerce').mean()
+            if pd.notna(avg_volume) and avg_volume < 10:
+                assessment["recommendations"].append("Low trading volume - consider more active expiration dates")
+
+        return assessment

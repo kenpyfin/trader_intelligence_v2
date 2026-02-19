@@ -57,9 +57,9 @@ docker system prune -af
 #    The '-d' flag runs the containers in the background.
 echo "🏗️  Building and restarting Docker services (default backend: ib_async)..."
 if [[ "$DETACHED" -eq 1 ]]; then
-  BROKER_BACKEND=${BROKER_BACKEND:-ib_async} docker-compose up --build -d
+  docker-compose up --build -d
 else
-  BROKER_BACKEND=${BROKER_BACKEND:-ib_async} docker-compose up --build
+  docker-compose up --build
 fi
 
 

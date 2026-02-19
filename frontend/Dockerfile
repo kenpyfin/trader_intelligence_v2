@@ -3,10 +3,26 @@
 FROM node:18-alpine AS build
 
 WORKDIR /app
+
+# Install system dependencies for node-gyp (needed for some npm packages)
+RUN apk add --no-cache python3 make g++
+
+# Copy package files for Docker layer caching
 COPY package*.json ./
-RUN npm install
+
+# Install all dependencies (including dev dependencies needed for build)
+# Try npm ci first, fallback to npm install if it fails
+# Using multiple flags to handle common build issues:
+# --legacy-peer-deps: handle peer dependency conflicts
+# --force: bypass some dependency resolution issues
+# --no-audit: skip vulnerability audit for faster builds
+RUN npm ci --legacy-peer-deps --force --no-audit || npm install --legacy-peer-deps --force --no-audit
+
+# Copy source code (node_modules excluded via .dockerignore)
 COPY . .
-RUN CI=false npm run build
+
+# Build the React application (settings loaded from .env.production)
+RUN npm run build
 
 
 # --- Production Stage ---

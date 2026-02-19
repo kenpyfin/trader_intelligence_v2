@@ -2,8 +2,596 @@ import os
 import json
 import re
 import requests
-from datetime import date
-from typing import Any, Dict
+import logging
+import time
+from datetime import date, datetime
+from typing import Any, Dict, Optional, Tuple
+import traceback
+from dataclasses import dataclass, field
+from enum import Enum
+import random
+import threading
+from typing import Callable
+from ..quality_config import QualityAssessment, QualityLevel
+from ..strike_normalization import default_normalizer
+from ..enhanced_greeks_validation import default_enhanced_validator
+
+# Configure structured logging for GPT verdict generation
+logger = logging.getLogger('gpt_verdict')
+logger.setLevel(logging.DEBUG)
+
+# Create console handler if not exists
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setLevel(logging.DEBUG)
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - [%(funcName)s:%(lineno)d] - %(message)s'
+    )
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+class FailureCategory(Enum):
+    """Categorizes different types of failures for better diagnostics."""
+    API_TIMEOUT = "api_timeout"
+    API_ERROR = "api_error"
+    JSON_PARSE_ERROR = "json_parse_error"
+    DATA_VALIDATION_ERROR = "data_validation_error"
+    MALFORMED_RESPONSE = "malformed_response"
+    EMPTY_RESPONSE = "empty_response"
+    NETWORK_ERROR = "network_error"
+    AUTHENTICATION_ERROR = "authentication_error"
+    RATE_LIMIT_ERROR = "rate_limit_error"
+
+@dataclass
+class APICallMetrics:
+    """Tracks detailed metrics for API calls."""
+    stage: str
+    model: str
+    temperature: float
+    timeout: int
+    start_time: float
+    end_time: Optional[float] = None
+    status_code: Optional[int] = None
+    response_size: Optional[int] = None
+    request_size: Optional[int] = None
+    success: bool = False
+    failure_category: Optional[FailureCategory] = None
+    error_message: Optional[str] = None
+
+    @property
+    def duration(self) -> float:
+        """Returns duration in seconds."""
+        if self.end_time:
+            return self.end_time - self.start_time
+        return time.time() - self.start_time
+
+@dataclass
+class OptionsDataValidation:
+    """Tracks options data quality and validation results with graduated assessment."""
+    valid_strikes_count: int
+    greeks_count: int
+    filtered_greeks_count: int
+    top_opportunity_present: bool
+    volatility_structure_present: bool
+    undervalued_opportunities_count: int
+    data_completeness_score: float  # 0.0 to 1.0
+    data_quality_score: float  # 0.0 to 1.0 - quality of existing data
+    complete_greeks_count: int  # strikes with full greeks for both calls and puts
+    invalid_greeks_count: int  # strikes with invalid/NaN greeks values
+    warnings: list
+    errors: list
+    repair_attempts: list  # track what data repairs were attempted
+    quality_assessment_result: Optional[Dict] = None  # graduated quality assessment details
+    enhanced_greeks_validation: Optional[Dict] = None  # enhanced validation with repairs
+
+@dataclass
+class JSONParsingDiagnostics:
+    """Detailed diagnostics for JSON parsing attempts."""
+    raw_response: str
+    raw_response_length: int
+    direct_parse_success: bool
+    code_block_parse_success: bool
+    balanced_brace_parse_success: bool
+    greedy_parse_success: bool
+    final_success: bool
+    parsing_attempts: int
+    extracted_json_keys: list
+    missing_required_fields: list
+    parsing_errors: list
+
+@dataclass
+class RetryConfig:
+    """Configuration for retry logic with exponential backoff."""
+    max_attempts: int = 3
+    base_delay: float = 1.0  # Initial delay in seconds
+    max_delay: float = 60.0  # Maximum delay in seconds
+    exponential_base: float = 2.0
+    jitter: bool = True  # Add randomness to prevent thundering herd
+    retryable_categories: set = field(default_factory=lambda: {
+        FailureCategory.API_TIMEOUT,
+        FailureCategory.NETWORK_ERROR,
+        FailureCategory.RATE_LIMIT_ERROR,
+        FailureCategory.API_ERROR  # Some API errors might be transient
+    })
+
+    def calculate_delay(self, attempt: int) -> float:
+        """Calculate delay for given attempt number (0-indexed)."""
+        delay = self.base_delay * (self.exponential_base ** attempt)
+        delay = min(delay, self.max_delay)
+
+        if self.jitter:
+            # Add ±25% jitter to prevent thundering herd
+            jitter_range = delay * 0.25
+            delay += random.uniform(-jitter_range, jitter_range)
+
+        return max(0.1, delay)  # Minimum 100ms delay
+
+@dataclass
+class TimeoutConfig:
+    """Separate timeout configuration for different agent stages."""
+    analyst_timeout: int = 180  # 3 minutes for analyst
+    trader_timeout: int = 240   # 4 minutes for trader (more complex payload)
+
+    def get_timeout(self, stage: str) -> int:
+        """Get appropriate timeout for the stage."""
+        if stage.lower() == "trader":
+            return self.trader_timeout
+        return self.analyst_timeout
+
+@dataclass
+class CircuitBreakerState:
+    """Tracks circuit breaker state for failure prevention."""
+    failure_count: int = 0
+    last_failure_time: float = 0.0
+    state: str = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
+    failure_threshold: int = 5
+    recovery_timeout: float = 300.0  # 5 minutes
+    half_open_success_threshold: int = 2
+
+class CircuitBreaker:
+    """Circuit breaker pattern implementation to prevent cascading failures."""
+
+    def __init__(self, failure_threshold: int = 5, recovery_timeout: float = 300.0):
+        self.state = CircuitBreakerState(
+            failure_threshold=failure_threshold,
+            recovery_timeout=recovery_timeout
+        )
+        self._lock = threading.Lock()
+
+    def can_execute(self) -> bool:
+        """Check if execution is allowed based on circuit breaker state."""
+        with self._lock:
+            now = time.time()
+
+            if self.state.state == "CLOSED":
+                return True
+            elif self.state.state == "OPEN":
+                if now - self.state.last_failure_time >= self.state.recovery_timeout:
+                    logger.info("Circuit breaker transitioning to HALF_OPEN")
+                    self.state.state = "HALF_OPEN"
+                    self.state.failure_count = 0
+                    return True
+                return False
+            elif self.state.state == "HALF_OPEN":
+                return True
+
+            return False
+
+    def record_success(self):
+        """Record successful execution."""
+        with self._lock:
+            if self.state.state == "HALF_OPEN":
+                self.state.failure_count = 0
+                if hasattr(self.state, 'success_count'):
+                    self.state.success_count += 1
+                else:
+                    self.state.success_count = 1
+
+                if self.state.success_count >= self.state.half_open_success_threshold:
+                    logger.info("Circuit breaker transitioning to CLOSED after successful recovery")
+                    self.state.state = "CLOSED"
+                    self.state.failure_count = 0
+            elif self.state.state == "CLOSED":
+                self.state.failure_count = 0
+
+    def record_failure(self):
+        """Record failed execution."""
+        with self._lock:
+            self.state.failure_count += 1
+            self.state.last_failure_time = time.time()
+
+            if self.state.state == "CLOSED" and self.state.failure_count >= self.state.failure_threshold:
+                logger.warning(f"Circuit breaker OPENING due to {self.state.failure_count} failures")
+                self.state.state = "OPEN"
+            elif self.state.state == "HALF_OPEN":
+                logger.warning("Circuit breaker returning to OPEN from HALF_OPEN due to failure")
+                self.state.state = "OPEN"
+
+# Global circuit breakers for each agent type
+_circuit_breakers = {
+    "Analyst": CircuitBreaker(failure_threshold=5, recovery_timeout=300.0),
+    "Trader": CircuitBreaker(failure_threshold=3, recovery_timeout=600.0)  # More sensitive for trader
+}
+
+@dataclass
+class RetryMetrics:
+    """Tracks retry attempts and outcomes."""
+    total_attempts: int = 0
+    successful_attempt: Optional[int] = None
+    final_failure_category: Optional[FailureCategory] = None
+    total_retry_time: float = 0.0
+    delays_used: list = field(default_factory=list)
+    circuit_breaker_triggered: bool = False
+
+def _sanitize_and_repair_options_data(options_data: Dict[str, Any]) -> tuple[Dict[str, Any], list[str]]:
+    """Attempts to repair common data quality issues in options data."""
+    import math
+
+    repair_attempts = []
+    cleaned_data = options_data.copy()
+
+    # Ensure basic structure exists
+    if "valid_strikes" not in cleaned_data:
+        cleaned_data["valid_strikes"] = []
+        repair_attempts.append("Added missing valid_strikes field")
+
+    if "greeks_by_strike" not in cleaned_data:
+        cleaned_data["greeks_by_strike"] = {}
+        repair_attempts.append("Added missing greeks_by_strike field")
+
+    # Clean and validate strikes
+    valid_strikes = cleaned_data.get("valid_strikes", [])
+    cleaned_strikes = []
+
+    for strike in valid_strikes:
+        try:
+            float_strike = float(strike)
+            if not (math.isnan(float_strike) or math.isinf(float_strike)):
+                cleaned_strikes.append(float_strike)
+            else:
+                repair_attempts.append(f"Removed invalid strike: {strike}")
+        except (ValueError, TypeError):
+            repair_attempts.append(f"Removed non-numeric strike: {strike}")
+
+    cleaned_data["valid_strikes"] = cleaned_strikes
+
+    # Clean greeks data
+    greeks_by_strike = cleaned_data.get("greeks_by_strike", {})
+    cleaned_greeks = {}
+
+    for strike_key, strike_data in greeks_by_strike.items():
+        # Validate strike key
+        try:
+            float_key = float(strike_key)
+            if math.isnan(float_key) or math.isinf(float_key):
+                repair_attempts.append(f"Removed strike with invalid key: {strike_key}")
+                continue
+        except (ValueError, TypeError):
+            repair_attempts.append(f"Removed strike with non-numeric key: {strike_key}")
+            continue
+
+        # Validate strike data structure
+        if not isinstance(strike_data, dict):
+            repair_attempts.append(f"Removed strike {strike_key} with non-dict data")
+            continue
+
+        cleaned_strike_data = {}
+
+        # Clean option data (calls and puts)
+        for option_type in ['call', 'put']:
+            if option_type in strike_data and isinstance(strike_data[option_type], dict):
+                option_data = strike_data[option_type]
+                cleaned_option_data = {}
+
+                # Clean greeks values
+                expected_greeks = ['delta', 'gamma', 'theta', 'vega', 'rho', 'market_price', 'model_price']
+
+                for key, value in option_data.items():
+                    try:
+                        if key in expected_greeks and value is not None:
+                            float_val = float(value)
+                            if not (math.isnan(float_val) or math.isinf(float_val)):
+                                cleaned_option_data[key] = float_val
+                            else:
+                                repair_attempts.append(f"Removed invalid {key} for {strike_key} {option_type}: {value}")
+                        else:
+                            # Keep non-numeric fields as-is
+                            cleaned_option_data[key] = value
+                    except (ValueError, TypeError):
+                        repair_attempts.append(f"Removed non-numeric {key} for {strike_key} {option_type}: {value}")
+
+                if cleaned_option_data:  # Only add if there's valid data
+                    cleaned_strike_data[option_type] = cleaned_option_data
+
+        if cleaned_strike_data:  # Only add if there's valid option data
+            cleaned_greeks[strike_key] = cleaned_strike_data
+
+    cleaned_data["greeks_by_strike"] = cleaned_greeks
+
+    # Ensure numeric fields have reasonable defaults
+    if "undervalued_opportunities" not in cleaned_data or not isinstance(cleaned_data["undervalued_opportunities"], (int, float)):
+        cleaned_data["undervalued_opportunities"] = 0
+        repair_attempts.append("Set default undervalued_opportunities to 0")
+
+    return cleaned_data, repair_attempts
+
+def _validate_options_data(options_data: Dict[str, Any]) -> OptionsDataValidation:
+    """Validates options data completeness and quality with enhanced checks."""
+    import math
+
+    warnings = []
+    errors = []
+    repair_attempts = []
+
+    # Check basic structure
+    valid_strikes = options_data.get("valid_strikes", [])
+    greeks_by_strike = options_data.get("greeks_by_strike", {})
+    top_opportunity = options_data.get("top_opportunity")
+    volatility_structure = options_data.get("volatility_structure", {})
+    undervalued_count = options_data.get("undervalued_opportunities", 0)
+
+    # Validate valid_strikes
+    if not valid_strikes:
+        errors.append("No valid strikes available")
+    elif len(valid_strikes) < 3:
+        warnings.append(f"Limited strikes available: {len(valid_strikes)}")
+
+    # Validate greeks data existence
+    if not greeks_by_strike:
+        errors.append("No greeks data available")
+        return OptionsDataValidation(
+            valid_strikes_count=len(valid_strikes),
+            greeks_count=0,
+            filtered_greeks_count=0,
+            top_opportunity_present=bool(top_opportunity),
+            volatility_structure_present=bool(volatility_structure),
+            undervalued_opportunities_count=undervalued_count,
+            data_completeness_score=0.0,
+            data_quality_score=0.0,
+            complete_greeks_count=0,
+            invalid_greeks_count=0,
+            warnings=warnings,
+            errors=errors,
+            repair_attempts=repair_attempts
+        )
+
+    # Deep validation of greeks structure
+    complete_greeks_count = 0
+    invalid_greeks_count = 0
+    expected_greeks = ['delta', 'gamma', 'theta', 'vega', 'rho']
+
+    # Check each strike's greeks data quality
+    for strike_key, strike_data in greeks_by_strike.items():
+        if not isinstance(strike_data, dict):
+            invalid_greeks_count += 1
+            warnings.append(f"Strike {strike_key} has non-dict greeks data")
+            continue
+
+        # Check for call and put data
+        has_call = 'call' in strike_data and isinstance(strike_data['call'], dict)
+        has_put = 'put' in strike_data and isinstance(strike_data['put'], dict)
+
+        if not has_call and not has_put:
+            invalid_greeks_count += 1
+            warnings.append(f"Strike {strike_key} missing both call and put data")
+            continue
+
+        # Validate greeks values for available option types
+        complete_option_count = 0
+        missing_fields_this_strike = []
+        invalid_values_this_strike = []
+
+        for option_type in ['call', 'put']:
+            if option_type not in strike_data or not isinstance(strike_data[option_type], dict):
+                missing_fields_this_strike.append(f"{option_type}_data")
+                continue
+
+            option_data = strike_data[option_type]
+            option_complete = True
+
+            # Check for required greeks
+            for greek in expected_greeks:
+                field_name = f"{option_type}_{greek}"
+                if greek not in option_data:
+                    option_complete = False
+                    missing_fields_this_strike.append(field_name)
+                    continue
+
+                value = option_data[greek]
+                # Validate numerical values
+                if value is None:
+                    option_complete = False
+                    missing_fields_this_strike.append(field_name)
+                    continue
+
+                try:
+                    float_val = float(value)
+                    if math.isnan(float_val) or math.isinf(float_val):
+                        option_complete = False
+                        invalid_values_this_strike.append(f"{field_name}={value}")
+                        warnings.append(f"Strike {strike_key} {option_type} has invalid {greek}: {value}")
+                        continue
+
+                    # Range checks for specific greeks
+                    if greek == 'delta':
+                        if option_type == 'call' and not (0 <= float_val <= 1):
+                            invalid_values_this_strike.append(f"{field_name}={float_val}_out_of_range")
+                            warnings.append(f"Strike {strike_key} call delta out of range: {float_val}")
+                        elif option_type == 'put' and not (-1 <= float_val <= 0):
+                            invalid_values_this_strike.append(f"{field_name}={float_val}_out_of_range")
+                            warnings.append(f"Strike {strike_key} put delta out of range: {float_val}")
+                    elif greek == 'gamma' and float_val < 0:
+                        invalid_values_this_strike.append(f"{field_name}={float_val}_negative")
+                        warnings.append(f"Strike {strike_key} {option_type} negative gamma: {float_val}")
+
+                except (ValueError, TypeError):
+                    option_complete = False
+                    invalid_values_this_strike.append(f"{field_name}={value}_not_numeric")
+                    warnings.append(f"Strike {strike_key} {option_type} {greek} not numeric: {value}")
+
+            if option_complete:
+                complete_option_count += 1
+
+        # Log detailed field-level issues for debugging (first 3 strikes for brevity)
+        if len(list(greeks_by_strike.keys())) <= 3 or any(issue for issue in [missing_fields_this_strike, invalid_values_this_strike]):
+            if missing_fields_this_strike or invalid_values_this_strike:
+                print(f"FIELD_DEBUG: Strike {strike_key} issues:")
+                if missing_fields_this_strike:
+                    print(f"  Missing fields: {missing_fields_this_strike}")
+                if invalid_values_this_strike:
+                    print(f"  Invalid values: {invalid_values_this_strike}")
+
+        # Strike is complete if it has at least one complete option type
+        if complete_option_count > 0:
+            complete_greeks_count += 1
+        else:
+            invalid_greeks_count += 1
+
+    # ROBUST STRIKE KEY NORMALIZATION AND ANALYSIS
+    strike_analysis = default_normalizer.analyze_strike_mismatch(
+        valid_strikes, greeks_by_strike, "valid_strikes", "greeks_by_strike"
+    )
+
+    # Log detailed analysis
+    default_normalizer.log_strike_analysis(strike_analysis)
+
+    # Extract normalized metrics
+    strike_overlap = strike_analysis["summary"]["overlapping_strikes"]
+    total_valid_strikes = strike_analysis["summary"]["total_strikes_set1"]
+    overlap_ratio = strike_analysis["summary"]["overlap_ratio"]
+
+    # Add warnings/errors based on overlap
+    if strike_overlap == 0:
+        errors.append("No overlap between valid strikes and available greeks")
+        print("🚨 ZERO OVERLAP DETECTED - This causes 0.33 quality score!")
+    elif overlap_ratio < 0.5:
+        warnings.append(f"Low strike overlap: {strike_overlap}/{total_valid_strikes} ({overlap_ratio:.1%})")
+    elif overlap_ratio < 0.8:
+        warnings.append(f"Moderate strike overlap: {strike_overlap}/{total_valid_strikes} ({overlap_ratio:.1%})")
+
+    # Calculate completeness score (presence of data)
+    completeness_factors = [
+        1.0 if valid_strikes else 0.0,
+        1.0 if greeks_by_strike else 0.0,
+        1.0 if top_opportunity else 0.5,
+        1.0 if volatility_structure else 0.5,
+        min(1.0, undervalued_count / 5.0) if undervalued_count > 0 else 0.0
+    ]
+    completeness_score = sum(completeness_factors) / len(completeness_factors)
+
+    # GRADUATED QUALITY ASSESSMENT SYSTEM
+    if len(greeks_by_strike) > 0:
+        # Individual quality factors
+        completeness_factor = complete_greeks_count / len(greeks_by_strike)
+        validity_factor = 1.0 - (invalid_greeks_count / len(greeks_by_strike))
+        # Use the robust overlap ratio from strike analysis
+        overlap_factor = overlap_ratio
+
+        # Determine asset type for appropriate thresholds
+        ticker_hint = "SPY" if len(valid_strikes) > 50 else "UNKNOWN"
+        asset_type = QualityAssessment.determine_asset_type(ticker_hint, len(valid_strikes))
+        quality_assessor = QualityAssessment(asset_type)
+
+        # Get graduated quality assessment
+        overall_level, can_proceed, assessment_details = quality_assessor.assess_overall_quality(
+            completeness_score=completeness_score,
+            quality_score=(completeness_factor + validity_factor + overlap_factor) / 3,
+            overlap_score=overlap_factor,
+            complete_strikes=complete_greeks_count,
+            total_strikes=len(valid_strikes)
+        )
+
+        # Use the combined score from assessment
+        quality_score = assessment_details["combined_score"]
+
+        # Enhanced logging with graduated levels
+        print(f"GRADUATED_QUALITY_DEBUG: Comprehensive Quality Assessment:")
+        print(f"  Asset Type: {asset_type}")
+        print(f"  Overall Level: {overall_level.value.upper()}")
+        print(f"  Can Proceed: {can_proceed}")
+        print(f"  Combined Score: {quality_score:.4f}")
+        print(f"  Component Factors:")
+        print(f"    Completeness: {completeness_factor:.4f} ({assessment_details['component_levels']['completeness']})")
+        print(f"    Validity: {validity_factor:.4f} ({assessment_details['component_levels']['quality']})")
+        print(f"    Overlap: {overlap_factor:.4f} ({assessment_details['component_levels']['overlap']})")
+        print(f"  Thresholds: Pass={assessment_details['thresholds_used']['pass_threshold']:.2f}, Fallback={assessment_details['thresholds_used']['fallback_threshold']:.2f}")
+
+        # Store assessment for later use
+        quality_assessment_result = assessment_details
+    else:
+        quality_score = 0.0
+        can_proceed = False
+        overall_level = QualityLevel.FAILED
+        quality_assessment_result = {"overall_level": "failed", "can_proceed": False}
+        print(f"GRADUATED_QUALITY_DEBUG: No greeks data - Quality Level = FAILED")
+
+    # ENHANCED GREEKS VALIDATION WITH INTELLIGENT REPAIR
+    enhanced_validation_result = None
+    if len(greeks_by_strike) > 0:
+        print(f"ENHANCED_GREEKS_DEBUG: Running enhanced Greeks validation...")
+
+        # Estimate parameters for enhanced validation
+        spot_price = 400.0  # Default for SPY-like assets
+        if len(valid_strikes) > 0:
+            # Estimate spot price from ATM strike
+            strikes_list = []
+            for strike_key in valid_strikes:
+                try:
+                    strikes_list.append(float(strike_key))
+                except:
+                    continue
+            if strikes_list:
+                spot_price = sum(strikes_list) / len(strikes_list)  # Rough ATM estimate
+
+        # Run enhanced validation
+        enhanced_result = default_enhanced_validator.validate_and_enhance_greeks_data(
+            greeks_by_strike=greeks_by_strike,
+            spot_price=spot_price,
+            risk_free_rate=0.05,
+            time_to_expiry=0.25,  # Rough estimate
+            implied_vol=0.20  # Default vol estimate
+        )
+
+        # Create validation summary
+        enhanced_validation_result = default_enhanced_validator.create_validation_summary(enhanced_result)
+
+        # Log enhanced validation results
+        print(f"ENHANCED_GREEKS_DEBUG: Enhanced Validation Results:")
+        print(f"  Original Quality: {enhanced_result.original_quality_score:.3f}")
+        print(f"  Enhanced Quality: {enhanced_result.enhanced_quality_score:.3f}")
+        print(f"  Confidence Score: {enhanced_result.confidence_score:.3f}")
+        print(f"  Strikes by Category:")
+        print(f"    Excellent: {len(enhanced_result.excellent_strikes)}")
+        print(f"    Good: {len(enhanced_result.good_strikes)}")
+        print(f"    Acceptable: {len(enhanced_result.acceptable_strikes)}")
+        print(f"    Poor: {len(enhanced_result.poor_strikes)}")
+        print(f"  Repairs: {enhanced_result.repaired_strikes_count} strikes repaired")
+        print(f"  Recommendation: {enhanced_validation_result['recommendation']}")
+
+        # Update quality scores if enhancement significantly improved them
+        if (enhanced_result.enhanced_quality_score > quality_score * 1.2 and
+            enhanced_result.confidence_score > 0.5):
+            print(f"ENHANCED_GREEKS_DEBUG: Using enhanced quality score due to significant improvement")
+            quality_score = enhanced_result.enhanced_quality_score
+            complete_greeks_count = len(enhanced_result.excellent_strikes) + len(enhanced_result.good_strikes)
+
+    return OptionsDataValidation(
+        valid_strikes_count=len(valid_strikes),
+        greeks_count=len(greeks_by_strike),
+        filtered_greeks_count=len(greeks_by_strike),
+        top_opportunity_present=bool(top_opportunity),
+        volatility_structure_present=bool(volatility_structure),
+        undervalued_opportunities_count=undervalued_count,
+        data_completeness_score=completeness_score,
+        data_quality_score=quality_score,
+        complete_greeks_count=complete_greeks_count,
+        invalid_greeks_count=invalid_greeks_count,
+        warnings=warnings,
+        errors=errors,
+        repair_attempts=repair_attempts,
+        quality_assessment_result=quality_assessment_result if len(greeks_by_strike) > 0 else None,
+        enhanced_greeks_validation=enhanced_validation_result
+    )
 
 def _sanitize_for_json(obj: Any, max_list_len: int = 200) -> Any:
     """
@@ -70,181 +658,400 @@ def _sanitize_for_json(obj: Any, max_list_len: int = 200) -> Any:
     return str(obj)
 
 
-def _build_messages(ticker: str, expiration_date: str, analysis_payload: Dict[str, Any], use_web_search: bool = False) -> Dict[str, Any]:
+def _build_analyst_messages(ticker: str, expiration_date: str, analysis_payload: Dict[str, Any], use_web_search: bool = False) -> Dict[str, Any]:
     """
-    Build system/user messages for the chat completion API.
-    We instruct the model to return strict JSON so we can parse it reliably.
+    Stage 1: The Analyst.
+    Focuses on synthesizing data into a market thesis (Bias, Rationale, Risks).
     """
     system = (
-        "You are a quantitative options trading analyst. Your task is to provide a rigorous, data-driven investment thesis and an actionable trading strategy based on the provided market data. "
-        "You must synthesize technicals, fundamentals, options sentiment, and volatility data into a coherent verdict. Address conflicting signals directly and state your confidence level. "
-        "Analyze the market_data, stock_fundamentals, volatility_structure, parity_analysis, and options_positioning "
-        "along with traditional sub-analyses (trend, candlesticks, volume/oi, iv/hv, movement, undervalued opportunities) "
-        "to produce a decisive trading verdict for options positioning. "
-
-        "ANALYSIS FRAMEWORK - Structure your reasoning using these key areas: "
-        "1. SYNTHESIS & VERDICT: Start with a high-level summary. What is the overall market picture and your final bias? Acknowledge any conflicting indicators. "
-        "2. TECHNICAL ANALYSIS: What do charts and indicators suggest? Use the provided 'technical_analysis' section. "
-        "   - Momentum: Check RSI (Overbought > 70, Oversold < 30) and MACD crossovers (MACD > Signal is bullish). "
-        "   - Trend: Compare Price vs SMA20/50/200. "
-        "   - Volatility/Range: Check Bollinger Bands (BB_Upper/Lower). Price near Upper Band may indicate overextension; near Lower Band may indicate value. Narrow bands suggest a squeeze. "
-        "   - Support/Resistance: Use recent_high_20d and recent_low_20d. "
-        "3. FUNDAMENTAL CONTEXT: What is the company's financial health? (valuation, growth, profitability). Is it justified by the current price? "
-        "4. VOLATILITY & OPTIONS LANDSCAPE: What is the volatility environment (IV vs HV, term structure, skew)? Where are the opportunities in the options market (e.g., undervalued options, unusual activity)? "
-        "5. RISK-REWARD ASSESSMENT: What are the primary risks to this thesis (e.g., earnings, macro events)? What is the potential reward if the thesis is correct? Quantify where possible. "
-
-        "DATA INTEGRITY & CITATION RULES:"
-        "- CURRENT REAL-TIME PRICE: Always use `market_data.current_price`. This is the single source of truth for the underlying price."
-        "- EXPLICIT VALUES: When referencing indicators, cite the specific value provided (e.g., 'RSI is 72', not just 'RSI is high')."
-        "- MISSING DATA: If a specific data point (e.g., earnings date) is null or missing, explicitly state that it is unavailable rather than guessing."
-
-        "STRIKE SELECTION RULES (CRITICAL):"
-        "1. SOURCE OF TRUTH: You MUST choose strikes ONLY from `options_positioning.strike_distribution.valid_strikes`. Do not invent strikes."
-        "2. LIQUIDITY CHECK: Verify `volume` and `open_interest` in `options_positioning.greeks_by_strike` for your chosen strike. Do not recommend strikes with 0 volume or < 100 OI unless necessary for a spread."
-        "3. GREEKS JUSTIFICATION: In `strike_selection_rationale`, reference the Delta (e.g., 'Delta of 0.30 suggests 30% ITM probability') and Gamma/Theta where relevant."
-
-        "STRATEGY CONSTRUCTION:"
-        "- PRIMARY STRATEGY: Must be a specific, executable options strategy (e.g., Long Call, Bull Call Spread, Iron Condor)."
-        "- ENTRY CONDITIONS: Provide specific triggers (e.g., 'Enter if price breaks above $150.50' or 'Enter on pullback to SMA20 at $148')."
-        "- EXIT CONDITIONS: Define clear profit targets (e.g., '50% gain on premium') and stop losses (e.g., 'Close if stock drops below $145')."
-        "- IV/HV CONTEXT: If IV is high (IV > HV), prefer credit strategies (selling premium). If IV is low, prefer debit strategies (buying premium)."
-
-        "CONFIDENCE SCORING:"
-        "- High: Multiple independent signals (Technical, Fundamental, Sentiment) align."
-        "- Medium: Signals align but with some conflict or weak data."
-        "- Low: Conflicting signals or insufficient data. If confidence is Low, prefer defined-risk strategies or 'No Trade'."
-
-        "REASONING CLARITY: In your rationale, walk through your thought process step-by-step. "
-        "Connect each piece of evidence to your conclusion. Explain WHY each factor matters and HOW it influences your verdict, especially when signals conflict. "
+        "You are a Senior Quantitative Analyst. Your goal is to synthesize market data into a clear, professional trading thesis. "
+        "You do NOT execute trades; you provide the directional bias and risk assessment for the execution trader. "
+        "\n\n"
+        "DATA SOURCES TO ANALYZE:\n"
+        "1. MACRO CONTEXT: Check `macro_context` (SPY Trend, VIX Regime). Is the broad market supportive?\n"
+        "2. FUNDAMENTALS: Check `stock_fundamentals` (Valuation, Growth). Is this a quality asset?\n"
+        "3. TECHNICALS: Check `technical_analysis` (Trend, RSI, Support/Resistance).\n"
+        "4. VOLATILITY: Check `volatility_structure` (HV Rank, IV vs HV). Is vol cheap or expensive?\n"
+        "5. SENTIMENT: Check `options_positioning` (Put/Call Parity, Flows).\n"
+        "\n\n"
+        "OUTPUT REQUIREMENTS - CRITICAL:\n"
+        "- Return ONLY valid JSON. Do NOT include markdown, code blocks, or explanatory text.\n"
+        "- **YOU MUST INCLUDE ALL REQUIRED FIELDS** (missing any field will cause system failure):\n"
+        "  1. final_bias (REQUIRED: must be \"Bullish\", \"Bearish\", or \"Neutral\")\n"
+        "  2. confidence_level (REQUIRED: must be \"High\", \"Medium\", or \"Low\")\n"
+        "  3. rationale (REQUIRED: CANNOT BE EMPTY - must be 15-20 sentences of detailed analysis)\n"
+        "  4. summary_html (REQUIRED: CANNOT BE EMPTY - must be valid HTML with <h4>, <ul>, <li>)\n"
+        "  5. key_reasoning_points (REQUIRED: must be a non-empty list of 3-5 key drivers)\n"
+        "  6. risk_factors (REQUIRED: must be a non-empty list of 2-3 primary risks)\n"
+        "  7. actionable_ideas (REQUIRED: must be a non-empty list of 1-3 actionable trading ideas)\n"
+        "\n"
+        "FIELD SPECIFICATIONS:\n"
+        "- `final_bias`: Your directional thesis. Choose ONE: \"Bullish\", \"Bearish\", or \"Neutral\".\n"
+        "- `confidence_level`: Your confidence in this thesis. Choose ONE: \"High\", \"Medium\", or \"Low\".\n"
+        "- `rationale`: A COMPREHENSIVE 15-20 sentence professional analysis that:\n"
+        "  * Cites specific data points from the analysis (e.g., 'VIX at 12 signals complacency', 'HV Rank at 85% shows elevated vol')\n"
+        "  * Explains WHY you chose this bias\n"
+        "  * Discusses key support/resistance levels, trend context, and volatility implications\n"
+        "  * MUST NOT be empty or generic - this is the core of your analysis\n"
+        "- `summary_html`: Valid HTML (no markdown) with:\n"
+        "  * An <h4> title (e.g., '<h4>Market Analysis Summary</h4>')\n"
+        "  * A <ul> list with <li> items for key findings\n"
+        "  * Optional inline badges: '<span style=\"background: #e3f2fd; padding: 4px 8px;\">Bullish Signal</span>'\n"
+        "  * MUST NOT be empty or placeholder text\n"
+        "- `key_reasoning_points`: Array of 3-5 strings. Example: [\"VIX near 52-week lows\", \"Technical support holding\", \"IV skew bullish\"]\n"
+        "- `risk_factors`: Array of 2-3 strings listing primary risks. Example: [\"Earnings surprise risk\", \"Macro economic data\"]\n"
+        "- `actionable_ideas`: Array of 1-3 strings with specific trade ideas. Example: [\"Consider selling OTM puts at 160 support\", \"Bull call spread targeting 180\"]\n"
+        "\n"
+        "COMPLETE Example JSON Output (copy this structure exactly):\n"
+        "{\n"
+        "  \"final_bias\": \"Bullish\",\n"
+        "  \"confidence_level\": \"High\",\n"
+        "  \"rationale\": \"[15-20 sentences of detailed analysis citing specific data points from the provided analysis]\",\n"
+        "  \"summary_html\": \"<h4>Market Analysis</h4><ul><li>Technical: [finding]</li><li>Volatility: [finding]</li><li>Sentiment: [finding]</li></ul>\",\n"
+        "  \"key_reasoning_points\": [\"Driver 1 with specific data\", \"Driver 2 with specific data\", \"Driver 3 with specific data\"],\n"
+        "  \"risk_factors\": [\"Risk 1 description\", \"Risk 2 description\"],\n"
+        "  \"actionable_ideas\": [\"Specific trade idea 1\", \"Specific trade idea 2\"]\n"
+        "}\n"
+        "\n"
+        "CRITICAL REMINDERS:\n"
+        "✓ ALL fields must be present and non-empty\n"
+        "✓ rationale MUST be 15-20 sentences (not 1-2 sentences)\n"
+        "✓ summary_html MUST be valid HTML (not markdown or plain text)\n"
+        "✓ Lists must contain actual values (not empty arrays)\n"
+        "✓ Return ONLY the JSON object - nothing else"
     )
 
     if use_web_search:
-        system += (
-            "You MUST perform a web search to find recent catalysts, earnings reports, regulatory news, and overall market sentiment for this stock. "
-            "Incorporate these findings directly into your rationale and summary. "
-        )
-    else:
-        system += (
-            "When possible, perform a quick web search to enrich context (recent catalysts, earnings, regulatory news). "
-            "If web search is not available in your current toolset, explicitly state that and proceed with your best judgment. "
-        )
+        system += " You MUST use web search to find recent catalysts/earnings."
 
-    system += (
-        "\n\nIMPORTANT: You MUST return your response as valid JSON ONLY. Do not include any text before or after the JSON. "
-        "Do not use markdown code blocks or any other formatting. Return raw JSON that can be parsed directly. "
-        "\n\nFor the summary_html field, create a well-structured HTML with clear visual hierarchy using these guidelines:\n"
-        "- Use <h4> for main sections (e.g., 'Market Analysis', 'Technical Overview', 'Fundamental Assessment')\n"
-        "- Use <h5> for subsections (e.g., 'Price Action', 'Volume Profile', 'Volatility Environment')\n"
-        "- Use bulleted lists (<ul><li>) for key points and findings\n"
-        "- Use colored badges for important metrics: <span class='badge bg-success'>Bullish Signal</span>\n"
-        "- Use alert boxes for critical insights: <div class='alert alert-info'><strong>Key Insight:</strong> Your insight here</div>\n"
-        "- Organize information logically: Current State → Analysis → Implications → Recommendations\n"
-        "- Keep each section concise but comprehensive\n"
-        "\n\nSTRIKE SELECTION RULES:\n"
-        "1. You MUST choose strikes ONLY from the list in options_positioning.strike_distribution.valid_strikes. Do not invent strikes.\n"
-        "2. Reference the Greeks (Delta, Gamma, Theta, Vega) from options_positioning.greeks_by_strike to justify your strike selection.\n"
-        "3. Check volume and open_interest in greeks_by_strike to ensure the strike is liquid. Avoid strikes with zero volume or very low open interest.\n"
-        "4. In strike_selection_rationale, explain WHY you chose this specific strike by referencing Delta (directional probability), liquidity, and/or proximity to support/resistance.\n"
-        "\n\nFor strategy legs in `execution_recommendations`, define each leg with an `action`, `right` (C/P), a concrete `strike` (numeric from valid_strikes), and `strike_selection_rationale`.\n"
-        "\n\nRequired JSON structure:\n"
+    user_content = f"Analyze {ticker} for expiration {expiration_date}.\n\n"
+    
+    # Add sections
+    sections = ["macro_context", "stock_fundamentals", "technical_analysis", "volatility_structure", "parity_analysis", "volume_oi_analysis", "synthesis_data"]
+    for sec in sections:
+        if sec in analysis_payload and analysis_payload[sec]:
+            user_content += f"<{sec}>\n{json.dumps(analysis_payload[sec])}\n</{sec}>\n"
+
+    return [{"role": "system", "content": system}, {"role": "user", "content": user_content}]
+
+
+def _build_trader_messages(ticker: str, expiration_date: str, analyst_verdict: Dict[str, Any], options_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Stage 2: The Trader.
+    Focuses on execution strategy based on the Analyst's bias.
+    """
+    system = (
+        "You are a Senior Options Execution Trader. Your goal is to construct the optimal trading strategy based on the Analyst's thesis. "
+        "You must select specific strikes and define entry/exit rules. "
+        "\n\n"
+        "EXECUTION RULES:\n"
+        "1. ALIGNMENT: Your strategy MUST align with the Analyst's `final_bias`.\n"
+        "2. VOLATILITY AWARENESS: Use `volatility_structure` (IV vs HV, HV Rank). High Vol -> Sell Premium (Credit Spreads). Low Vol -> Buy Premium (Debit Spreads/Long calls).\n"
+        "3. STRIKE SELECTION: Choose strikes ONLY from `valid_strikes`. Use Delta/Gamma to justify.\n"
+        "4. LIQUIDITY: Avoid strikes with low Volume/OI.\n"
+        "\n\n"
+        "OUTPUT REQUIREMENTS:\n"
+        "- Return valid JSON ONLY.\n"
+        "- `execution_recommendations`: The full strategy object with primary_strategy, position_sizing, entry_conditions, exit_conditions.\n"
+        "- `primary_strategy` must include: type, description, confidence, time_horizon, legs (array of leg objects).\n"
+        "- Each leg must include: action (Buy/Sell), strike (number), right (Call/Put), quantity (number).\n"
+        "\n"
+        "Example JSON Output:\n"
         "{\n"
-        "  \"final_bias\": \"Bullish|Slightly Bullish|Neutral|Slightly Bearish|Bearish\",\n"
-        "  \"confidence_level\": \"High|Medium|Low\",\n"
-        "  \"summary_html\": \"string (well-structured HTML with clear hierarchy and visual organization)\",\n"
-        "  \"rationale\": \"string (detailed reasoning with clear logical flow, 15-25 sentences, explicitly addressing conflicting signals)\",\n"
-        "  \"key_reasoning_points\": [\"Main analytical point 1\", \"Main analytical point 2\", \"Main analytical point 3\"],\n"
-        "  \"risk_factors\": [\"string1\", \"string2\", ...],\n"
         "  \"execution_recommendations\": {\n"
         "    \"primary_strategy\": {\n"
-        "      \"name\": \"string (e.g., Bull Call Spread)\",\n"
-        "      \"description\": \"string\",\n"
-        "      \"justification\": \"string (Why this strategy? Relate to IV, bias, and cost)\",\n"
-        "      \"confidence\": \"High|Medium|Low\",\n"
-        "      \"time_horizon\": \"string\",\n"
-        "      \"legs\": [{\n"
-        "        \"action\": \"BUY|SELL\",\n"
-        "        \"right\": \"C|P\",\n"
-        "        \"strike\": \"number (MUST be from valid_strikes list, e.g., 152.5)\",\n"
-        "        \"strike_selection_rationale\": \"string (Why this strike? Reference Delta from greeks_by_strike, liquidity, support/resistance)\"\n"
-        "      }]\n"
+        "      \"type\": \"Bull Call Spread\",\n"
+        "      \"description\": \"Debit spread targeting moderate upside with limited risk\",\n"
+        "      \"confidence\": \"High\",\n"
+        "      \"time_horizon\": \"2-4 weeks\",\n"
+        "      \"legs\": [\n"
+        "        {\"action\": \"Buy\", \"strike\": 270, \"right\": \"Call\", \"quantity\": 1},\n"
+        "        {\"action\": \"Sell\", \"strike\": 275, \"right\": \"Call\", \"quantity\": 1}\n"
+        "      ]\n"
         "    },\n"
-        "    \"alternative_strategies\": [{\n"
-        "      \"name\": \"string\",\n"
-        "      \"description\": \"string\",\n"
-        "      \"justification\": \"string (Why consider this alternative?)\",\n"
-        "      \"confidence\": \"High|Medium|Low\",\n"
-        "      \"time_horizon\": \"string\",\n"
-        "      \"legs\": [{\"action\": \"BUY|SELL\", \"right\": \"C|P\", \"strike\": \"number (concrete strike price)\"}]\n"
-        "    }],\n"
-        "    \"position_sizing\": {\"suggested_allocation_pct\": \"number (e.g., 1.5 for 1.5% of portfolio)\", \"risk_level\": \"Conservative|Moderate|Aggressive\", \"justification\": \"string\"},\n"
-        "    \"entry_conditions\": [\"string1\", \"string2\", ...],\n"
-        "    \"exit_conditions\": {\n"
-        "        \"profit_target_pct\": \"number (e.g., 50 for 50% gain on premium)\",\n"
-        "        \"stop_loss_pct\": \"number (e.g., 25 for 25% loss on premium)\",\n"
-        "        \"other_conditions\": [\"string1 (e.g., Close 3 days before expiration)\", \"string2\"]\n"
-        "    },\n"
-        "    \"stop_loss_guidance\": \"string (Provide a specific price level or technical indicator for the stop loss, e.g., 'Place stop loss below the recent low at $145.50')\",\n"
-        "    \"profit_target_guidance\": \"string (Provide a specific price level or condition for taking profit, e.g., 'Target the resistance level at $160.00 for profit taking')\"\n"
-        "  },\n"
-        "  \"search_performed\": true|false,\n"
-        "  \"sources\": [\"string1\", \"string2\", ...]\n"
-        "}\n\n"
-        "Remember: Return ONLY the JSON object, no other text or formatting."
+        "    \"alternative_strategies\": [],\n"
+        "    \"position_sizing\": {\"suggested_allocation\": \"5% portfolio\", \"risk_level\": \"Moderate\", \"justification\": \"Defined risk exposure\"},\n"
+        "    \"entry_conditions\": [\"Confirm bullish momentum continues\", \"Wait for slight pullback to entry\"],\n"
+        "    \"exit_conditions\": [\"Target 50% max profit\", \"Stop if underlying breaks support\"],\n"
+        "    \"stop_loss_guidance\": \"Close position if loss exceeds 20% of debit paid\",\n"
+        "    \"profit_target_guidance\": \"Consider closing at 50% of max potential profit\"\n"
+        "  }\n"
+        "}"
     )
 
-    prompt_parts = [f"Analyze the provided data for ticker {ticker} for the options expiration date of {expiration_date}. Generate a trading verdict and strategy recommendations specifically for this expiration date, as per the system instructions."]
+    user_content = f"Construct a strategy for {ticker} (Exp: {expiration_date}).\n\n"
+    user_content += f"<analyst_verdict>\n{json.dumps(analyst_verdict)}\n</analyst_verdict>\n"
+
+    # Smartly truncate options data if too large to prevent token overflow/truncation
+    max_strikes = 40
+    data_to_send = options_data.copy()
     
-    # Key sections mentioned in the system prompt for clear separation
-    main_sections = [
-        "market_data", 
-        "stock_fundamentals", 
-        "technical_analysis",
-        "volatility_structure", 
-        "parity_analysis", 
-        "options_positioning"
-    ]
-    
-    for section in main_sections:
-        if section in analysis_payload and analysis_payload[section] is not None:
-            data = analysis_payload[section]
-            # Using compact JSON format
-            prompt_parts.append(f"\n<{section}>\n{json.dumps(data)}\n</{section}>")
-            
-    # Add other analyses under a generic tag to provide full context
-    other_analyses = {k: v for k, v in analysis_payload.items() if k not in main_sections and v is not None}
-    if other_analyses:
-        prompt_parts.append(f"\n<additional_context>\n{json.dumps(other_analyses)}\n</additional_context>")
+    if len(data_to_send.get("valid_strikes", [])) > max_strikes:
+        valid_strikes = sorted([float(x) for x in data_to_send["valid_strikes"]])
+        mid_idx = len(valid_strikes) // 2
+        start_idx = max(0, mid_idx - (max_strikes // 2))
+        end_idx = start_idx + max_strikes
         
-    user_content = "\n".join(prompt_parts)
+        subset_strikes = valid_strikes[start_idx:end_idx]
+        data_to_send["valid_strikes"] = subset_strikes
+        
+        # Filter greeks to match subset
+        if "greeks_by_strike" in data_to_send:
+            full_greeks = data_to_send["greeks_by_strike"]
+            subset_greeks = {}
+            for s in subset_strikes:
+                s_str = str(s)
+                # Try exact string match or float match
+                if s_str in full_greeks:
+                    subset_greeks[s_str] = full_greeks[s_str]
+                else:
+                    # Fallback: look for matching float key
+                    for k, v in full_greeks.items():
+                        try:
+                            if abs(float(k) - s) < 0.001:
+                                subset_greeks[k] = v
+                                break
+                        except:
+                            continue
+            data_to_send["greeks_by_strike"] = subset_greeks
 
-    return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user_content}
-    ]
+    user_content += f"<options_chain_data>\n{json.dumps(data_to_send)}\n</options_chain_data>\n"
+
+    return [{"role": "system", "content": system}, {"role": "user", "content": user_content}]
 
 
-def _openai_chat_completion(messages, model: str = "gpt-5", temperature: float = 0.2, timeout: int = None) -> Dict[str, Any]:
+def _openai_chat_completion_with_retry(
+    messages,
+    model: str = "gpt-5",
+    temperature: float = 0.2,
+    stage: str = "unknown",
+    retry_config: Optional[RetryConfig] = None,
+    timeout_config: Optional[TimeoutConfig] = None
+) -> Tuple[Dict[str, Any], APICallMetrics, RetryMetrics]:
     """
-    Minimal OpenAI-compatible completion using requests.
+    Enhanced API call with retry logic, circuit breaker, and separate timeouts.
+
+    Returns:
+        Tuple of (response_dict, api_metrics, retry_metrics)
+    """
+    if retry_config is None:
+        retry_config = RetryConfig()
+    if timeout_config is None:
+        timeout_config = TimeoutConfig()
+
+    # Initialize retry metrics
+    retry_metrics = RetryMetrics()
+    circuit_breaker = _circuit_breakers.get(stage, _circuit_breakers["Analyst"])
+
+    # Check circuit breaker state
+    if not circuit_breaker.can_execute():
+        retry_metrics.circuit_breaker_triggered = True
+        logger.error(f"Circuit breaker OPEN for {stage} - blocking execution", extra={
+            "stage": stage,
+            "circuit_state": circuit_breaker.state.state,
+            "failure_count": circuit_breaker.state.failure_count
+        })
+
+        # Create failure metrics for circuit breaker
+        dummy_metrics = APICallMetrics(
+            stage=stage,
+            model=model,
+            temperature=temperature,
+            timeout=timeout_config.get_timeout(stage),
+            start_time=time.time(),
+            end_time=time.time(),
+            failure_category=FailureCategory.API_ERROR,
+            error_message="Circuit breaker OPEN - too many recent failures"
+        )
+        return None, dummy_metrics, retry_metrics
+
+    retry_start_time = time.time()
+
+    for attempt in range(retry_config.max_attempts):
+        retry_metrics.total_attempts += 1
+
+        logger.info(f"Attempt {attempt + 1}/{retry_config.max_attempts} for {stage}", extra={
+            "attempt": attempt + 1,
+            "max_attempts": retry_config.max_attempts,
+            "stage": stage
+        })
+
+        try:
+            # Get appropriate timeout for this stage
+            timeout = timeout_config.get_timeout(stage)
+
+            # Make the API call
+            result, api_metrics = _openai_chat_completion(
+                messages, model, temperature, timeout, stage
+            )
+
+            if result is not None:
+                # Success!
+                retry_metrics.successful_attempt = attempt + 1
+                retry_metrics.total_retry_time = time.time() - retry_start_time
+                circuit_breaker.record_success()
+
+                logger.info(f"{stage} succeeded on attempt {attempt + 1}", extra={
+                    "attempt": attempt + 1,
+                    "total_retry_time": retry_metrics.total_retry_time,
+                    "api_duration": api_metrics.duration
+                })
+
+                return result, api_metrics, retry_metrics
+
+            # Check if this failure is retryable
+            if api_metrics.failure_category not in retry_config.retryable_categories:
+                logger.info(f"Non-retryable failure for {stage}: {api_metrics.failure_category.value}")
+                retry_metrics.final_failure_category = api_metrics.failure_category
+                circuit_breaker.record_failure()
+                retry_metrics.total_retry_time = time.time() - retry_start_time
+                return None, api_metrics, retry_metrics
+
+            # Record failure for circuit breaker
+            circuit_breaker.record_failure()
+
+            # If not the last attempt, apply exponential backoff
+            if attempt < retry_config.max_attempts - 1:
+                delay = retry_config.calculate_delay(attempt)
+                retry_metrics.delays_used.append(delay)
+
+                logger.warning(f"{stage} attempt {attempt + 1} failed, retrying in {delay:.2f}s", extra={
+                    "attempt": attempt + 1,
+                    "failure_category": api_metrics.failure_category.value,
+                    "error_message": api_metrics.error_message,
+                    "retry_delay": delay
+                })
+
+                time.sleep(delay)
+            else:
+                logger.error(f"{stage} failed after {retry_config.max_attempts} attempts", extra={
+                    "final_failure_category": api_metrics.failure_category.value,
+                    "final_error_message": api_metrics.error_message
+                })
+
+                retry_metrics.final_failure_category = api_metrics.failure_category
+
+        except Exception as e:
+            logger.error(f"Unexpected error in retry loop for {stage}", extra={
+                "attempt": attempt + 1,
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            })
+
+            # Create failure metrics for unexpected error
+            failure_metrics = APICallMetrics(
+                stage=stage,
+                model=model,
+                temperature=temperature,
+                timeout=timeout_config.get_timeout(stage),
+                start_time=time.time(),
+                end_time=time.time(),
+                failure_category=FailureCategory.API_ERROR,
+                error_message=f"Unexpected error: {str(e)}"
+            )
+
+            circuit_breaker.record_failure()
+            retry_metrics.final_failure_category = FailureCategory.API_ERROR
+            retry_metrics.total_retry_time = time.time() - retry_start_time
+            return None, failure_metrics, retry_metrics
+
+    # All retries exhausted
+    retry_metrics.total_retry_time = time.time() - retry_start_time
+    return None, api_metrics, retry_metrics
+
+def _extract_choice_content(ch: dict) -> str:
+    try:
+        msg = ch.get("message", {}) if isinstance(ch, dict) else {}
+        content_val = msg.get("content")
+        # Some providers (or the Responses API) may return a list of blocks
+        if isinstance(content_val, list):
+            parts = []
+            for item in content_val:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    parts.append(item.get("text") or "")
+                elif isinstance(item, str):
+                    parts.append(item)
+            content = "\n".join([p for p in parts if p]).strip()
+        else:
+            content = (content_val or "").strip()
+        
+        # Function/tool-call fallbacks
+        if not content:
+            # tool_calls (OpenAI tool calling)
+            tool_calls = msg.get("tool_calls")
+            if isinstance(tool_calls, list) and tool_calls:
+                try:
+                    fn = tool_calls[0].get("function", {})
+                    args = fn.get("arguments")
+                    if isinstance(args, (dict, list)):
+                        content = json.dumps(args)
+                    elif isinstance(args, str):
+                        content = args
+                except Exception:
+                    pass
+            # legacy function_call
+            if not content and isinstance(msg.get("function_call"), dict):
+                args = msg["function_call"].get("arguments")
+                if isinstance(args, (dict, list)):
+                    content = json.dumps(args)
+                elif isinstance(args, str):
+                    content = args
+        return content
+    except Exception as e:
+        print(f"WARNING: Error extracting content from choice: {e}")
+        return ""
+
+
+def _openai_chat_completion(messages, model: str = "gpt-5", temperature: float = 0.2, timeout: int = None, stage: str = "unknown") -> Tuple[Dict[str, Any], APICallMetrics]:
+    """
+    Enhanced OpenAI-compatible completion with comprehensive error handling and diagnostics.
     Uses chat/completions for chat models, completions for non-chat models.
     Honors OPENAI_API_BASE and OPENAI_API_KEY from environment.
+
+    Returns:
+        Tuple of (response_dict, metrics)
     """
+    # Initialize metrics tracking
+    metrics = APICallMetrics(
+        stage=stage,
+        model=model,
+        temperature=temperature,
+        timeout=timeout or int(os.getenv("GPT_VERDICT_TIMEOUT", "180")),
+        start_time=time.time()
+    )
+
     base = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1").rstrip("/")
     key = os.getenv("OPENAI_API_KEY")
+
+    logger.info(f"Starting {stage} API call", extra={
+        "model": model,
+        "temperature": temperature,
+        "timeout": metrics.timeout,
+        "message_count": len(messages),
+        "api_base": base
+    })
+
     if not key:
+        metrics.failure_category = FailureCategory.AUTHENTICATION_ERROR
+        metrics.error_message = "OPENAI_API_KEY not set"
+        logger.error("Authentication failed: OPENAI_API_KEY not set")
         raise RuntimeError("OPENAI_API_KEY not set")
-    
-    print(f"DEBUG: Using API base: {base}")
-    print(f"DEBUG: Using model: {model}")
-    print(f"DEBUG: Message count: {len(messages)}")
-    
-    # Validate that we have a working API configuration
+
+    # Calculate request size for monitoring
+    try:
+        request_content = json.dumps(messages)
+        metrics.request_size = len(request_content.encode('utf-8'))
+        logger.debug(f"Request payload size: {metrics.request_size} bytes")
+    except Exception as e:
+        logger.warning(f"Failed to calculate request size: {e}")
+
+    # Validate API key format
     if not key.startswith(('sk-', 'org-')):
-        print(f"DEBUG: Using custom API key format: {key[:20]}...")
-    
+        logger.debug(f"Using custom API key format: {key[:20]}...")
+
     # Use environment variable for timeout, default to 180 seconds (3 minutes)
     if timeout is None:
-        timeout = int(os.getenv("GPT_VERDICT_TIMEOUT", "180"))
+        timeout = metrics.timeout
 
     # Determine endpoint based on model type
     # GPT realtime models and some others use completions endpoint
@@ -278,22 +1085,99 @@ def _openai_chat_completion(messages, model: str = "gpt-5", temperature: float =
             "Content-Type": "application/json"
         }
         
-        print(f"DEBUG: Making completions request to {url}")
-        print(f"DEBUG: Payload keys: {list(payload.keys())}")
-        print(f"DEBUG: Model in payload: {payload.get('model')}")
-        
-        resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=timeout)
-        print(f"DEBUG: Response status: {resp.status_code}")
-        
-        resp.raise_for_status()
-        data = resp.json()
-        print(f"DEBUG: Response keys: {list(data.keys())}")
-        
+        logger.debug(f"Making completions request to {url}", extra={
+            "payload_keys": list(payload.keys()),
+            "model_in_payload": payload.get('model')
+        })
+
+        try:
+            resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=timeout)
+            metrics.end_time = time.time()
+            metrics.status_code = resp.status_code
+
+            logger.info(f"Completions API response received", extra={
+                "status_code": resp.status_code,
+                "duration": metrics.duration
+            })
+
+            # Calculate response size
+            if hasattr(resp, 'content'):
+                metrics.response_size = len(resp.content)
+                logger.debug(f"Response size: {metrics.response_size} bytes")
+
+            resp.raise_for_status()
+
+        except requests.exceptions.Timeout as e:
+            metrics.end_time = time.time()
+            metrics.failure_category = FailureCategory.API_TIMEOUT
+            metrics.error_message = f"API timeout after {timeout}s"
+            logger.error(f"API timeout for {stage}", extra={
+                "timeout": timeout,
+                "duration": metrics.duration,
+                "error": str(e)
+            })
+            return None, metrics
+
+        except requests.exceptions.HTTPError as e:
+            metrics.end_time = time.time()
+            if resp.status_code == 401:
+                metrics.failure_category = FailureCategory.AUTHENTICATION_ERROR
+            elif resp.status_code == 429:
+                metrics.failure_category = FailureCategory.RATE_LIMIT_ERROR
+            else:
+                metrics.failure_category = FailureCategory.API_ERROR
+
+            metrics.error_message = f"HTTP {resp.status_code}: {str(e)}"
+            logger.error(f"HTTP error for {stage}", extra={
+                "status_code": resp.status_code,
+                "error": str(e),
+                "response_text": resp.text[:500] if hasattr(resp, 'text') else "No response text"
+            })
+            return None, metrics
+
+        except requests.exceptions.ConnectionError as e:
+            metrics.end_time = time.time()
+            metrics.failure_category = FailureCategory.NETWORK_ERROR
+            metrics.error_message = f"Connection error: {str(e)}"
+            logger.error(f"Network error for {stage}", extra={
+                "error": str(e)
+            })
+            return None, metrics
+
+        except Exception as e:
+            metrics.end_time = time.time()
+            metrics.failure_category = FailureCategory.API_ERROR
+            metrics.error_message = f"Unexpected error: {str(e)}"
+            logger.error(f"Unexpected API error for {stage}", extra={
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            })
+            return None, metrics
+
+        # Parse response
+        try:
+            data = resp.json()
+            logger.debug(f"Response parsed successfully", extra={
+                "response_keys": list(data.keys())
+            })
+        except json.JSONDecodeError as e:
+            metrics.failure_category = FailureCategory.MALFORMED_RESPONSE
+            metrics.error_message = f"Invalid JSON response: {str(e)}"
+            logger.error(f"Invalid JSON response for {stage}", extra={
+                "error": str(e),
+                "response_text": resp.text[:500] if hasattr(resp, 'text') else "No response text"
+            })
+            return None, metrics
+
         # Check for empty response or missing choices
         if "choices" not in data or not data["choices"]:
-            print(f"ERROR: No choices in OpenAI response: {data}")
-            raise RuntimeError(f"No choices in OpenAI response")
-            
+            metrics.failure_category = FailureCategory.EMPTY_RESPONSE
+            metrics.error_message = "No choices in API response"
+            logger.error(f"Empty choices in response for {stage}", extra={
+                "response_data": data
+            })
+            return None, metrics
+
         # Prefer text, but some proxies may return message-style payloads even on /completions
         choice0 = data["choices"][0]
         content = (choice0.get("text") or "").strip()
@@ -337,7 +1221,11 @@ def _openai_chat_completion(messages, model: str = "gpt-5", temperature: float =
         
         # Check for empty content
         if not content:
-            print(f"WARNING: Empty content in OpenAI response (completions). Full response: {data}")
+            metrics.failure_category = FailureCategory.EMPTY_RESPONSE
+            metrics.error_message = "Empty content in completions response"
+            logger.warning(f"Empty content in completions response for {stage}", extra={
+                "full_response": data
+            })
             # Do not raise here; allow downstream fallback to handle gracefully
             content = ""
     else:
@@ -362,98 +1250,202 @@ def _openai_chat_completion(messages, model: str = "gpt-5", temperature: float =
             "Content-Type": "application/json"
         }
         
-        print(f"DEBUG: Making chat completions request to {url}")
-        print(f"DEBUG: Payload keys (json mode): {list(payload_with_json_mode.keys())}")
-        print(f"DEBUG: Model in payload: {payload.get('model')}")
-        print(f"DEBUG: Messages count: {len(messages)}")
+        logger.debug(f"Making chat completions request to {url}", extra={
+            "payload_keys_json_mode": list(payload_with_json_mode.keys()),
+            "model_in_payload": payload.get('model'),
+            "messages_count": len(messages)
+        })
 
         # Try JSON mode first, then gracefully fall back if the provider/model doesn't support it
+        data = None
+        json_mode_attempted = False
+
         try:
+            # First attempt with JSON mode
+            json_mode_attempted = True
             resp = requests.post(url, headers=headers, data=json.dumps(payload_with_json_mode), timeout=timeout)
-            print(f"DEBUG: Response status (json mode): {resp.status_code}")
+            metrics.end_time = time.time()
+            metrics.status_code = resp.status_code
+
+            logger.info(f"Chat API response received (JSON mode)", extra={
+                "status_code": resp.status_code,
+                "duration": metrics.duration
+            })
+
+            if hasattr(resp, 'content'):
+                metrics.response_size = len(resp.content)
+
             resp.raise_for_status()
             data = resp.json()
+
         except requests.exceptions.HTTPError as http_err:
             body = getattr(http_err, 'response', None)
             body_text = body.text if body is not None else ''
-            print(f"WARNING: Chat API JSON mode failed ({getattr(body, 'status_code', 'NA')}): {body_text[:200]}")
+            logger.warning(f"Chat API JSON mode failed, retrying without JSON mode", extra={
+                "status_code": getattr(body, 'status_code', 'NA'),
+                "error_snippet": body_text[:200]
+            })
+
             # Retry without response_format
-            resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=timeout)
-            print(f"DEBUG: Response status (fallback): {resp.status_code}")
-            resp.raise_for_status()
-            data = resp.json()
+            try:
+                resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=timeout)
+                metrics.end_time = time.time()
+                metrics.status_code = resp.status_code
+
+                logger.info(f"Chat API response received (fallback)", extra={
+                    "status_code": resp.status_code,
+                    "duration": metrics.duration
+                })
+
+                if hasattr(resp, 'content'):
+                    metrics.response_size = len(resp.content)
+
+                resp.raise_for_status()
+                data = resp.json()
+
+            except requests.exceptions.Timeout as e:
+                metrics.end_time = time.time()
+                metrics.failure_category = FailureCategory.API_TIMEOUT
+                metrics.error_message = f"API timeout after {timeout}s (fallback)"
+                logger.error(f"API timeout for {stage} (fallback)", extra={
+                    "timeout": timeout,
+                    "duration": metrics.duration
+                })
+                return None, metrics
+
+            except Exception as fallback_e:
+                metrics.end_time = time.time()
+                metrics.failure_category = FailureCategory.API_ERROR
+                metrics.error_message = f"Fallback request failed: {str(fallback_e)}"
+                logger.error(f"Fallback request failed for {stage}", extra={
+                    "error": str(fallback_e),
+                    "original_error": str(http_err)
+                })
+                return None, metrics
+
+        except requests.exceptions.Timeout as e:
+            metrics.end_time = time.time()
+            metrics.failure_category = FailureCategory.API_TIMEOUT
+            metrics.error_message = f"API timeout after {timeout}s"
+            logger.error(f"API timeout for {stage}", extra={
+                "timeout": timeout,
+                "duration": metrics.duration,
+                "json_mode_attempted": json_mode_attempted
+            })
+            return None, metrics
+
         except Exception as e:
-            print(f"WARNING: Chat API request error in JSON mode: {e}")
-            resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=timeout)
-            print(f"DEBUG: Response status (fallback): {resp.status_code}")
-            resp.raise_for_status()
-            data = resp.json()
-        
-        print(f"DEBUG: Response keys: {list(data.keys())}")
-        
+            metrics.end_time = time.time()
+            metrics.failure_category = FailureCategory.API_ERROR
+            metrics.error_message = f"Chat API error: {str(e)}"
+            logger.error(f"Chat API error for {stage}", extra={
+                "error": str(e),
+                "json_mode_attempted": json_mode_attempted,
+                "traceback": traceback.format_exc()
+            })
+            return None, metrics
+
+        # Validate response data
+        if data is None:
+            metrics.failure_category = FailureCategory.EMPTY_RESPONSE
+            metrics.error_message = "Received null response data"
+            logger.error(f"Null response data for {stage}")
+            return None, metrics
+
+        logger.debug(f"Response parsed successfully", extra={
+            "response_keys": list(data.keys())
+        })
+
         # Check for empty response or missing choices
         if "choices" not in data or not data["choices"]:
-            print(f"ERROR: No choices in OpenAI response: {data}")
-            raise RuntimeError(f"No choices in OpenAI response")
+            metrics.failure_category = FailureCategory.EMPTY_RESPONSE
+            metrics.error_message = "No choices in chat API response"
+            logger.error(f"Empty choices in chat response for {stage}", extra={
+                "response_data": data
+            })
+            return None, metrics
             
         # Robustly extract content from the first choice
         choice = data["choices"][0]
-
-        def _extract_choice_content(ch: dict) -> str:
-            try:
-                msg = ch.get("message", {}) if isinstance(ch, dict) else {}
-                content_val = msg.get("content")
-                # Some providers (or the Responses API) may return a list of blocks
-                if isinstance(content_val, list):
-                    parts = []
-                    for item in content_val:
-                        if isinstance(item, dict) and item.get("type") == "text":
-                            parts.append(item.get("text") or "")
-                        elif isinstance(item, str):
-                            parts.append(item)
-                    content_str = "\n".join([p for p in parts if p]).strip()
-                    if content_str:
-                        return content_str
-                # Standard string content
-                if isinstance(content_val, str) and content_val.strip():
-                    return content_val.strip()
-                # Tool/function call fallback
-                tool_calls = msg.get("tool_calls")
-                if isinstance(tool_calls, list) and tool_calls:
-                    fn = tool_calls[0].get("function", {})
-                    args = fn.get("arguments")
-                    if isinstance(args, (dict, list)):
-                        return json.dumps(args)
-                    if isinstance(args, str) and args.strip():
-                        return args.strip()
-                if isinstance(msg.get("function_call"), dict):
-                    args = msg["function_call"].get("arguments")
-                    if isinstance(args, (dict, list)):
-                        return json.dumps(args)
-                    if isinstance(args, str) and args.strip():
-                        return args.strip()
-                # Some proxies may put text directly at choice["text"]
-                if isinstance(ch.get("text"), str) and ch["text"].strip():
-                    return ch["text"].strip()
-                # Another non-standard field used by some bridges
-                if isinstance(ch.get("response"), str) and ch["response"].strip():
-                    return ch["response"].strip()
-            except Exception as ex:
-                print(f"WARNING: Exception while extracting content: {ex}")
-            return ""
-
         content = _extract_choice_content(choice)
 
-        # If still empty, do not raise; allow downstream fallback to handle gracefully
         if not content:
-            print(f"WARNING: Empty content in OpenAI response (chat). Full response: {data}")
-            content = ""
+            metrics.failure_category = FailureCategory.EMPTY_RESPONSE
+            metrics.error_message = "Empty content extracted from choice"
+            logger.error(f"Empty content extracted for {stage}", extra={
+                "choice_data": choice
+            })
+            return None, metrics
+
+        # Mark as successful if we got content
+        metrics.success = True
+        logger.info(f"{stage} API call completed successfully", extra={
+            "duration": metrics.duration,
+            "response_length": len(content)
+        })
     
-    def _extract_json_from_response(text: str) -> dict:
-        """Extract JSON from potentially malformed response text with robust fallbacks."""
+    def _extract_json_from_response(text: str, stage: str = "unknown") -> Tuple[dict, JSONParsingDiagnostics]:
+        """
+        Extract JSON from potentially malformed response text with comprehensive diagnostics.
+
+        This method is designed to be extremely flexible and forgiving in parsing,
+        ensuring that even minimal or slightly malformed responses can be processed.
+        
+        Args:
+            text: The response text to parse
+            stage: The stage name ("Analyst" or "Trader") to adjust validation requirements
+        """
+        # Initialize diagnostics with enhanced logging
+        diagnostics = JSONParsingDiagnostics(
+            raw_response=text[:2000],  # Increase logging preview
+            raw_response_length=len(text),
+            direct_parse_success=False,
+            code_block_parse_success=False,
+            balanced_brace_parse_success=False,
+            greedy_parse_success=False,
+            final_success=False,
+            parsing_attempts=0,
+            extracted_json_keys=[],
+            missing_required_fields=[],
+            parsing_errors=[]
+        )
+
+        # Log comprehensive input information
+        logger.info("JSON Extraction Attempt", extra={
+            "response_length": len(text),
+            "response_preview": text[:500],  # Increased preview for more context
+            "truncated": len(text) > 500,
+            "non_printable_chars": sum(1 for c in text if not c.isprintable())
+        })
+
+        # Detailed logging of input characteristics
+        try:
+            # Check for potential JSON-like structures
+            potential_json_starts = [
+                text.find('{'),
+                text.find('['),
+                text.find('{"'),
+                text.find("{'")
+            ]
+            potential_json_starts = [x for x in potential_json_starts if x != -1]
+
+            logger.debug("JSON Parsing Hints", extra={
+                "first_potential_json_index": min(potential_json_starts) if potential_json_starts else -1,
+                "brackets_count": {
+                    'curly_open': text.count('{'),
+                    'curly_close': text.count('}'),
+                    'square_open': text.count('['),
+                    'square_close': text.count(']')
+                }
+            })
+        except Exception as hint_error:
+            logger.error("Error while collecting JSON parsing hints", extra={
+                "error": str(hint_error)
+            })
+
         def _clean_json_like(s: str) -> str:
             # Normalize smart quotes to plain quotes
-            s = s.replace('“', '"').replace('”', '"').replace('‘', "'").replace('’', "'")
+            s = s.replace('"', '"').replace('"', '"').replace(''', "'").replace(''', "'")
             # Remove comments
             s = re.sub(r"//.*?$", "", s, flags=re.MULTILINE)
             s = re.sub(r"/\*.*?\*/", "", s, flags=re.DOTALL)
@@ -465,33 +1457,174 @@ def _openai_chat_completion(messages, model: str = "gpt-5", temperature: float =
             s = re.sub(r"\bInfinity\b", "null", s)
             # Remove trailing commas before } or ]
             s = re.sub(r",\s*([}\]])", r"\1", s)
+            
+            # Handle specific truncation artifacts (e.g. "0b" at end)
+            s = re.sub(r'"\s*0b\s*$', '"', s.strip())
+            s = re.sub(r'\s*0b\s*$', '', s.strip())
+            
             return s.strip()
 
-        def _try_parse(s: str):
+        def _try_parse(s: str, method: str):
+            diagnostics.parsing_attempts += 1
             try:
-                return json.loads(s)
-            except json.JSONDecodeError:
+                result = json.loads(s)
+                logger.debug(f"JSON parse succeeded with {method}")
+                return result
+            except json.JSONDecodeError as e:
+                diagnostics.parsing_errors.append(f"{method} direct parse: {str(e)}")
                 pass
+
             # Try cleaning and parse again
-            cleaned = _clean_json_like(s)
             try:
-                return json.loads(cleaned)
-            except json.JSONDecodeError:
+                cleaned = _clean_json_like(s)
+                result = json.loads(cleaned)
+                logger.debug(f"JSON parse succeeded with {method} (after cleaning)")
+                return result
+            except json.JSONDecodeError as e:
+                diagnostics.parsing_errors.append(f"{method} cleaned parse: {str(e)}")
                 return None
 
+        # Helper to check if a dict looks like a valid verdict
+        def _is_valid_verdict(d: dict) -> bool:
+            """
+            Validate verdict with more lenient criteria to ensure frontend compatibility.
+
+            Goal: Allow minimal responses to still be considered valid.
+
+            Args:
+                d (dict): The verdict dictionary to validate
+
+            Returns:
+                bool: Whether the verdict can be considered valid
+            """
+            # Extremely minimal validation to ensure some basic structure exists
+            if not isinstance(d, dict):
+                logger.warning("Verdict is not a dictionary", extra={
+                    "verdict_type": type(d),
+                    "verdict_str": str(d)[:200]
+                })
+                return False
+
+            # Log details about the verdict for debugging
+            logger.info("Verdict validation details", extra={
+                "keys_present": list(d.keys()),
+                "final_bias": d.get('final_bias', 'Not found'),
+                "confidence_level": d.get('confidence_level', 'Not found')
+            })
+
+            # Be extremely lenient: just ensure the dictionary is not completely empty
+            # and has at least one potentially useful field
+            useful_fields = [
+                'final_bias',
+                'confidence_level',
+                'summary_html',
+                'rationale',
+                'key_reasoning_points',
+                'execution_recommendations'
+            ]
+
+            # Check if any useful field exists and is not None/empty
+            for field in useful_fields:
+                field_value = d.get(field)
+                if field_value not in [None, '', [], {}]:
+                    logger.debug(f"Found non-empty field: {field}", extra={
+                        "field_value": str(field_value)[:200]
+                    })
+                    return True
+
+            logger.warning("No useful fields found in verdict", extra={
+                "all_keys": list(d.keys())
+            })
+            return False
+
+        def _validate_and_score_result(result: dict) -> int:
+            """Score result based on completeness and set diagnostics."""
+            if not isinstance(result, dict):
+                return -1
+
+            diagnostics.extracted_json_keys = list(result.keys())
+            
+            # Stage-aware field requirements
+            if stage == "Trader":
+                # Trader stage only needs execution_recommendations
+                required_fields = ['execution_recommendations']
+                critical_fields = set()  # No critical fields for Trader stage
+            else:
+                # Analyst stage needs all fields
+                required_fields = ['rationale', 'summary_html', 'final_bias', 'execution_recommendations']
+                critical_fields = {'rationale', 'summary_html'}
+            
+            diagnostics.missing_required_fields = [f for f in required_fields if f not in result]
+
+            # Check for CRITICAL fields that must be non-empty (for Analyst stage only)
+            missing_critical = []
+            for field in critical_fields:
+                field_value = result.get(field)
+                # Check if field is missing or empty (empty string, None, etc.)
+                if not field_value or (isinstance(field_value, str) and len(field_value.strip()) == 0):
+                    missing_critical.append(field)
+                    logger.warning(f"CRITICAL FIELD EMPTY: {field} = {repr(field_value)[:100]}")
+
+            # Score based on presence of key fields
+            score = sum(1 for k in required_fields if k in result)
+
+            # Penalty for missing critical analysis fields (only for Analyst stage)
+            if missing_critical:
+                score = score - len(missing_critical)
+
+            max_score = len(required_fields)
+            logger.debug(f"JSON validation score: {score}/{max_score} (stage: {stage})", extra={
+                "extracted_keys": diagnostics.extracted_json_keys,
+                "missing_fields": diagnostics.missing_required_fields,
+                "missing_critical_fields": missing_critical,
+                "stage": stage
+            })
+            return score
+
         # 1) Direct parse
-        res = _try_parse(text.strip())
+        logger.debug("Attempting direct JSON parse")
+        res = _try_parse(text.strip(), "direct")
         if isinstance(res, dict):
-            return res
+            score = _validate_and_score_result(res)
+            # Stage-aware threshold: Trader needs score >= 1, Analyst needs score >= 3
+            threshold = 1 if stage == "Trader" else 3
+            if score >= threshold:
+                diagnostics.direct_parse_success = True
+                diagnostics.final_success = True
+                logger.info(f"Direct JSON parse successful (score: {score}, threshold: {threshold})")
+                return res, diagnostics
 
         # 2) Code blocks first (json-marked then generic)
+        logger.debug("Attempting code block extraction")
         code_block_patterns = [r"```json\s*(.*?)\s*```", r"```\s*(.*?)\s*```"]
-        for pattern in code_block_patterns:
+        candidates = []
+
+        for i, pattern in enumerate(code_block_patterns):
             matches = re.findall(pattern, text, re.DOTALL | re.IGNORECASE)
-            for match in matches:
-                res = _try_parse(match)
+            logger.debug(f"Found {len(matches)} matches for pattern {i}")
+
+            for match_idx, match in enumerate(matches):
+                res = _try_parse(match, f"code_block_p{i}_m{match_idx}")
                 if isinstance(res, dict):
-                    return res
+                    candidates.append((res, _validate_and_score_result(res)))
+
+        # Return the best candidate from code blocks
+        if candidates:
+            candidates.sort(key=lambda x: x[1], reverse=True)  # Sort by score
+            best_candidate, best_score = candidates[0]
+
+            # Stage-aware threshold
+            threshold = 1 if stage == "Trader" else 3
+            if best_score >= threshold:
+                diagnostics.code_block_parse_success = True
+                diagnostics.final_success = True
+                logger.info(f"Code block parse successful with score {best_score} (threshold: {threshold})")
+                return best_candidate, diagnostics
+            elif best_score >= (threshold - 1):  # Fallback: return candidate with partial score
+                diagnostics.code_block_parse_success = True
+                diagnostics.final_success = True
+                logger.warning(f"Code block parse with moderate score {best_score} (below strict threshold {threshold})")
+                return best_candidate, diagnostics
 
         # 3) Balanced brace scan to extract candidate JSON objects
         def _balanced_object_candidates(s: str):
@@ -526,30 +1659,99 @@ def _openai_chat_completion(messages, model: str = "gpt-5", temperature: float =
                         continue
             return
 
-        for candidate in _balanced_object_candidates(text):
-            res = _try_parse(candidate)
+        # Scan candidates from balanced braces
+        logger.debug("Attempting balanced brace extraction")
+        brace_candidates = []
+        brace_count = 0
+
+        for candidate_str in _balanced_object_candidates(text):
+            brace_count += 1
+            res = _try_parse(candidate_str, f"balanced_brace_{brace_count}")
             if isinstance(res, dict):
-                return res
+                score = _validate_and_score_result(res)
+                brace_candidates.append((res, score))
+
+        logger.debug(f"Found {len(brace_candidates)} valid brace candidates from {brace_count} attempts")
+
+        # Pick best from brace candidates
+        if brace_candidates:
+            brace_candidates.sort(key=lambda x: x[1], reverse=True)
+            best_brace_candidate, best_brace_score = brace_candidates[0]
+
+            # Stage-aware threshold
+            threshold = 1 if stage == "Trader" else 3
+            if best_brace_score >= threshold:
+                diagnostics.balanced_brace_parse_success = True
+                diagnostics.final_success = True
+                logger.info(f"Balanced brace parse successful with score {best_brace_score} (threshold: {threshold})")
+                return best_brace_candidate, diagnostics
+            elif best_brace_score >= (threshold - 1):
+                # Log for debugging but don't accept yet - try other methods
+                logger.debug(f"Balanced brace candidate found with score {best_brace_score}, but below strict threshold {threshold} - trying other extraction methods")
+                # Don't return yet - let it try greedy as fallback
 
         # 4) Fallback: greedy first/last braces (as a last resort)
+        logger.debug("Attempting greedy brace extraction as final fallback")
         greedy = re.search(r"\{.*\}", text, re.DOTALL)
         if greedy:
-            res = _try_parse(greedy.group(0))
+            res = _try_parse(greedy.group(0), "greedy")
             if isinstance(res, dict):
-                return res
-        
-        # No valid JSON found
-        return None
+                score = _validate_and_score_result(res)
+                # Stage-aware threshold
+                threshold = 1 if stage == "Trader" else 3
+                if score >= threshold:
+                    diagnostics.greedy_parse_success = True
+                    diagnostics.final_success = True
+                    logger.info(f"Greedy parse succeeded with score {score} (threshold: {threshold})")
+                    return res, diagnostics
+                elif score >= (threshold - 1):  # Accept partial if all else fails
+                    logger.warning(f"Accepting greedy parse with score {score} (below strict threshold {threshold})")
+                    diagnostics.greedy_parse_success = True
+                    diagnostics.final_success = True
+                    return res, diagnostics
+
+        # No valid JSON found - log details for debugging
+        logger.error("All JSON parsing attempts failed", extra={
+            "parsing_attempts": diagnostics.parsing_attempts,
+            "errors": diagnostics.parsing_errors,
+            "response_preview": text[:500] if text else "",
+            "response_length": len(text) if text else 0,
+            "has_execution_recommendations": "execution_recommendations" in text if text else False,
+            "has_rationale": "rationale" in text if text else False,
+            "has_summary_html": "summary_html" in text if text else False
+        })
+        return None, diagnostics
     
     # Try to extract valid JSON from the response
-    parsed_json = _extract_json_from_response(content)
-    
+    print(f"DEBUG CONTENT: {repr(content)}")
+    parsed_json, json_diagnostics = _extract_json_from_response(content, stage=stage)
+
+    # Log parsing diagnostics
+    if json_diagnostics.final_success:
+        logger.info(f"JSON parsing successful for {stage}", extra={
+            "attempts": json_diagnostics.parsing_attempts,
+            "extracted_keys": json_diagnostics.extracted_json_keys,
+            "missing_fields": json_diagnostics.missing_required_fields
+        })
+    else:
+        logger.error(f"JSON parsing failed for {stage}", extra={
+            "attempts": json_diagnostics.parsing_attempts,
+            "errors": json_diagnostics.parsing_errors,
+            "response_length": json_diagnostics.raw_response_length
+        })
+
     if parsed_json is not None:
         # Validate that essential fields are present and add defaults if missing
         if 'execution_recommendations' not in parsed_json:
             print("WARNING: execution_recommendations missing from GPT response, adding default structure")
             parsed_json['execution_recommendations'] = {
-                "primary_strategy": {"type": "GPT Response Missing", "description": "GPT did not provide execution recommendations", "confidence": "Low", "time_horizon": "Unknown"},
+                "primary_strategy": {
+                    "type": "GPT Response Missing", 
+                    "description": "GPT did not provide execution recommendations", 
+                    "confidence": "Low", 
+                    "time_horizon": "Unknown",
+                    "legs": []
+                },
                 "alternative_strategies": [],
                 "position_sizing": {"suggested_allocation": "Conservative allocation", "risk_level": "Conservative", "justification": "No GPT guidance provided"},
                 "entry_conditions": [],
@@ -560,7 +1762,13 @@ def _openai_chat_completion(messages, model: str = "gpt-5", temperature: float =
         elif not isinstance(parsed_json['execution_recommendations'], dict):
             print(f"WARNING: execution_recommendations is not a dict: {type(parsed_json['execution_recommendations'])}")
             parsed_json['execution_recommendations'] = {
-                "primary_strategy": {"type": "Invalid Format", "description": "GPT returned malformed execution recommendations", "confidence": "Low", "time_horizon": "Unknown"},
+                "primary_strategy": {
+                    "type": "Invalid Format", 
+                    "description": "GPT returned malformed execution recommendations", 
+                    "confidence": "Low", 
+                    "time_horizon": "Unknown",
+                    "legs": []
+                },
                 "alternative_strategies": [],
                 "position_sizing": {"suggested_allocation": "Conservative allocation", "risk_level": "Conservative", "justification": "Malformed GPT response"},
                 "entry_conditions": [],
@@ -572,7 +1780,15 @@ def _openai_chat_completion(messages, model: str = "gpt-5", temperature: float =
         # Ensure required subfields exist
         exec_rec = parsed_json['execution_recommendations']
         if 'primary_strategy' not in exec_rec:
-            exec_rec['primary_strategy'] = {"type": "Missing Primary", "description": "GPT did not provide primary strategy", "confidence": "Low", "time_horizon": "Unknown"}
+            exec_rec['primary_strategy'] = {"type": "Missing Primary", "description": "GPT did not provide primary strategy", "confidence": "Low", "time_horizon": "Unknown", "legs": []}
+        elif not isinstance(exec_rec['primary_strategy'], dict):
+            exec_rec['primary_strategy'] = {"type": "Invalid Primary", "description": "GPT returned malformed primary strategy", "confidence": "Low", "time_horizon": "Unknown", "legs": []}
+        else:
+            # Ensure primary_strategy has legs array
+            if 'legs' not in exec_rec['primary_strategy']:
+                exec_rec['primary_strategy']['legs'] = []
+            elif not isinstance(exec_rec['primary_strategy']['legs'], list):
+                exec_rec['primary_strategy']['legs'] = []
         if 'position_sizing' not in exec_rec:
             exec_rec['position_sizing'] = {"suggested_allocation": "Conservative allocation", "risk_level": "Conservative", "justification": "No GPT guidance provided"}
         if 'entry_conditions' not in exec_rec:
@@ -587,47 +1803,108 @@ def _openai_chat_completion(messages, model: str = "gpt-5", temperature: float =
             exec_rec['profit_target_guidance'] = "Use standard profit targets"
             
         # Ensure other required top-level fields exist
-        if 'final_bias' not in parsed_json:
+        # Only set final_bias for Analyst stage, not Trader
+        if stage != "Trader" and 'final_bias' not in parsed_json:
             parsed_json['final_bias'] = 'Neutral'
-        if 'summary_html' not in parsed_json:
-            parsed_json['summary_html'] = '<p>GPT did not provide summary</p>'
-        if 'rationale' not in parsed_json:
-            parsed_json['rationale'] = 'GPT did not provide rationale'
-        if 'key_reasoning_points' not in parsed_json:
-            parsed_json['key_reasoning_points'] = []
-        if 'actionable_ideas' not in parsed_json:
-            parsed_json['actionable_ideas'] = []
-        if 'risk_factors' not in parsed_json:
-            parsed_json['risk_factors'] = []
+        # Only generate summary_html for Analyst stage, not Trader
+        if stage != "Trader" and 'summary_html' not in parsed_json:
+            print("WARNING: Adding fallback summary_html - Analyst did not include this field")
+            # Generate a basic HTML summary from rationale instead of error message
+            rationale = parsed_json.get('rationale', 'No rationale provided.')
+            final_bias = parsed_json.get('final_bias', 'Neutral')
+            confidence = parsed_json.get('confidence_level', 'Medium')
+            
+            # Truncate at sentence boundary to avoid mid-sentence cuts
+            truncated_rationale = rationale[:300]
+            if len(rationale) > 300:
+                last_period = truncated_rationale.rfind('.')
+                last_exclamation = truncated_rationale.rfind('!')
+                last_question = truncated_rationale.rfind('?')
+                last_sentence = max(last_period, last_exclamation, last_question)
+                if last_sentence > 200:  # Ensure we have substantial content
+                    truncated_rationale = truncated_rationale[:last_sentence + 1]
+                else:
+                    truncated_rationale += '...'
+            
+            parsed_json['summary_html'] = f"""
+            <div style="background: #f8f9fa; padding: 15px; border-radius: 5px; border-left: 4px solid #1976d2;">
+                <h4 style="margin: 0 0 10px 0; color: #1976d2;">AI Analysis Summary</h4>
+                <div style="display: flex; gap: 10px; margin-bottom: 10px;">
+                    <span style="background: #e3f2fd; padding: 4px 8px; border-radius: 3px; font-size: 12px; color: #0d47a1;">{final_bias}</span>
+                    <span style="background: #fff3e0; padding: 4px 8px; border-radius: 3px; font-size: 12px; color: #e65100;">{confidence} Confidence</span>
+                </div>
+                <p style="margin: 0; line-height: 1.5; color: #333;">{truncated_rationale}</p>
+            </div>
+            """.strip()
+        # Check for missing critical fields and log warnings
+        # Only check Analyst fields for Analyst stage, not Trader
+        missing_critical_fields = []
+
+        if stage != "Trader":
+            # Analyst stage requires these fields
+            if 'rationale' not in parsed_json or not parsed_json.get('rationale'):
+                parsed_json['rationale'] = 'GPT did not provide rationale'
+                missing_critical_fields.append('rationale')
+                logger.error(f"CRITICAL: {stage} did not provide 'rationale' field - using placeholder")
+
+            if 'summary_html' not in parsed_json or not parsed_json.get('summary_html'):
+                missing_critical_fields.append('summary_html')
+                logger.error(f"CRITICAL: {stage} did not provide 'summary_html' field - check summary_html generation logic")
+
+            if 'key_reasoning_points' not in parsed_json:
+                parsed_json['key_reasoning_points'] = []
+                logger.warning(f"WARNING: {stage} did not provide 'key_reasoning_points' - using empty array")
+
+            if 'actionable_ideas' not in parsed_json:
+                parsed_json['actionable_ideas'] = []
+                logger.warning(f"WARNING: {stage} did not provide 'actionable_ideas' - using empty array")
+
+            if 'risk_factors' not in parsed_json:
+                parsed_json['risk_factors'] = []
+                logger.warning(f"WARNING: {stage} did not provide 'risk_factors' - using empty array")
+
         if 'search_performed' not in parsed_json:
             parsed_json['search_performed'] = False
         if 'sources' not in parsed_json:
             parsed_json['sources'] = []
-        
+
         # Attach model info so downstream save includes it
         if isinstance(parsed_json, dict):
             parsed_json.setdefault('model', model)
-        print(f"DEBUG: Final GPT verdict contains execution_recommendations: {bool(parsed_json.get('execution_recommendations'))}")
-        return parsed_json
+
+        if missing_critical_fields:
+            logger.error(f"{stage} response is missing CRITICAL fields: {missing_critical_fields}", extra={
+                "missing_fields": missing_critical_fields,
+                "response_keys": list(parsed_json.keys()) if isinstance(parsed_json, dict) else []
+            })
+
+        logger.info(f"{stage} completed (with missing field fallbacks)" if missing_critical_fields else f"{stage} completed successfully", extra={
+            "has_execution_recommendations": bool(parsed_json.get('execution_recommendations')),
+            "final_keys": list(parsed_json.keys()) if isinstance(parsed_json, dict) else [],
+            "missing_critical_fields": missing_critical_fields
+        })
+        return parsed_json, metrics
     
     # Log the problematic response for debugging
     if content:
-        print(f"WARNING: Failed to parse GPT verdict response as JSON. Raw response: {content[:500]}...")
+        metrics.failure_category = FailureCategory.JSON_PARSE_ERROR
+        metrics.error_message = "Failed to parse response as JSON"
+        logger.error(f"Failed to parse {stage} response as JSON", extra={
+            "response_preview": content[:500],
+            "response_length": len(content),
+            "parsing_errors": json_diagnostics.parsing_errors if 'json_diagnostics' in locals() else []
+        })
         summary_html = f"<h5>AI Verdict (Unparsed)</h5><div style='background: #fff3cd; padding: 10px; border-radius: 4px; margin-bottom: 10px;'><strong>⚠️ Note:</strong> AI response could not be parsed as JSON</div><pre style='white-space: pre-wrap; background: #f8f9fa; padding: 10px; border-radius: 4px;'>{content[:1000]}</pre>"
         rationale = "Model response was not valid JSON; returning raw text."
     else:
-        print("ERROR: GPT verdict response was completely empty!")
+        metrics.failure_category = FailureCategory.EMPTY_RESPONSE
+        metrics.error_message = "Completely empty response"
+        logger.error(f"{stage} returned completely empty response")
         summary_html = f"<h5>AI Verdict (Empty Response)</h5><div style='background: #f8d7da; padding: 10px; border-radius: 4px; margin-bottom: 10px;'><strong>⚠️ Error:</strong> AI service returned an empty response</div>"
         rationale = "AI service returned an empty response."
     
     # Fallback if model didn't return parseable JSON
-    return {
-        "final_bias": "Neutral",
-        "summary_html": summary_html,
-        "rationale": rationale,
-        "key_reasoning_points": [],
-        "actionable_ideas": [],
-        "risk_factors": [],
+    fallback = {
         "execution_recommendations": {
             "primary_strategy": {"type": "Unknown", "description": "Unable to parse AI response", "confidence": "Low", "time_horizon": "Unknown"},
             "alternative_strategies": [],
@@ -642,134 +1919,460 @@ def _openai_chat_completion(messages, model: str = "gpt-5", temperature: float =
         "model": model
     }
 
+    # Only include Analyst fields if we are in the Analyst stage or unknown
+    # This prevents overwriting valid Analyst data when Trader stage fails
+    if stage != "Trader":
+        fallback.update({
+            "final_bias": "Neutral",
+            "summary_html": summary_html,
+            "rationale": rationale,
+            "key_reasoning_points": [],
+            "actionable_ideas": [],
+            "risk_factors": []
+        })
 
-def generate_gpt_verdict(ticker: str, expiration_date: str, analysis_result: Dict[str, Any], model: str = "gpt-5", use_web_search: bool = False) -> Dict[str, Any]:
-    """
-    Compose a prompt from the existing sub-analyses and call the LLM to obtain a final verdict.
-    Returns a dict with keys:
-      - final_bias
-      - summary_html (enhanced with structured HTML formatting)
-      - rationale (detailed step-by-step reasoning)
-      - key_reasoning_points (main analytical points in bullet format)
-      - actionable_ideas
-      - risk_factors
-      - execution_recommendations (comprehensive trading strategy guidance)
-      - search_performed
-      - sources
-    """
-    # Select and sanitize relevant fields to control prompt size
-    keys_of_interest = [
-        "synthesis_data",
-        "candlestick_analysis",
-        "technical_analysis",
-        "volume_oi_analysis",
-        "movement_analysis_results",
-        "results_df",
-        "iv_high",
-        "iv_low",
-        # Enhanced context for better GPT verdict analysis
-        "market_data",
-        "parity_analysis", 
-        "stock_fundamentals",
-        "volatility_structure",
-        "options_positioning",
-        # The following keys are intentionally excluded to force the AI to generate its own
-        # verdict from raw data instead of repeating a pre-computed conclusion.
-        # "final_conclusion_html",
-        # "final_bias",
-        # "position_status",
-        # "risk_exposure"
-    ]
-    payload = {k: _sanitize_for_json(analysis_result.get(k)) for k in keys_of_interest if k in analysis_result}
-    messages = _build_messages(ticker, expiration_date, payload, use_web_search=use_web_search)
+    return fallback, metrics
 
-    try:
-        ai = _openai_chat_completion(messages, model=model)
-        return ai
-    except requests.exceptions.Timeout as e:
-        timeout_val = int(os.getenv("GPT_VERDICT_TIMEOUT", "180"))
-        print(f"ERROR: GPT verdict timed out after {timeout_val} seconds: {e}")
-        timeout_error = f"OpenWebUI request timed out after {timeout_val} seconds using model {model}"
-    except requests.exceptions.ConnectionError as e:
-        print(f"ERROR: GPT verdict connection failed: {e}")
-        timeout_error = f"Cannot connect to OpenWebUI service: {str(e)}"
-    except requests.exceptions.HTTPError as e:
-        print(f"ERROR: GPT verdict HTTP error: {e}")
-        timeout_error = f"OpenWebUI returned error {e.response.status_code}: {e.response.text if hasattr(e.response, 'text') else str(e)}"
-    except Exception as e:
-        print(f"ERROR: GPT verdict failed: {e}")
-        timeout_error = f"Unexpected error: {str(e)}"
-        
-    # Common fallback logic for all error types
-    try:
-        from ..analysis import generate_holistic_conclusion
-        
-        # Extract synthesis_data for model-based analysis
-        synthesis_data = analysis_result.get("synthesis_data", {})
-        if synthesis_data:
-            model_html, model_bias = generate_holistic_conclusion(synthesis_data)
-            
-            # Return model-based verdict with clear indication
-            return {
-                "final_bias": model_bias,
-                "summary_html": f"<h5>Model-Based Verdict (GPT Fallback)</h5><div style='background: #fff3cd; padding: 10px; border-radius: 4px; margin-bottom: 10px;'><strong>⚠️ Note:</strong> {timeout_error}. Showing model-based analysis instead.</div>{model_html}",
-                "rationale": f"AI service issue: {timeout_error}. Displaying model-based analysis instead.",
-                "key_reasoning_points": [],
-                "actionable_ideas": [],
-                "risk_factors": [],
-                "execution_recommendations": {
-                    "primary_strategy": {"type": "Model-Based", "description": "Use recommended strategy from analysis", "confidence": "Medium", "time_horizon": "Short to Medium"},
-                    "alternative_strategies": [],
-                    "position_sizing": {"suggested_allocation": "Conservative allocation recommended", "risk_level": "Conservative", "justification": "AI service unavailable, using conservative approach"},
-                    "entry_conditions": ["Wait for confirmation signals"],
-                    "exit_conditions": ["Monitor for reversal patterns"],
-                    "stop_loss_guidance": "Use 2-3% stop loss below entry",
-                    "profit_target_guidance": "Target 5-10% profit based on analysis"
-                },
-                "search_performed": False,
-                "sources": ["Model-based holistic analysis"]
-            }
-        else:
-            # If no synthesis data available, return basic fallback
-            return {
-                "final_bias": "Neutral",
-                "summary_html": f"<h5>Analysis Unavailable</h5><div style='background: #f8d7da; padding: 10px; border-radius: 4px;'><strong>⚠️ Error:</strong> {timeout_error} and insufficient data for model-based analysis.</div>",
-                "rationale": f"Both AI service and model-based analysis unavailable: {timeout_error}",
-                "key_reasoning_points": [],
-                "actionable_ideas": [],
-                "risk_factors": [],
-                "execution_recommendations": {
-                    "primary_strategy": {"type": "Manual Review", "description": "Manual analysis required due to system issues", "confidence": "Low", "time_horizon": "Unknown"},
-                    "alternative_strategies": [],
-                    "position_sizing": {"suggested_allocation": "Minimal allocation until analysis available", "risk_level": "Conservative", "justification": "Both AI and model-based analysis unavailable"},
-                    "entry_conditions": ["Wait for system recovery"],
-                    "exit_conditions": ["Manual monitoring required"],
-                    "stop_loss_guidance": "Use tight stop losses",
-                    "profit_target_guidance": "Conservative profit targets"
-                },
-                "search_performed": False,
-                "sources": []
-            }
-                
-    except ImportError as import_error:
-        print(f"ERROR: Cannot import generate_holistic_conclusion: {import_error}")
-        # Ultimate fallback
+
+def generate_gpt_verdict(
+    ticker: str,
+    expiration_date: str,
+    analysis_result: Dict[str, Any],
+    model: str = "gpt-5",
+    use_web_search: bool = False,
+    retry_config: Optional[RetryConfig] = None,
+    timeout_config: Optional[TimeoutConfig] = None
+) -> Dict[str, Any]:
+    """
+    Enhanced 2-stage GPT Verdict generation with retry logic, circuit breaker, and separate timeouts:
+    1. Analyst Agent: Generates market thesis, bias, and rationale.
+    2. Trader Agent: Generates specific execution strategy based on Analyst's thesis.
+
+    Args:
+        retry_config: Custom retry configuration (uses defaults if None)
+        timeout_config: Custom timeout configuration (uses defaults if None)
+
+    Returns verdict dict with embedded error diagnostics when failures occur.
+    """
+    if retry_config is None:
+        retry_config = RetryConfig(
+            max_attempts=3,
+            base_delay=1.0,
+            max_delay=30.0  # Shorter max for faster recovery
+        )
+
+    if timeout_config is None:
+        timeout_config = TimeoutConfig(
+            analyst_timeout=int(os.getenv("GPT_ANALYST_TIMEOUT", "180")),  # 3 minutes
+            trader_timeout=int(os.getenv("GPT_TRADER_TIMEOUT", "240"))     # 4 minutes
+        )
+
+    session_start = time.time()
+    logger.info(f"Starting GPT verdict generation with retry support", extra={
+        "ticker": ticker,
+        "expiration_date": expiration_date,
+        "model": model,
+        "use_web_search": use_web_search,
+        "retry_max_attempts": retry_config.max_attempts,
+        "analyst_timeout": timeout_config.analyst_timeout,
+        "trader_timeout": timeout_config.trader_timeout
+    })
+
+    # Stage 1: Analyst Agent with Retry Logic
+    logger.info("Starting Stage 1: Analyst Agent")
+    analyst_messages = _build_analyst_messages(ticker, expiration_date, analysis_result, use_web_search)
+
+    analyst_result, analyst_metrics, analyst_retry_metrics = _openai_chat_completion_with_retry(
+        messages=analyst_messages,
+        model=model,
+        temperature=0.3,
+        stage="Analyst",
+        retry_config=retry_config,
+        timeout_config=timeout_config
+    )
+
+    # Handle analyst response with retry information
+    if analyst_result is None:
+        logger.error("Analyst Agent failed after all retry attempts", extra={
+            "retry_attempts": analyst_retry_metrics.total_attempts,
+            "total_retry_time": analyst_retry_metrics.total_retry_time,
+            "final_failure": analyst_retry_metrics.final_failure_category.value if analyst_retry_metrics.final_failure_category else "unknown",
+            "circuit_breaker_triggered": analyst_retry_metrics.circuit_breaker_triggered,
+            "delays_used": analyst_retry_metrics.delays_used
+        })
+        # Return minimal fallback structure with retry information
         return {
             "final_bias": "Neutral",
-            "summary_html": f"<h5>Analysis Unavailable</h5><div style='background: #f8d7da; padding: 10px; border-radius: 4px;'><strong>⚠️ Error:</strong> Both GPT service and fallback analysis unavailable.</div><p>GPT Error: {timeout_error}</p><p>Fallback Error: {str(import_error)}</p>",
-            "rationale": f"Complete analysis failure - GPT: {timeout_error}, Fallback: {str(import_error)}",
+            "summary_html": "<p>Analyst Agent failed to generate analysis after multiple attempts.</p>",
+            "rationale": f"Analyst Agent failed: {analyst_metrics.error_message}",
             "key_reasoning_points": [],
             "actionable_ideas": [],
             "risk_factors": [],
             "execution_recommendations": {
-                "primary_strategy": {"type": "System Error", "description": "Complete system failure - manual analysis required", "confidence": "Low", "time_horizon": "Unknown"},
-                "alternative_strategies": [],
-                "position_sizing": {"suggested_allocation": "No position recommended", "risk_level": "Conservative", "justification": "Complete analysis system failure"},
-                "entry_conditions": ["System recovery required"],
-                "exit_conditions": ["Manual intervention needed"],
-                "stop_loss_guidance": "Do not enter positions",
-                "profit_target_guidance": "System recovery required"
+                "primary_strategy": {
+                    "type": "System Error",
+                    "description": "Unable to generate recommendations due to analyst failure",
+                    "confidence": "Low",
+                    "time_horizon": "Unknown",
+                    "legs": []
+                }
             },
-            "search_performed": False,
-            "sources": []
+            "error_details": {
+                "stage": "Analyst",
+                "category": analyst_metrics.failure_category.value if analyst_metrics.failure_category else "unknown",
+                "message": analyst_metrics.error_message,
+                "duration": analyst_metrics.duration,
+                "retry_info": {
+                    "attempts": analyst_retry_metrics.total_attempts,
+                    "total_retry_time": analyst_retry_metrics.total_retry_time,
+                    "circuit_breaker_triggered": analyst_retry_metrics.circuit_breaker_triggered,
+                    "delays_used": analyst_retry_metrics.delays_used
+                }
+            }
         }
+
+    # Log analyst success with retry information
+    logger.info("Analyst Agent completed successfully", extra={
+        "duration": analyst_metrics.duration,
+        "response_size": analyst_metrics.response_size,
+        "returned_fields": list(analyst_result.keys()) if isinstance(analyst_result, dict) else [],
+        "has_summary_html": bool(analyst_result.get('summary_html') if isinstance(analyst_result, dict) else False),
+        "retry_attempts": analyst_retry_metrics.total_attempts,
+        "successful_attempt": analyst_retry_metrics.successful_attempt,
+        "total_retry_time": analyst_retry_metrics.total_retry_time
+    })
+
+    # Stage 2: Trader Agent - Enhanced options data validation
+    logger.info("Starting Stage 2: Trader Agent")
+    raw_options_data = analysis_result.get("options_positioning", {})
+
+    # Enhanced options data filtering with comprehensive validation
+    greeks = raw_options_data.get("greeks_by_strike", {})
+    valid_strikes = raw_options_data.get("strike_distribution", {}).get("valid_strikes", [])
+
+    logger.debug("Processing options data", extra={
+        "raw_greeks_count": len(greeks),
+        "valid_strikes_count": len(valid_strikes),
+        "raw_strikes": valid_strikes[:10] if valid_strikes else []  # First 10 for debugging
+    })
+
+    # Ensure valid_strikes are floats for comparison
+    valid_strikes_float = []
+    invalid_strikes = []
+
+    for s in valid_strikes:
+        try:
+            valid_strikes_float.append(float(s))
+        except (ValueError, TypeError) as e:
+            invalid_strikes.append(s)
+            logger.warning(f"Invalid strike value: {s}, error: {e}")
+
+    if invalid_strikes:
+        logger.warning(f"Found {len(invalid_strikes)} invalid strikes", extra={
+            "invalid_strikes": invalid_strikes[:5]  # First 5 for logging
+        })
+
+    # Filter greeks with detailed logging
+    filtered_greeks = {}
+    filtering_errors = []
+
+    for k, v in greeks.items():
+        try:
+            if float(k) in valid_strikes_float:
+                filtered_greeks[k] = v
+            else:
+                logger.debug(f"Strike {k} not in valid strikes, filtering out")
+        except (ValueError, TypeError) as e:
+            filtering_errors.append(f"Strike {k}: {str(e)}")
+
+    if filtering_errors:
+        logger.warning(f"Encountered {len(filtering_errors)} filtering errors", extra={
+            "errors": filtering_errors[:5]
+        })
+
+    # Construct options data package
+    raw_options_data_package = {
+        "valid_strikes": valid_strikes_float,  # Use cleaned float strikes
+        "undervalued_opportunities": raw_options_data.get("total_undervalued_options", 0),
+        "top_opportunity": raw_options_data.get("top_opportunity"),
+        "greeks_by_strike": filtered_greeks,
+        "volatility_structure": analysis_result.get("volatility_structure", {})
+    }
+
+    # Attempt to sanitize and repair data before validation
+    options_data, repair_attempts = _sanitize_and_repair_options_data(raw_options_data_package)
+
+    if repair_attempts:
+        logger.info(f"Applied {len(repair_attempts)} data repairs", extra={
+            "repairs": repair_attempts[:10]  # Log first 10 repairs
+        })
+
+    # Validate options data quality with enhanced checks
+    options_validation = _validate_options_data(options_data)
+
+    logger.info("Enhanced options data validation completed", extra={
+        "completeness_score": options_validation.data_completeness_score,
+        "quality_score": options_validation.data_quality_score,
+        "valid_strikes_count": options_validation.valid_strikes_count,
+        "greeks_count": options_validation.greeks_count,
+        "complete_greeks_count": options_validation.complete_greeks_count,
+        "invalid_greeks_count": options_validation.invalid_greeks_count,
+        "warnings_count": len(options_validation.warnings),
+        "errors_count": len(options_validation.errors),
+        "repair_attempts_count": len(repair_attempts)
+    })
+
+    # ENHANCED DECISION LOGIC WITH GRADUATED QUALITY LEVELS
+    # The quality assessment already determined can_proceed based on asset-specific thresholds
+    # We'll use that decision but also preserve backward compatibility
+
+    # Get the assessment result stored during validation
+    if hasattr(options_validation, 'quality_assessment_result'):
+        assessment_result = options_validation.quality_assessment_result
+        can_proceed = assessment_result.get('can_proceed', False)
+        overall_level = assessment_result.get('overall_level', 'failed')
+    else:
+        # Fallback to original logic if assessment not available
+        min_completeness_score = 0.3
+        min_quality_score = 0.5
+
+        completeness_sufficient = options_validation.data_completeness_score >= min_completeness_score
+        quality_sufficient = options_validation.data_quality_score >= min_quality_score
+
+        # Fixed fallback threshold ordering (was counterintuitive)
+        can_proceed = (completeness_sufficient and quality_sufficient) or (
+            options_validation.data_completeness_score >= 0.2 and
+            options_validation.data_quality_score >= 0.6 and  # Fixed: was 0.7 (higher than main!)
+            options_validation.complete_greeks_count > 0
+        )
+        overall_level = "legacy_assessment"
+
+    print(f"DECISION_DEBUG: Final Processing Decision:")
+    print(f"  Can Proceed: {can_proceed}")
+    print(f"  Quality Level: {overall_level}")
+    print(f"  Completeness Score: {options_validation.data_completeness_score:.4f}")
+    print(f"  Quality Score: {options_validation.data_quality_score:.4f}")
+
+    # Enhanced logic: Check for caution mode eligibility
+    assessment_result = getattr(options_validation, 'quality_assessment_result', {})
+    can_proceed_with_caution = assessment_result.get('can_proceed_with_caution', False)
+
+    if not can_proceed:
+        logger.error("Options data quality insufficient for trader agent", extra={
+            "completeness_score": options_validation.data_completeness_score,
+            "quality_score": options_validation.data_quality_score,
+            "complete_greeks_count": options_validation.complete_greeks_count,
+            "invalid_greeks_count": options_validation.invalid_greeks_count,
+            "can_proceed_with_caution": can_proceed_with_caution,
+            "errors": options_validation.errors[:5],  # Log first 5 errors
+            "warnings": options_validation.warnings[:5]  # Log first 5 warnings
+        })
+
+        # Return analyst output with enhanced error details
+        final_verdict = analyst_result.copy() if isinstance(analyst_result, dict) else {}
+
+        # Create user-friendly issue descriptions
+        issues = []
+        recommendations = []
+
+        # Analyze specific issues
+        if options_validation.data_completeness_score < 0.5:
+            issues.append({
+                "description": f"Limited data coverage ({options_validation.data_completeness_score:.1%})",
+                "impact": "Strategies may not cover full market scenarios",
+                "severity": "warning" if options_validation.data_completeness_score > 0.3 else "error"
+            })
+            recommendations.append("Try a more liquid expiration date or ticker")
+
+        if options_validation.data_quality_score < 0.5:
+            issues.append({
+                "description": f"Data quality concerns ({options_validation.data_quality_score:.1%})",
+                "impact": "Greeks calculations may be inaccurate",
+                "severity": "warning" if options_validation.data_quality_score > 0.3 else "error"
+            })
+            recommendations.append("Consider using a different analysis method")
+
+        if options_validation.complete_greeks_count < 5:
+            issues.append({
+                "description": f"Limited strike coverage ({options_validation.complete_greeks_count} complete strikes)",
+                "impact": "Strategy recommendations may be incomplete",
+                "severity": "warning"
+            })
+            recommendations.append("Try an expiration with more active options")
+
+        # Create detailed error description
+        error_details = []
+        if hasattr(options_validation, 'quality_assessment_result'):
+            combined_score = assessment_result.get('combined_score', 0)
+            error_details.append(f"Combined quality score {combined_score:.1%} below threshold")
+        else:
+            # Fallback error details
+            if options_validation.data_completeness_score < min_completeness_score:
+                error_details.append(f"Completeness score {options_validation.data_completeness_score:.2f} below {min_completeness_score}")
+            if options_validation.data_quality_score < min_quality_score:
+                error_details.append(f"Quality score {options_validation.data_quality_score:.2f} below {min_quality_score}")
+            if options_validation.complete_greeks_count == 0:
+                error_details.append("No strikes with complete greeks data")
+
+        final_verdict.update({
+            "execution_recommendations": {
+                "primary_strategy": {
+                    "type": "Data Quality Error",
+                    "description": f"Options data validation failed: {'; '.join(error_details)}",
+                    "confidence": "Low",
+                    "time_horizon": "Unknown",
+                    "legs": []
+                }
+            },
+            "error_details": {
+                "stage": "Trader",
+                "category": "data_validation_error",
+                "message": "Enhanced validation failed multiple criteria",
+                "validation_scores": {
+                    "completeness": options_validation.data_completeness_score,
+                    "quality": options_validation.data_quality_score
+                },
+                "data_metrics": {
+                    "valid_strikes": options_validation.valid_strikes_count,
+                    "complete_greeks": options_validation.complete_greeks_count,
+                    "invalid_greeks": options_validation.invalid_greeks_count
+                },
+                "validation_errors": options_validation.errors,
+                "validation_warnings": options_validation.warnings,
+                "repair_attempts": repair_attempts
+            },
+            # NEW: Enhanced quality assessment details for frontend
+            "quality_assessment": {
+                "overall_quality_level": overall_level,
+                "combined_score": assessment_result.get('combined_score', options_validation.data_quality_score),
+                "completeness_score": options_validation.data_completeness_score,
+                "quality_score": options_validation.data_quality_score,
+                "overlap_score": assessment_result.get('component_scores', {}).get('overlap', 0.0),
+                "pass_threshold": assessment_result.get('thresholds_used', {}).get('pass_threshold', 0.6),
+                "can_proceed_with_caution": can_proceed_with_caution,
+                "caution_threshold": assessment_result.get('caution_threshold', 0.35),
+                "asset_type": assessment_result.get('asset_type', 'standard'),
+                "strike_count": options_validation.valid_strikes_count + options_validation.invalid_greeks_count,
+                "valid_strikes": options_validation.valid_strikes_count,
+                "issues": issues,
+                "recommendations": recommendations
+            }
+        })
+        return final_verdict
+
+    # Execute trader agent call with retry logic
+    trader_messages = _build_trader_messages(ticker, expiration_date, analyst_result, options_data)
+
+    trader_result, trader_metrics, trader_retry_metrics = _openai_chat_completion_with_retry(
+        messages=trader_messages,
+        model=model,
+        temperature=0.1,
+        stage="Trader",
+        retry_config=retry_config,
+        timeout_config=timeout_config
+    )
+
+    # Handle trader response with retry information
+    if trader_result is None:
+        logger.error("Trader Agent failed after all retry attempts", extra={
+            "retry_attempts": trader_retry_metrics.total_attempts,
+            "total_retry_time": trader_retry_metrics.total_retry_time,
+            "final_failure": trader_retry_metrics.final_failure_category.value if trader_retry_metrics.final_failure_category else "unknown",
+            "circuit_breaker_triggered": trader_retry_metrics.circuit_breaker_triggered,
+            "delays_used": trader_retry_metrics.delays_used,
+            "analyst_keys": list(analyst_result.keys()) if isinstance(analyst_result, dict) else [],
+            "options_data_keys": list(options_data.keys()),
+            "options_completeness": options_validation.data_completeness_score
+        })
+
+        # Return analyst output with error details for trader failure
+        final_verdict = analyst_result.copy() if isinstance(analyst_result, dict) else {}
+        final_verdict.update({
+            "execution_recommendations": {
+                "primary_strategy": {
+                    "type": "Trader Agent Failed",
+                    "description": f"Trader Agent failed after {trader_retry_metrics.total_attempts} attempts: {trader_metrics.error_message}",
+                    "confidence": "Low",
+                    "time_horizon": "Unknown",
+                    "legs": []
+                }
+            },
+            "error_details": {
+                "stage": "Trader",
+                "category": trader_metrics.failure_category.value if trader_metrics.failure_category else "unknown",
+                "message": trader_metrics.error_message,
+                "duration": trader_metrics.duration,
+                "retry_info": {
+                    "attempts": trader_retry_metrics.total_attempts,
+                    "total_retry_time": trader_retry_metrics.total_retry_time,
+                    "circuit_breaker_triggered": trader_retry_metrics.circuit_breaker_triggered,
+                    "delays_used": trader_retry_metrics.delays_used
+                },
+                "options_validation": {
+                    "score": options_validation.data_completeness_score,
+                    "warnings": options_validation.warnings,
+                    "errors": options_validation.errors
+                }
+            }
+        })
+        return final_verdict
+
+    # Log trader success with retry information
+    logger.info("Trader Agent completed successfully", extra={
+        "duration": trader_metrics.duration,
+        "response_size": trader_metrics.response_size,
+        "returned_fields": list(trader_result.keys()) if isinstance(trader_result, dict) else [],
+        "retry_attempts": trader_retry_metrics.total_attempts,
+        "successful_attempt": trader_retry_metrics.successful_attempt,
+        "total_retry_time": trader_retry_metrics.total_retry_time
+    })
+
+    # Merge results and log final success
+    # IMPORTANT: Preserve Analyst's fields (final_bias, rationale, summary_html, etc.) and only add Trader's execution_recommendations
+    if isinstance(analyst_result, dict) and isinstance(trader_result, dict):
+        final_verdict = {**analyst_result}  # Start with Analyst's result
+        # Only merge Trader's execution_recommendations, not other fields that might overwrite Analyst's work
+        if 'execution_recommendations' in trader_result:
+            final_verdict['execution_recommendations'] = trader_result['execution_recommendations']
+        # Preserve Trader's model info if different
+        if 'model' in trader_result and trader_result['model'] != analyst_result.get('model'):
+            final_verdict['trader_model'] = trader_result['model']
+    else:
+        final_verdict = {}
+
+    session_duration = time.time() - session_start
+    logger.info("GPT verdict generation completed successfully", extra={
+        "total_duration": session_duration,
+        "analyst_duration": analyst_metrics.duration,
+        "trader_duration": trader_metrics.duration,
+        "final_verdict_keys": list(final_verdict.keys()),
+        "has_execution_recommendations": bool(final_verdict.get('execution_recommendations')),
+        # Comprehensive retry metrics
+        "total_api_calls": analyst_retry_metrics.total_attempts + trader_retry_metrics.total_attempts,
+        "analyst_retry_info": {
+            "attempts": analyst_retry_metrics.total_attempts,
+            "successful_attempt": analyst_retry_metrics.successful_attempt,
+            "retry_time": analyst_retry_metrics.total_retry_time
+        },
+        "trader_retry_info": {
+            "attempts": trader_retry_metrics.total_attempts,
+            "successful_attempt": trader_retry_metrics.successful_attempt,
+            "retry_time": trader_retry_metrics.total_retry_time
+        },
+        "circuit_breaker_events": {
+            "analyst_triggered": analyst_retry_metrics.circuit_breaker_triggered,
+            "trader_triggered": trader_retry_metrics.circuit_breaker_triggered
+        }
+    })
+
+    # Add retry summary to final verdict for monitoring
+    final_verdict['_retry_summary'] = {
+        "session_duration": session_duration,
+        "analyst_attempts": analyst_retry_metrics.total_attempts,
+        "trader_attempts": trader_retry_metrics.total_attempts,
+        "total_retry_time": analyst_retry_metrics.total_retry_time + trader_retry_metrics.total_retry_time,
+        "circuit_breaker_events": analyst_retry_metrics.circuit_breaker_triggered or trader_retry_metrics.circuit_breaker_triggered
+    }
+
+    return final_verdict
+

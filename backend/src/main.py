@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 import traceback
 import asyncio
 from datetime import date, timedelta
@@ -25,11 +26,41 @@ import math
 import os
 import requests
 
+# [NEW] Import fallback management components
+from .analytics.expiration_fallback_config import create_default_fallback_config, FallbackStrategyConfig
+from .analytics.data_quality_fallback_manager import DataQualityFallbackManager
+
+# [NEW] Global fallback configuration instance
+_global_fallback_config = None
+
+
+def get_fallback_config() -> FallbackStrategyConfig:
+    """Get or initialize the global fallback configuration."""
+    global _global_fallback_config
+    if _global_fallback_config is None:
+        _global_fallback_config = create_default_fallback_config()
+    return _global_fallback_config
+
 
 app = FastAPI(
     title="Trader Intelligence API",
     description="API for stock and option analysis.",
     version="1.0.0",
+)
+
+# Configure CORS middleware to allow cross-origin requests from the frontend
+# This is essential for frontend-backend communication in containerized environments
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3111",  # Frontend development server
+        "http://host.docker.internal:3111",  # Docker internal frontend
+        "http://127.0.0.1:3111",  # Alternative localhost format
+        "*",  # Allow all origins for development (restrict in production)
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all HTTP methods (GET, POST, PUT, DELETE, etc.)
+    allow_headers=["*"],  # Allow all headers
 )
 
 app.include_router(portfolio.router)
@@ -38,6 +69,28 @@ app.include_router(portfolio.router)
 def read_root():
     """A simple endpoint to check if the API is running."""
     return {"message": "Welcome to the Trader Intelligence API"}
+
+@app.get("/health")
+@app.get("/api/health")  # Alias for nginx proxy compatibility
+def health_check():
+    """Health check endpoint for monitoring and load balancers."""
+    return {
+        "status": "healthy",
+        "service": "trader-intelligence-backend",
+        "version": "1.0.0",
+        "timestamp": date.today().isoformat(),
+        "cors_enabled": True
+    }
+
+@app.get("/cors-test")
+@app.get("/api/cors-test")  # Alias for nginx proxy compatibility
+def cors_test():
+    """Test endpoint to verify CORS configuration is working."""
+    return {
+        "message": "CORS is working correctly",
+        "origin_allowed": True,
+        "timestamp": date.today().isoformat()
+    }
 
 @app.get("/macro-data")
 @app.get("/api/macro-data")  # Alias for nginx proxy compatibility
@@ -576,3 +629,192 @@ async def debug_option_chain(ticker: str, expiration_date: str):
         print(f"Error in debug_option_chain endpoint: {e}")
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# [NEW] Intelligent Fallback Configuration Endpoints
+@app.get("/api/config/fallback")
+@app.get("/config/fallback")
+async def get_fallback_configuration():
+    """Get current intelligent fallback configuration."""
+    try:
+        config = get_fallback_config()
+
+        # Create a serializable version of the configuration
+        config_dict = {
+            "expiration_strategy": {
+                "target_dte_preferences": config.expiration_strategy.target_dte_preferences,
+                "search_window_days": config.expiration_strategy.search_window_days,
+                "max_search_attempts": config.expiration_strategy.max_search_attempts,
+                "search_direction": config.expiration_strategy.search_direction,
+                "min_dte": config.expiration_strategy.min_dte,
+                "max_dte": config.expiration_strategy.max_dte,
+                "min_quality_threshold": config.expiration_strategy.min_quality_threshold,
+                "acceptable_quality_threshold": config.expiration_strategy.acceptable_quality_threshold
+            },
+            "data_source_strategy": {
+                "source_priority": [source.value for source in config.data_source_strategy.source_priority],
+                "max_retries_per_source": config.data_source_strategy.max_retries_per_source,
+                "inter_source_delay": config.data_source_strategy.inter_source_delay
+            },
+            "quality_config": {
+                "trigger_thresholds": {
+                    trigger.value: threshold
+                    for trigger, threshold in config.quality_config.trigger_thresholds.items()
+                },
+                "min_valid_strikes": config.quality_config.min_valid_strikes,
+                "max_spread_percentage": config.quality_config.max_spread_percentage,
+                "min_open_interest": config.quality_config.min_open_interest,
+                "max_data_age_minutes": config.quality_config.max_data_age_minutes
+            },
+            "global_config": {
+                "enable_fallback": config.enable_fallback,
+                "max_total_attempts": config.max_total_attempts,
+                "fallback_timeout_seconds": config.fallback_timeout_seconds,
+                "log_fallback_decisions": config.log_fallback_decisions,
+                "log_level": config.log_level
+            }
+        }
+
+        return {
+            "status": "success",
+            "config": config_dict
+        }
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to get fallback configuration: {e}")
+
+
+@app.put("/api/config/fallback")
+@app.put("/config/fallback")
+async def update_fallback_configuration(config_updates: dict):
+    """
+    Update intelligent fallback configuration settings.
+
+    Example payload:
+    {
+        "enable_fallback": true,
+        "expiration_strategy": {
+            "target_dte_preferences": [7, 14, 30, 60],
+            "search_window_days": 5
+        },
+        "quality_config": {
+            "min_valid_strikes": 3,
+            "max_spread_percentage": 0.3
+        }
+    }
+    """
+    try:
+        global _global_fallback_config
+        current_config = get_fallback_config()
+
+        # Update global configuration settings
+        if "enable_fallback" in config_updates:
+            current_config.enable_fallback = config_updates["enable_fallback"]
+        if "max_total_attempts" in config_updates:
+            current_config.max_total_attempts = config_updates["max_total_attempts"]
+        if "fallback_timeout_seconds" in config_updates:
+            current_config.fallback_timeout_seconds = config_updates["fallback_timeout_seconds"]
+        if "log_fallback_decisions" in config_updates:
+            current_config.log_fallback_decisions = config_updates["log_fallback_decisions"]
+
+        # Update expiration strategy settings
+        if "expiration_strategy" in config_updates:
+            exp_updates = config_updates["expiration_strategy"]
+            if "target_dte_preferences" in exp_updates:
+                current_config.expiration_strategy.target_dte_preferences = exp_updates["target_dte_preferences"]
+            if "search_window_days" in exp_updates:
+                current_config.expiration_strategy.search_window_days = exp_updates["search_window_days"]
+            if "max_search_attempts" in exp_updates:
+                current_config.expiration_strategy.max_search_attempts = exp_updates["max_search_attempts"]
+            if "search_direction" in exp_updates:
+                current_config.expiration_strategy.search_direction = exp_updates["search_direction"]
+            if "min_dte" in exp_updates:
+                current_config.expiration_strategy.min_dte = exp_updates["min_dte"]
+            if "max_dte" in exp_updates:
+                current_config.expiration_strategy.max_dte = exp_updates["max_dte"]
+            if "min_quality_threshold" in exp_updates:
+                current_config.expiration_strategy.min_quality_threshold = exp_updates["min_quality_threshold"]
+            if "acceptable_quality_threshold" in exp_updates:
+                current_config.expiration_strategy.acceptable_quality_threshold = exp_updates["acceptable_quality_threshold"]
+
+        # Update quality configuration settings
+        if "quality_config" in config_updates:
+            quality_updates = config_updates["quality_config"]
+            if "min_valid_strikes" in quality_updates:
+                current_config.quality_config.min_valid_strikes = quality_updates["min_valid_strikes"]
+            if "max_spread_percentage" in quality_updates:
+                current_config.quality_config.max_spread_percentage = quality_updates["max_spread_percentage"]
+            if "min_open_interest" in quality_updates:
+                current_config.quality_config.min_open_interest = quality_updates["min_open_interest"]
+            if "max_data_age_minutes" in quality_updates:
+                current_config.quality_config.max_data_age_minutes = quality_updates["max_data_age_minutes"]
+
+        return {
+            "status": "success",
+            "message": "Fallback configuration updated successfully",
+            "updated_settings": config_updates
+        }
+
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to update fallback configuration: {e}")
+
+
+@app.get("/api/config/fallback/recommendations/{ticker}")
+@app.get("/config/fallback/recommendations/{ticker}")
+async def get_recommended_expiration_dates_endpoint(ticker: str):
+    """Get recommended expiration dates for a ticker based on liquidity patterns."""
+    try:
+        fetcher = PriceDataFetcher()
+        recommended_dates = fetcher.get_recommended_expiration_dates(ticker.upper())
+
+        return {
+            "status": "success",
+            "ticker": ticker.upper(),
+            "recommended_expiration_dates": recommended_dates,
+            "note": "These dates are selected for higher liquidity and better data quality"
+        }
+
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to get recommendations: {e}")
+
+
+@app.get("/api/config/fallback/stats")
+@app.get("/config/fallback/stats")
+async def get_fallback_execution_stats():
+    """Get statistics about fallback execution performance."""
+    try:
+        # Initialize a manager to get stats (this could be enhanced to track global stats)
+        config = get_fallback_config()
+        manager = DataQualityFallbackManager(config)
+
+        stats = manager.get_execution_stats()
+
+        return {
+            "status": "success",
+            "execution_stats": stats,
+            "note": "Statistics are reset when the service restarts"
+        }
+
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to get fallback stats: {e}")
+
+
+@app.post("/api/config/fallback/reset")
+@app.post("/config/fallback/reset")
+async def reset_fallback_configuration():
+    """Reset fallback configuration to default settings."""
+    try:
+        global _global_fallback_config
+        _global_fallback_config = create_default_fallback_config()
+
+        return {
+            "status": "success",
+            "message": "Fallback configuration reset to default settings"
+        }
+
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to reset fallback configuration: {e}")

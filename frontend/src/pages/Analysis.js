@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, Component } from 'react';
 import axios from 'axios';
 import Plot from 'react-plotly.js';
 import {
@@ -47,8 +47,207 @@ import {
   Shield as ShieldIcon,
   CheckCircle as CheckCircleIcon,
   Search as SearchIcon,
-  History as HistoryIcon
+  History as HistoryIcon,
+  Error as ErrorIcon,
+  HourglassEmpty as HourglassEmptyIcon,
+  Info as InfoIcon,
+  Build as BuildIcon,
+  Skeleton as SkeletonIcon
 } from '@mui/icons-material';
+
+// Import enhanced quality components
+import DataQualityCard from '../components/DataQualityCard';
+import {
+  CautionBanner,
+  CautionChip,
+  StrategyCardWithCaution,
+  ConfidenceIndicator,
+  QualityScoreBadge
+} from '../components/CautionModeIndicator';
+
+// Missing Data Detection Utilities
+const MissingDataStates = {
+  LOADING: 'LOADING',
+  GPT_RESPONSE_MISSING: 'GPT_RESPONSE_MISSING',
+  TRADER_AGENT_FAILED: 'TRADER_AGENT_FAILED',
+  SYSTEM_ERROR: 'SYSTEM_ERROR',
+  DATA_QUALITY_ERROR: 'DATA_QUALITY_ERROR',
+  DATA_QUALITY_CAUTION: 'DATA_QUALITY_CAUTION',  // NEW: Caution mode state
+  PROCESSING: 'PROCESSING',
+  PARTIAL_SUCCESS: 'PARTIAL_SUCCESS',
+  COMPLETE: 'COMPLETE',
+  COMPLETE_WITH_CAUTION: 'COMPLETE_WITH_CAUTION'  // NEW: Complete but with warnings
+};
+
+const detectStrategyState = (strategy, gptVerdict, analysisResult, setCautionModeActive, executeAnalysis, ticker, selectedExpiration, riskFreeRate, analysisMethod, selectedModel) => {
+  if (!strategy) {
+    return { state: MissingDataStates.LOADING, message: 'Strategy data loading...' };
+  }
+
+  // Extract quality assessment data from analysis result
+  const qualityAssessment = analysisResult?.error_details?.quality_assessment || null;
+  const cautionModeActive = analysisResult?.caution_mode_active || false;
+
+  // Check for known error types from backend fallbacks
+  const errorTypes = {
+    'GPT Response Missing': MissingDataStates.GPT_RESPONSE_MISSING,
+    'Trader Agent Failed': MissingDataStates.TRADER_AGENT_FAILED,
+    'System Error': MissingDataStates.SYSTEM_ERROR,
+    'Data Quality Error': MissingDataStates.DATA_QUALITY_ERROR
+  };
+
+  if (errorTypes[strategy.type]) {
+    // Enhanced: Check if caution mode is possible for data quality errors
+    if (strategy.type === 'Data Quality Error' && qualityAssessment?.can_proceed_with_caution) {
+      return {
+        state: MissingDataStates.DATA_QUALITY_CAUTION,
+        message: strategy.description || 'No additional details available',
+        originalError: strategy.type,
+        qualityAssessment: qualityAssessment,
+        allowCaution: true
+      };
+    } else {
+      return {
+        state: errorTypes[strategy.type],
+        message: strategy.description || 'No additional details available',
+        originalError: strategy.type,
+        qualityAssessment: qualityAssessment
+      };
+    }
+  }
+
+  // Check if we're running in caution mode (analysis succeeded but with warnings)
+  if (cautionModeActive && strategy.legs && strategy.legs.length > 0) {
+    return {
+      state: MissingDataStates.COMPLETE_WITH_CAUTION,
+      message: 'Strategy complete but running with data quality warnings',
+      qualityScore: qualityAssessment?.combined_score || 0,
+      qualityLevel: qualityAssessment?.overall_quality_level || 'unknown'
+    };
+  }
+
+  // Check for placeholder/generic values
+  if (strategy.confidence === 'Low' && strategy.time_horizon === 'Unknown') {
+    return {
+      state: MissingDataStates.PARTIAL_SUCCESS,
+      message: 'Trading strategy incomplete - some analysis data available'
+    };
+  }
+
+  // Check if strategy has valid legs for execution
+  if (!strategy.legs || strategy.legs.length === 0) {
+    return {
+      state: MissingDataStates.PARTIAL_SUCCESS,
+      message: 'Strategy concept available but not executable'
+    };
+  }
+
+  return { state: MissingDataStates.COMPLETE, message: 'Strategy complete' };
+};
+
+const detectGptVerdictState = (gptVerdict) => {
+  if (!gptVerdict) {
+    return { state: MissingDataStates.LOADING, message: 'Analysis processing...' };
+  }
+
+  // Check if we have analyst data but no execution recommendations
+  const hasAnalystData = gptVerdict.rationale || gptVerdict.summary_html || gptVerdict.final_bias;
+  const hasExecutionRecs = gptVerdict.execution_recommendations?.primary_strategy?.type !== 'GPT Response Missing';
+
+  if (hasAnalystData && !hasExecutionRecs) {
+    return {
+      state: MissingDataStates.PARTIAL_SUCCESS,
+      message: 'Market analysis complete, trading strategies processing...',
+      availableData: {
+        rationale: !!gptVerdict.rationale,
+        summary: !!gptVerdict.summary_html,
+        bias: !!gptVerdict.final_bias,
+        keyPoints: !!(gptVerdict.key_reasoning_points?.length),
+        riskFactors: !!(gptVerdict.risk_factors?.length)
+      }
+    };
+  }
+
+  if (hasAnalystData && hasExecutionRecs) {
+    return { state: MissingDataStates.COMPLETE, message: 'Analysis complete' };
+  }
+
+  return {
+    state: MissingDataStates.PROCESSING,
+    message: 'Analyzing market data and generating insights...'
+  };
+};
+
+const isPlaceholderValue = (value, field) => {
+  const placeholderValues = {
+    allocation: ['Conservative allocation', 'No GPT guidance provided'],
+    justification: ['No GPT guidance provided'],
+    guidance: ['Use standard risk management', 'Use standard profit targets']
+  };
+
+  return placeholderValues[field]?.includes(value) || false;
+};
+
+// Skeleton Loader Components
+const StrategySkeleton = () => (
+  <Card variant="outlined" sx={{ mb: 2 }}>
+    <CardContent>
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+        <Box sx={{ width: '60%', height: 24, bgcolor: 'grey.300', borderRadius: 1, animation: 'pulse 1.5s ease-in-out infinite' }} />
+        <Box sx={{ width: 100, height: 24, bgcolor: 'grey.300', borderRadius: 12 }} />
+      </Box>
+
+      <Typography variant="subtitle2" gutterBottom>Strategy Legs:</Typography>
+      <Paper sx={{ p: 1, mb: 2, bgcolor: '#f5f5f5' }}>
+        {[1, 2].map((i) => (
+          <Box key={i} sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
+            <Box sx={{ width: '80%', height: 16, bgcolor: 'grey.300', borderRadius: 1 }} />
+          </Box>
+        ))}
+      </Paper>
+
+      <Box sx={{ width: '100%', height: 36, bgcolor: 'grey.300', borderRadius: 1 }} />
+    </CardContent>
+  </Card>
+);
+
+const GptInsightsSkeleton = () => (
+  <Paper variant="outlined" sx={{ mb: 3, p: 2, bgcolor: '#f8f9fa' }}>
+    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+        <HourglassEmptyIcon color="primary" sx={{ animation: 'pulse 1.5s ease-in-out infinite' }} />
+        <Typography variant="h6">AI Trading Insights Processing...</Typography>
+      </Box>
+    </Box>
+
+    <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
+      <Typography variant="subtitle2" sx={{ mr: 1 }}>Market Bias:</Typography>
+      <Box sx={{ width: 80, height: 24, bgcolor: 'grey.300', borderRadius: 12 }} />
+    </Box>
+
+    <Box sx={{ mt: 2 }}>
+      <Paper elevation={0} sx={{ p: 2, mb: 2, bgcolor: '#f0f7ff', borderLeft: '4px solid #1976d2' }}>
+        <Box sx={{ width: '40%', height: 20, bgcolor: 'grey.300', borderRadius: 1, mb: 1 }} />
+        <Box sx={{ width: '100%', height: 16, bgcolor: 'grey.300', borderRadius: 1, mb: 1 }} />
+        <Box sx={{ width: '80%', height: 16, bgcolor: 'grey.300', borderRadius: 1 }} />
+      </Paper>
+
+      <Paper variant="outlined" sx={{ p: 2, mb: 2, bgcolor: '#f8f9ff' }}>
+        <Box sx={{ width: '30%', height: 16, bgcolor: 'grey.300', borderRadius: 1, mb: 1 }} />
+        <Grid container spacing={2}>
+          <Grid item xs={6}>
+            <Box sx={{ width: '100%', height: 14, bgcolor: 'grey.300', borderRadius: 1, mb: 1 }} />
+            <Box sx={{ width: '80%', height: 16, bgcolor: 'grey.300', borderRadius: 1 }} />
+          </Grid>
+          <Grid item xs={6}>
+            <Box sx={{ width: '100%', height: 14, bgcolor: 'grey.300', borderRadius: 1, mb: 1 }} />
+            <Box sx={{ width: 60, height: 24, bgcolor: 'grey.300', borderRadius: 12 }} />
+          </Grid>
+        </Grid>
+      </Paper>
+    </Box>
+  </Paper>
+);
 
 // A custom hook to keep state in localStorage
 function useStickyState(defaultValue, key) {
@@ -93,22 +292,37 @@ const AnalysisCard = ({ title, children, action }) => (
 );
 
 const CandlestickChart = ({ plotData, ticker }) => {
-  if (!plotData || !plotData.data) {
+  if (!plotData || !plotData.data || !plotData.columns || !plotData.index) {
     return <Typography color="text.secondary">Chart data is not available.</Typography>;
   }
 
   const { index: dates, columns, data } = plotData;
+
+  // Ensure data and columns are arrays
+  if (!Array.isArray(data) || !Array.isArray(columns) || !Array.isArray(dates)) {
+    return <Typography color="text.secondary">Invalid chart data format.</Typography>;
+  }
+
   const findCol = (name) => columns.indexOf(name);
 
   const traces = [];
 
-  // Candlestick base
+  // Candlestick base - check for required columns
+  const closeIdx = findCol('Close');
+  const highIdx = findCol('High');
+  const lowIdx = findCol('Low');
+  const openIdx = findCol('Open');
+
+  if (closeIdx === -1 || highIdx === -1 || lowIdx === -1 || openIdx === -1) {
+    return <Typography color="text.secondary">Required OHLC columns not found in chart data.</Typography>;
+  }
+
   traces.push({
     x: dates,
-    close: data.map(row => row[findCol('Close')]),
-    high: data.map(row => row[findCol('High')]),
-    low: data.map(row => row[findCol('Low')]),
-    open: data.map(row => row[findCol('Open')]),
+    close: data.map(row => Array.isArray(row) && row.length > closeIdx ? row[closeIdx] : undefined),
+    high: data.map(row => Array.isArray(row) && row.length > highIdx ? row[highIdx] : undefined),
+    low: data.map(row => Array.isArray(row) && row.length > lowIdx ? row[lowIdx] : undefined),
+    open: data.map(row => Array.isArray(row) && row.length > openIdx ? row[openIdx] : undefined),
     type: 'candlestick',
     name: ticker,
   });
@@ -118,7 +332,7 @@ const CandlestickChart = ({ plotData, ticker }) => {
   if (sma10Idx !== -1) {
     traces.push({
       x: dates,
-      y: data.map(row => row[sma10Idx]),
+      y: data.map(row => Array.isArray(row) && row.length > sma10Idx ? row[sma10Idx] : undefined),
       type: 'scatter',
       mode: 'lines',
       name: 'SMA 10',
@@ -130,7 +344,7 @@ const CandlestickChart = ({ plotData, ticker }) => {
   if (sma20Idx !== -1) {
     traces.push({
       x: dates,
-      y: data.map(row => row[sma20Idx]),
+      y: data.map(row => Array.isArray(row) && row.length > sma20Idx ? row[sma20Idx] : undefined),
       type: 'scatter',
       mode: 'lines',
       name: 'SMA 20',
@@ -142,7 +356,7 @@ const CandlestickChart = ({ plotData, ticker }) => {
   if (sma50Idx !== -1) {
     traces.push({
       x: dates,
-      y: data.map(row => row[sma50Idx]),
+      y: data.map(row => Array.isArray(row) && row.length > sma50Idx ? row[sma50Idx] : undefined),
       type: 'scatter',
       mode: 'lines',
       name: 'SMA 50',
@@ -154,7 +368,7 @@ const CandlestickChart = ({ plotData, ticker }) => {
   if (sma100Idx !== -1) {
     traces.push({
       x: dates,
-      y: data.map(row => row[sma100Idx]),
+      y: data.map(row => Array.isArray(row) && row.length > sma100Idx ? row[sma100Idx] : undefined),
       type: 'scatter',
       mode: 'lines',
       name: 'SMA 100',
@@ -166,7 +380,7 @@ const CandlestickChart = ({ plotData, ticker }) => {
   if (sma200Idx !== -1) {
     traces.push({
       x: dates,
-      y: data.map(row => row[sma200Idx]),
+      y: data.map(row => Array.isArray(row) && row.length > sma200Idx ? row[sma200Idx] : undefined),
       type: 'scatter',
       mode: 'lines',
       name: 'SMA 200',
@@ -176,18 +390,18 @@ const CandlestickChart = ({ plotData, ticker }) => {
 
   // Add Volume trace
   const volumeIdx = findCol('Volume');
-  const closeIdx = findCol('Close');
   if (volumeIdx !== -1 && closeIdx !== -1) {
     traces.push({
       x: dates,
-      y: data.map(row => row[volumeIdx]),
+      y: data.map(row => Array.isArray(row) && row.length > volumeIdx ? row[volumeIdx] : undefined),
       type: 'bar',
       name: 'Volume',
       yaxis: 'y2',
       marker: {
-        color: data.map((d, i) => {
-          if (i > 0) {
-            return data[i][closeIdx] >= data[i - 1][closeIdx] ? 'rgba(44, 160, 44, 0.7)' : 'rgba(214, 39, 40, 0.7)';
+        color: data.map((row, i) => {
+          if (i > 0 && Array.isArray(row) && Array.isArray(data[i - 1]) &&
+              row.length > closeIdx && data[i - 1].length > closeIdx) {
+            return row[closeIdx] >= data[i - 1][closeIdx] ? 'rgba(44, 160, 44, 0.7)' : 'rgba(214, 39, 40, 0.7)';
           }
           return 'rgba(156, 156, 156, 0.7)';
         }),
@@ -263,19 +477,25 @@ const MacroInsights = ({ onRateCalculated }) => {
     if (loading) return <CircularProgress size={24} />;
     if (!futures || futures.error || Object.keys(futures).length === 0) return <Typography color="error">Could not load futures data.</Typography>;
 
+    // Additional safety checks for table structure
+    const firstKey = Object.keys(futures)[0];
+    if (!firstKey || !futures[firstKey] || typeof futures[firstKey] !== 'object') {
+      return <Typography color="error">Invalid futures data structure.</Typography>;
+    }
+
     return (
       <TableContainer component={Paper} variant="outlined">
         <Table size="small">
           <TableHead>
             <TableRow sx={{ backgroundColor: '#f5f5f5' }}>
-              {Object.keys(futures[Object.keys(futures)[0]]).map(header => <TableCell key={header} sx={{ fontWeight: 'bold' }}>{header}</TableCell>)}
+              {Object.keys(futures[firstKey]).map(header => <TableCell key={header} sx={{ fontWeight: 'bold' }}>{header}</TableCell>)}
             </TableRow>
           </TableHead>
           <TableBody>
             {Object.entries(futures).map(([ticker, data]) => (
               <TableRow key={ticker}>
-                {Object.entries(data).map(([key, value]) => (
-                  <TableCell key={key} sx={{ color: key === 'Change' && (value.startsWith('+') ? 'success.main' : 'error.main') }}>
+                {Object.entries(data || {}).map(([key, value]) => (
+                  <TableCell key={key} sx={{ color: key === 'Change' && (typeof value === 'string' && value.startsWith('+') ? 'success.main' : 'error.main') }}>
                     {value}
                   </TableCell>
                 ))}
@@ -330,7 +550,7 @@ const MacroInsights = ({ onRateCalculated }) => {
   );
 };
 
-const StrategyOrder = ({ strategy, strategies = [], ticker, expirationDate, gptVerdict }) => {
+const StrategyOrder = ({ strategy, strategies = [], ticker, expirationDate, gptVerdict, analysisResult, setCautionModeActive, executeAnalysis, selectedExpiration, riskFreeRate, analysisMethod, selectedModel }) => {
     const [isOrdering, setIsOrdering] = useState({});
     const [orderStatus, setOrderStatus] = useState({});    
     const [showGptInsights, setShowGptInsights] = useState(false);
@@ -371,7 +591,7 @@ const StrategyOrder = ({ strategy, strategies = [], ticker, expirationDate, gptV
                     execution_recommendations: {
                         ...(gptVerdict.execution_recommendations || {}),
                         selected_strategy: {
-                            name: strategy.name,
+                            name: strategy.name || strategy.type,
                             confidence: strategy.confidence || 'Medium'
                         }
                     }
@@ -391,14 +611,219 @@ const StrategyOrder = ({ strategy, strategies = [], ticker, expirationDate, gptV
     };
 
     if (allStrategies.length === 0) {
-        return null;
+        // Show helpful message when no strategies are available
+        const verdictState = detectGptVerdictState(gptVerdict);
+
+        if (verdictState.state === MissingDataStates.LOADING || verdictState.state === MissingDataStates.PROCESSING) {
+            return (
+                <AnalysisCard title="Strategy Recommendations">
+                    <GptInsightsSkeleton />
+                    <StrategySkeleton />
+                </AnalysisCard>
+            );
+        }
+
+        return (
+            <AnalysisCard title="Strategy Recommendations">
+                <Alert severity="info" sx={{ mb: 2 }}>
+                    <AlertTitle>No Executable Strategies Available</AlertTitle>
+                    {gptVerdict ?
+                        'The market analysis is available above, but no executable trading strategies were generated. This may be due to limited options data or market conditions.' :
+                        'No strategies are currently available. Try running an analysis first.'
+                    }
+                </Alert>
+
+                {gptVerdict && (
+                    <Paper variant="outlined" sx={{ p: 2, bgcolor: '#f0f9ff' }}>
+                        <Typography variant="subtitle2" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                            <InfoIcon fontSize="small" color="info" />
+                            Available Market Insights
+                        </Typography>
+                        <Typography variant="body2" color="text.secondary">
+                            Review the market analysis above for trading insights and consider manual strategy implementation based on the market bias and risk factors provided.
+                        </Typography>
+                    </Paper>
+                )}
+            </AnalysisCard>
+        );
     }
 
     const renderStrategyCard = (strategy, index) => {
-        if (!strategy || !strategy.name || strategy.name === 'None' || !strategy.legs || strategy.legs.length === 0) {
-            return null;
+        const strategyState = detectStrategyState(strategy, gptVerdict, analysisResult, setCautionModeActive, executeAnalysis, ticker, selectedExpiration, riskFreeRate, analysisMethod, selectedModel);
+
+        // Handle loading/missing strategy states
+        if (strategyState.state === MissingDataStates.LOADING) {
+            return <StrategySkeleton key={index} />;
         }
 
+        // Handle error states with informative cards
+        if ([MissingDataStates.GPT_RESPONSE_MISSING, MissingDataStates.TRADER_AGENT_FAILED,
+             MissingDataStates.SYSTEM_ERROR, MissingDataStates.DATA_QUALITY_ERROR,
+             MissingDataStates.DATA_QUALITY_CAUTION].includes(strategyState.state)) {
+
+            const errorConfig = {
+                [MissingDataStates.GPT_RESPONSE_MISSING]: {
+                    icon: <InfoIcon color="info" />,
+                    title: 'Trading Strategy Processing',
+                    bgColor: '#e3f2fd',
+                    borderColor: '#2196f3',
+                    severity: 'info',
+                    actions: ['View market analysis while strategies are generated', 'Check back in a few moments']
+                },
+                [MissingDataStates.TRADER_AGENT_FAILED]: {
+                    icon: <ErrorIcon color="error" />,
+                    title: 'Strategy Generation Failed',
+                    bgColor: '#ffebee',
+                    borderColor: '#f44336',
+                    severity: 'error',
+                    actions: ['Try refreshing the analysis', 'Consider manual strategy selection based on market bias']
+                },
+                [MissingDataStates.SYSTEM_ERROR]: {
+                    icon: <BuildIcon color="warning" />,
+                    title: 'System Processing Error',
+                    bgColor: '#fff3e0',
+                    borderColor: '#ff9800',
+                    severity: 'warning',
+                    actions: ['Retry the analysis', 'Contact support if the issue persists']
+                },
+                [MissingDataStates.DATA_QUALITY_ERROR]: {
+                    icon: <WarningIcon color="warning" />,
+                    title: 'Insufficient Data Quality',
+                    bgColor: '#fff8e1',
+                    borderColor: '#ffc107',
+                    severity: 'warning',
+                    actions: ['Try a different expiration date', 'Ensure the ticker has active options trading']
+                },
+                [MissingDataStates.DATA_QUALITY_CAUTION]: {
+                    icon: <ShieldIcon color="warning" />,
+                    title: 'Data Quality Assessment',
+                    bgColor: '#fff8e1',
+                    borderColor: '#ffc107',
+                    severity: 'warning',
+                    actions: ['Review quality details below', 'Consider proceeding with caution'],
+                    useEnhancedDisplay: true  // Flag to use DataQualityCard
+                }
+            };
+
+            const config = errorConfig[strategyState.state];
+
+            // Use enhanced DataQualityCard for DATA_QUALITY_CAUTION states
+            if (strategyState.state === MissingDataStates.DATA_QUALITY_CAUTION && strategyState.qualityAssessment) {
+                const handleProceedWithCaution = () => {
+                    // Set caution mode and re-run analysis
+                    setCautionModeActive(true);
+                    executeAnalysis({
+                        ticker: ticker,
+                        expiration: expirationDate,
+                        riskFreeRate: riskFreeRate,
+                        analysisMethod: analysisMethod,
+                        gptModel: selectedModel,
+                        cautionMode: true
+                    });
+                };
+
+                return (
+                    <DataQualityCard
+                        key={index}
+                        qualityData={strategyState.qualityAssessment}
+                        onProceedWithCaution={handleProceedWithCaution}
+                        allowCaution={strategyState.allowCaution}
+                        showRetryOptions={true}
+                    />
+                );
+            }
+
+            // Standard error card for other states
+            return (
+                <Card key={index} variant="outlined" sx={{ mb: 2, bgcolor: config.bgColor, borderColor: config.borderColor }}>
+                    <CardContent>
+                        <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
+                            {config.icon}
+                            <Typography variant="h6" sx={{ ml: 1, fontWeight: 'medium' }}>
+                                {config.title}
+                            </Typography>
+                        </Box>
+
+                        <Typography variant="body2" color="text.secondary" paragraph>
+                            {strategyState.message}
+                        </Typography>
+
+                        <Alert severity={config.severity} sx={{ mt: 2 }}>
+                            <AlertTitle>What you can do:</AlertTitle>
+                            <Box component="ul" sx={{ mt: 1, pl: 2, mb: 0 }}>
+                                {config.actions.map((action, i) => (
+                                    <li key={i}>
+                                        <Typography variant="body2">{action}</Typography>
+                                    </li>
+                                ))}
+                            </Box>
+                        </Alert>
+
+                        {/* Show available data if in PARTIAL_SUCCESS state */}
+                        {strategyState.state === MissingDataStates.PARTIAL_SUCCESS && gptVerdict && (
+                            <Paper variant="outlined" sx={{ mt: 2, p: 2, bgcolor: 'rgba(33, 150, 243, 0.08)' }}>
+                                <Typography variant="subtitle2" sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                                    <InfoIcon fontSize="small" color="info" />
+                                    Available Market Analysis
+                                </Typography>
+
+                                {gptVerdict.final_bias && (
+                                    <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
+                                        <Typography variant="body2" sx={{ mr: 1 }}>Market Bias:</Typography>
+                                        <Chip
+                                            label={gptVerdict.final_bias}
+                                            color={gptVerdict.final_bias?.includes('Bull') ? 'success' : gptVerdict.final_bias?.includes('Bear') ? 'error' : 'default'}
+                                            size="small"
+                                        />
+                                    </Box>
+                                )}
+
+                                {gptVerdict.rationale && (
+                                    <Typography variant="body2" color="text.secondary" sx={{
+                                        maxHeight: 60,
+                                        overflow: 'hidden',
+                                        textOverflow: 'ellipsis',
+                                        display: '-webkit-box',
+                                        WebkitLineClamp: 3,
+                                        WebkitBoxOrient: 'vertical'
+                                    }}>
+                                        {gptVerdict.rationale.substring(0, 200)}...
+                                    </Typography>
+                                )}
+                            </Paper>
+                        )}
+                    </CardContent>
+                </Card>
+            );
+        }
+
+        // Handle partial success - strategy concept but not executable
+        if (strategyState.state === MissingDataStates.PARTIAL_SUCCESS && (!strategy.legs || strategy.legs.length === 0)) {
+            return (
+                <Card key={index} variant="outlined" sx={{ mb: 2, bgcolor: '#fff3e0', borderColor: '#ff9800' }}>
+                    <CardContent>
+                        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                            <Typography variant="h6">{strategy.name || strategy.type || 'Trading Strategy'}</Typography>
+                            <Chip label="Concept Only" color="warning" size="small" variant="outlined" />
+                        </Box>
+
+                        {strategy.description && (
+                            <Typography variant="body2" color="text.secondary" paragraph>
+                                {strategy.description}
+                            </Typography>
+                        )}
+
+                        <Alert severity="info" sx={{ mt: 2 }}>
+                            <AlertTitle>Strategy Not Executable</AlertTitle>
+                            This alternative strategy is for context only; the AI did not provide execution legs (strikes, actions) for one-click execution.
+                            Use the primary strategy above to execute, or implement this idea manually from the description.
+                        </Alert>
+                    </CardContent>
+                </Card>
+            );
+        }
+
+        // Render normal strategy (COMPLETE state)
         const confidence = strategy.confidence || 'Medium';
         const confidenceColor = {
             'High': 'success',
@@ -410,25 +835,35 @@ const StrategyOrder = ({ strategy, strategies = [], ticker, expirationDate, gptV
             <Card key={index} variant="outlined" sx={{ mb: 2 }}>
                 <CardContent>
                     <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-                        <Typography variant="h6">{strategy.name}</Typography>
+                        <Typography variant="h6">{strategy.name || strategy.type}</Typography>
                         <Chip label={`${confidence} Confidence`} color={confidenceColor} size="small" variant="outlined" />
                     </Box>
-                    
+
                     <Typography variant="subtitle2" gutterBottom>Strategy Legs:</Typography>
                     <List dense disablePadding sx={{ mb: 2, bgcolor: '#f5f5f5', borderRadius: 1 }}>
-                        {strategy.legs.map((leg, i) => (
+                        {Array.isArray(strategy.legs) ? strategy.legs.map((leg, i) => (
                             <ListItem key={i}>
-                                <ListItemText 
+                                <ListItemText
                                     primary={
                                         <Typography variant="body2">
                                             <strong>{leg.action}</strong> {leg.strike ? `$${leg.strike.toFixed(2)}` : ''} {leg.right}
                                         </Typography>
-                                    } 
+                                    }
                                 />
                             </ListItem>
-                        ))}
+                        )) : (
+                            <ListItem>
+                                <ListItemText
+                                    primary={
+                                        <Typography variant="body2" color="text.secondary">
+                                            Strategy details not available
+                                        </Typography>
+                                    }
+                                />
+                            </ListItem>
+                        )}
                     </List>
-                    
+
                     {(strategy.profit_target || strategy.stop_loss) && (
                         <Grid container spacing={2} sx={{ mb: 2 }}>
                             {typeof strategy.profit_target === 'number' && (
@@ -449,18 +884,18 @@ const StrategyOrder = ({ strategy, strategies = [], ticker, expirationDate, gptV
                             )}
                         </Grid>
                     )}
-                    
-                    <Button 
-                        variant="contained" 
-                        color="success" 
-                        fullWidth 
+
+                    <Button
+                        variant="contained"
+                        color="success"
+                        fullWidth
                         onClick={() => handleExecute(strategy, index)}
                         disabled={isOrdering[index]}
                         startIcon={isOrdering[index] ? <CircularProgress size={20} color="inherit" /> : <CheckCircleIcon />}
                     >
-                        {isOrdering[index] ? 'Placing Order...' : `Execute ${strategy.name}`}
+                        {isOrdering[index] ? 'Placing Order...' : `Execute ${strategy.name || strategy.type}`}
                     </Button>
-                    
+
                     {orderStatus[index] && (
                         <Alert severity={orderStatus[index].status === 'error' ? 'error' : 'success'} sx={{ mt: 2 }}>
                             <AlertTitle>{orderStatus[index].status === 'error' ? 'Error' : 'Success'}</AlertTitle>
@@ -480,159 +915,328 @@ const StrategyOrder = ({ strategy, strategies = [], ticker, expirationDate, gptV
     return (
         <AnalysisCard title={allStrategies.length > 1 ? "Recommended Strategies" : "Execute Strategy"}>
             
-            {/* GPT Insights Section */}
-            {gptVerdict && (
-                <Paper variant="outlined" sx={{ mb: 3, p: 2, bgcolor: '#f8f9fa' }}>
-                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
-                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                            <SmartToyIcon color="primary" />
-                            <Typography variant="h6">AI Trading Insights</Typography>
-                        </Box>
-                        <Button 
-                            size="small" 
-                            variant="outlined" 
-                            onClick={() => setShowGptInsights(!showGptInsights)}
-                            endIcon={showGptInsights ? <ExpandLessIcon /> : <ExpandMoreIcon />}
-                        >
-                            {showGptInsights ? 'Hide Details' : 'Show Details'}
-                        </Button>
-                    </Box>
-                    
-                    <Box sx={{ display: 'flex', alignItems: 'center', mb: showGptInsights ? 2 : 0 }}>
-                        <Typography variant="subtitle2" sx={{ mr: 1 }}>Market Bias:</Typography>
-                        <Chip 
-                            label={gptVerdict.final_bias || 'Neutral'} 
-                            color={gptVerdict.final_bias?.includes('Bull') ? 'success' : gptVerdict.final_bias?.includes('Bear') ? 'error' : 'default'}
-                            size="small"
-                        />
-                    </Box>
-                    
-                    <Collapse in={showGptInsights}>
-                        <Box sx={{ mt: 2 }}>
-                            {gptVerdict.execution_recommendations?.primary_strategy && (
-                                <Paper elevation={0} sx={{ p: 2, mb: 2, bgcolor: '#f0f7ff', borderLeft: '4px solid #1976d2' }}>
-                                    <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
-                                        <CheckCircleIcon color="primary" sx={{ mr: 1 }} />
-                                        <Typography variant="subtitle1" color="primary.main" fontWeight="bold">Recommended Strategy</Typography>
-                                    </Box>
-                                    <Typography variant="body2" paragraph>
-                                        {gptVerdict.execution_recommendations.primary_strategy.description || 'No specific strategy description available.'}
-                                    </Typography>
-                                    <Stack direction="row" spacing={2}>
-                                        <Typography variant="caption">
-                                            <strong>Confidence:</strong> {gptVerdict.execution_recommendations.primary_strategy.confidence}
+            {/* Enhanced GPT Insights Section with Better Missing Data Handling */}
+            {(() => {
+                const verdictState = detectGptVerdictState(gptVerdict);
+
+                // Show loading skeleton while processing
+                if (verdictState.state === MissingDataStates.LOADING || verdictState.state === MissingDataStates.PROCESSING) {
+                    return <GptInsightsSkeleton />;
+                }
+
+                // Show partial data when analysis is available but execution recommendations are missing
+                if (verdictState.state === MissingDataStates.PARTIAL_SUCCESS) {
+                    return (
+                        <Paper variant="outlined" sx={{ mb: 3, p: 2, bgcolor: '#f8f9fa' }}>
+                            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
+                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                    <SmartToyIcon color="primary" />
+                                    <Typography variant="h6">Market Analysis Available</Typography>
+                                </Box>
+                                <Button
+                                    size="small"
+                                    variant="outlined"
+                                    onClick={() => setShowGptInsights(!showGptInsights)}
+                                    endIcon={showGptInsights ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+                                >
+                                    {showGptInsights ? 'Hide Details' : 'Show Details'}
+                                </Button>
+                            </Box>
+
+                            <Alert severity="info" sx={{ mb: 2 }}>
+                                <AlertTitle>Trading Strategies Processing</AlertTitle>
+                                {verdictState.message} The market analysis below is complete and available for review.
+                            </Alert>
+
+                            {gptVerdict.final_bias && (
+                                <Box sx={{ display: 'flex', alignItems: 'center', mb: showGptInsights ? 2 : 0 }}>
+                                    <Typography variant="subtitle2" sx={{ mr: 1 }}>Market Bias:</Typography>
+                                    <Chip
+                                        label={gptVerdict.final_bias}
+                                        color={gptVerdict.final_bias?.includes('Bull') ? 'success' : gptVerdict.final_bias?.includes('Bear') ? 'error' : 'default'}
+                                        size="small"
+                                    />
+                                </Box>
+                            )}
+
+                            <Collapse in={showGptInsights}>
+                                <Box sx={{ mt: 2 }}>
+                                    {/* Show placeholder for strategy recommendations */}
+                                    <Paper elevation={0} sx={{ p: 2, mb: 2, bgcolor: '#fff3e0', borderLeft: '4px solid #ff9800' }}>
+                                        <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
+                                            <HourglassEmptyIcon color="warning" sx={{ mr: 1 }} />
+                                            <Typography variant="subtitle1" color="warning.main" fontWeight="bold">Strategy Recommendations</Typography>
+                                        </Box>
+                                        <Typography variant="body2" color="text.secondary">
+                                            Trading strategies are being generated based on the market analysis. This may take a few moments.
                                         </Typography>
-                                        {gptVerdict.execution_recommendations.primary_strategy.time_horizon && (
-                                            <Typography variant="caption">
-                                                <strong>Timeframe:</strong> {gptVerdict.execution_recommendations.primary_strategy.time_horizon}
+                                    </Paper>
+
+                                    {/* Show available analysis data */}
+                                    {gptVerdict.key_reasoning_points?.length > 0 && (
+                                        <Paper variant="outlined" sx={{ p: 2, mb: 2, bgcolor: '#f0f9ff' }}>
+                                            <Typography variant="subtitle2" color="info.main" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                                <LightbulbIcon fontSize="small" /> Key Analysis Points
                                             </Typography>
-                                        )}
-                                    </Stack>
-                                </Paper>
-                            )}
-                            
-                            {gptVerdict.execution_recommendations?.position_sizing && (
-                                <Paper variant="outlined" sx={{ p: 2, mb: 2, bgcolor: '#f8f9ff' }}>
-                                    <Typography variant="subtitle2" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                                        <TrendingUpIcon fontSize="small" /> Position Sizing
-                                    </Typography>
-                                    <Grid container spacing={2}>
-                                        <Grid item xs={6}>
-                                            <Typography variant="caption" color="text.secondary">Suggested Allocation</Typography>
-                                            <Typography variant="body2" fontWeight="medium">
-                                                {gptVerdict.execution_recommendations.position_sizing.suggested_allocation}
+                                            <List dense disablePadding>
+                                                {gptVerdict.key_reasoning_points.slice(0, 3).map((point, i) => (
+                                                    <ListItem key={i} disablePadding sx={{ mb: 0.5 }}>
+                                                        <ListItemText primary={point} primaryTypographyProps={{ variant: 'body2' }} />
+                                                    </ListItem>
+                                                ))}
+                                            </List>
+                                        </Paper>
+                                    )}
+
+                                    {gptVerdict.risk_factors?.length > 0 && (
+                                        <Paper variant="outlined" sx={{ p: 2, mb: 2, bgcolor: '#fef2f2', borderColor: '#fecaca' }}>
+                                            <Typography variant="subtitle2" color="error.main" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                                <WarningIcon fontSize="small" /> Risk Factors
                                             </Typography>
-                                        </Grid>
-                                        <Grid item xs={6}>
-                                            <Typography variant="caption" color="text.secondary">Risk Level</Typography>
-                                            <Chip 
-                                                label={gptVerdict.execution_recommendations.position_sizing.risk_level} 
-                                                size="small" 
-                                                color={gptVerdict.execution_recommendations.position_sizing.risk_level === 'Conservative' ? 'success' : 'warning'}
-                                                variant="outlined"
-                                            />
-                                        </Grid>
-                                        {gptVerdict.execution_recommendations.position_sizing.justification && (
-                                            <Grid item xs={12}>
-                                                <Typography variant="caption" color="text.secondary">Rationale</Typography>
-                                                <Typography variant="body2" fontStyle="italic">
-                                                    "{gptVerdict.execution_recommendations.position_sizing.justification}"
+                                            <List dense disablePadding>
+                                                {gptVerdict.risk_factors.slice(0, 3).map((risk, i) => (
+                                                    <ListItem key={i} disablePadding sx={{ mb: 0.5 }}>
+                                                        <ListItemText primary={risk} primaryTypographyProps={{ variant: 'body2' }} />
+                                                    </ListItem>
+                                                ))}
+                                            </List>
+                                        </Paper>
+                                    )}
+                                </Box>
+                            </Collapse>
+                        </Paper>
+                    );
+                }
+
+                // Show complete data when available
+                if (verdictState.state === MissingDataStates.COMPLETE && gptVerdict) {
+                    return (
+                        <Paper variant="outlined" sx={{ mb: 3, p: 2, bgcolor: '#f8f9fa' }}>
+                            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
+                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                    <SmartToyIcon color="primary" />
+                                    <Typography variant="h6">AI Trading Insights</Typography>
+                                    <Chip label="Complete" color="success" size="small" variant="outlined" />
+                                </Box>
+                                <Button
+                                    size="small"
+                                    variant="outlined"
+                                    onClick={() => setShowGptInsights(!showGptInsights)}
+                                    endIcon={showGptInsights ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+                                >
+                                    {showGptInsights ? 'Hide Details' : 'Show Details'}
+                                </Button>
+                            </Box>
+
+                            <Box sx={{ display: 'flex', alignItems: 'center', mb: showGptInsights ? 2 : 0 }}>
+                                <Typography variant="subtitle2" sx={{ mr: 1 }}>Market Bias:</Typography>
+                                <Chip
+                                    label={gptVerdict.final_bias || 'Neutral'}
+                                    color={gptVerdict.final_bias?.includes('Bull') ? 'success' : gptVerdict.final_bias?.includes('Bear') ? 'error' : 'default'}
+                                    size="small"
+                                />
+                            </Box>
+
+                            <Collapse in={showGptInsights}>
+                                <Box sx={{ mt: 2 }}>
+                                    {/* Strategy Recommendations with placeholder detection */}
+                                    {(() => {
+                                        const strategy = gptVerdict.execution_recommendations?.primary_strategy;
+                                        const isPlaceholder = strategy?.type === 'GPT Response Missing';
+
+                                        if (strategy && !isPlaceholder) {
+                                            return (
+                                                <Paper elevation={0} sx={{ p: 2, mb: 2, bgcolor: '#f0f7ff', borderLeft: '4px solid #1976d2' }}>
+                                                    <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
+                                                        <CheckCircleIcon color="primary" sx={{ mr: 1 }} />
+                                                        <Typography variant="subtitle1" color="primary.main" fontWeight="bold">
+                                                            Recommended Strategy: {strategy.type}
+                                                        </Typography>
+                                                    </Box>
+                                                    <Typography variant="body2" paragraph>
+                                                        {strategy.description || 'No specific strategy description available.'}
+                                                    </Typography>
+                                                    <Stack direction="row" spacing={2}>
+                                                        <Typography variant="caption">
+                                                            <strong>Confidence:</strong> {strategy.confidence}
+                                                        </Typography>
+                                                        {strategy.time_horizon && strategy.time_horizon !== 'Unknown' && (
+                                                            <Typography variant="caption">
+                                                                <strong>Timeframe:</strong> {strategy.time_horizon}
+                                                            </Typography>
+                                                        )}
+                                                    </Stack>
+                                                </Paper>
+                                            );
+                                        }
+                                        return null;
+                                    })()}
+
+                                    {/* Position Sizing with placeholder detection */}
+                                    {(() => {
+                                        const positioning = gptVerdict.execution_recommendations?.position_sizing;
+                                        if (!positioning) return null;
+
+                                        const isPlaceholderAllocation = isPlaceholderValue(positioning.suggested_allocation, 'allocation');
+                                        const isPlaceholderJustification = isPlaceholderValue(positioning.justification, 'justification');
+
+                                        return (
+                                            <Paper variant="outlined" sx={{
+                                                p: 2,
+                                                mb: 2,
+                                                bgcolor: isPlaceholderAllocation ? '#fff8e1' : '#f8f9ff',
+                                                ...(isPlaceholderAllocation && { borderColor: '#ffc107' })
+                                            }}>
+                                                <Typography variant="subtitle2" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                                    <TrendingUpIcon fontSize="small" /> Position Sizing
+                                                    {isPlaceholderAllocation && <Chip label="Generic" color="warning" size="small" variant="outlined" />}
                                                 </Typography>
-                                            </Grid>
-                                        )}
+                                                <Grid container spacing={2}>
+                                                    <Grid item xs={6}>
+                                                        <Typography variant="caption" color="text.secondary">Suggested Allocation</Typography>
+                                                        <Typography variant="body2" fontWeight="medium" sx={{
+                                                            fontStyle: isPlaceholderAllocation ? 'italic' : 'normal',
+                                                            color: isPlaceholderAllocation ? 'text.secondary' : 'text.primary'
+                                                        }}>
+                                                            {positioning.suggested_allocation}
+                                                        </Typography>
+                                                    </Grid>
+                                                    <Grid item xs={6}>
+                                                        <Typography variant="caption" color="text.secondary">Risk Level</Typography>
+                                                        <Chip
+                                                            label={positioning.risk_level}
+                                                            size="small"
+                                                            color={positioning.risk_level === 'Conservative' ? 'success' : 'warning'}
+                                                            variant={isPlaceholderAllocation ? 'outlined' : 'filled'}
+                                                        />
+                                                    </Grid>
+                                                    {positioning.justification && (
+                                                        <Grid item xs={12}>
+                                                            <Typography variant="caption" color="text.secondary">Rationale</Typography>
+                                                            <Typography variant="body2" fontStyle="italic" sx={{
+                                                                color: isPlaceholderJustification ? 'text.secondary' : 'text.primary'
+                                                            }}>
+                                                                "{positioning.justification}"
+                                                            </Typography>
+                                                        </Grid>
+                                                    )}
+                                                </Grid>
+                                            </Paper>
+                                        );
+                                    })()}
+
+                                    {/* Entry/Exit Conditions - show placeholders when empty */}
+                                    <Grid container spacing={2} sx={{ mb: 2 }}>
+                                        <Grid item xs={12} md={6}>
+                                            {gptVerdict.execution_recommendations?.entry_conditions?.length > 0 ? (
+                                                <Paper variant="outlined" sx={{ p: 2, height: '100%', bgcolor: '#f0fdf4', borderColor: '#bbf7d0' }}>
+                                                    <Typography variant="subtitle2" color="success.dark" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                                        <TrendingUpIcon fontSize="small" /> Entry Conditions
+                                                    </Typography>
+                                                    <List dense disablePadding>
+                                                        {gptVerdict.execution_recommendations.entry_conditions.slice(0, 3).map((condition, i) => (
+                                                            <ListItem key={i} disablePadding sx={{ mb: 0.5 }}>
+                                                                <ListItemText primary={condition} primaryTypographyProps={{ variant: 'caption', lineHeight: 1.4 }} />
+                                                            </ListItem>
+                                                        ))}
+                                                    </List>
+                                                </Paper>
+                                            ) : (
+                                                <Paper variant="outlined" sx={{ p: 2, height: '100%', bgcolor: '#f5f5f5', borderColor: '#e0e0e0' }}>
+                                                    <Typography variant="subtitle2" color="text.secondary" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                                        <InfoIcon fontSize="small" /> Entry Conditions
+                                                    </Typography>
+                                                    <Typography variant="body2" color="text.secondary" fontStyle="italic">
+                                                        No specific entry conditions provided. Use standard technical analysis.
+                                                    </Typography>
+                                                </Paper>
+                                            )}
+                                        </Grid>
+
+                                        <Grid item xs={12} md={6}>
+                                            {gptVerdict.execution_recommendations?.exit_conditions?.length > 0 ? (
+                                                <Paper variant="outlined" sx={{ p: 2, height: '100%', bgcolor: '#fff7ed', borderColor: '#ffedd5' }}>
+                                                    <Typography variant="subtitle2" color="warning.dark" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                                        <TrendingDownIcon fontSize="small" /> Exit Conditions
+                                                    </Typography>
+                                                    <List dense disablePadding>
+                                                        {gptVerdict.execution_recommendations.exit_conditions.slice(0, 3).map((condition, i) => (
+                                                            <ListItem key={i} disablePadding sx={{ mb: 0.5 }}>
+                                                                <ListItemText primary={condition} primaryTypographyProps={{ variant: 'caption', lineHeight: 1.4 }} />
+                                                            </ListItem>
+                                                        ))}
+                                                    </List>
+                                                </Paper>
+                                            ) : (
+                                                <Paper variant="outlined" sx={{ p: 2, height: '100%', bgcolor: '#f5f5f5', borderColor: '#e0e0e0' }}>
+                                                    <Typography variant="subtitle2" color="text.secondary" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                                        <InfoIcon fontSize="small" /> Exit Conditions
+                                                    </Typography>
+                                                    <Typography variant="body2" color="text.secondary" fontStyle="italic">
+                                                        No specific exit conditions provided. Use standard profit targets and stop losses.
+                                                    </Typography>
+                                                </Paper>
+                                            )}
+                                        </Grid>
                                     </Grid>
-                                </Paper>
-                            )}
-                            
-                            <Grid container spacing={2} sx={{ mb: 2 }}>
-                                {gptVerdict.execution_recommendations?.entry_conditions?.length > 0 && (
-                                    <Grid item xs={12} md={6}>
-                                        <Paper variant="outlined" sx={{ p: 2, height: '100%', bgcolor: '#f0fdf4', borderColor: '#bbf7d0' }}>
-                                            <Typography variant="subtitle2" color="success.dark" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                                                <TrendingUpIcon fontSize="small" /> Entry Conditions
+
+                                    {/* Trading Ideas - show placeholder when empty */}
+                                    {gptVerdict.actionable_ideas?.length > 0 ? (
+                                        <Paper variant="outlined" sx={{ p: 2, mb: 2, bgcolor: '#f0f9ff' }}>
+                                            <Typography variant="subtitle2" color="info.main" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                                <LightbulbIcon fontSize="small" /> Key Trading Ideas
                                             </Typography>
                                             <List dense disablePadding>
-                                                {gptVerdict.execution_recommendations.entry_conditions.slice(0, 3).map((condition, i) => (
+                                                {gptVerdict.actionable_ideas.slice(0, 3).map((idea, i) => (
                                                     <ListItem key={i} disablePadding sx={{ mb: 0.5 }}>
-                                                        <ListItemText primary={condition} primaryTypographyProps={{ variant: 'caption', lineHeight: 1.4 }} />
+                                                        <ListItemText primary={idea} primaryTypographyProps={{ variant: 'body2' }} />
                                                     </ListItem>
                                                 ))}
                                             </List>
                                         </Paper>
-                                    </Grid>
-                                )}
-                                
-                                {gptVerdict.execution_recommendations?.exit_conditions?.length > 0 && (
-                                    <Grid item xs={12} md={6}>
-                                        <Paper variant="outlined" sx={{ p: 2, height: '100%', bgcolor: '#fff7ed', borderColor: '#ffedd5' }}>
-                                            <Typography variant="subtitle2" color="warning.dark" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                                                <TrendingDownIcon fontSize="small" /> Exit Conditions
+                                    ) : (
+                                        <Paper variant="outlined" sx={{ p: 2, mb: 2, bgcolor: '#f5f5f5', borderColor: '#e0e0e0' }}>
+                                            <Typography variant="subtitle2" color="text.secondary" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                                <LightbulbIcon fontSize="small" /> Trading Ideas
+                                            </Typography>
+                                            <Typography variant="body2" color="text.secondary" fontStyle="italic">
+                                                No specific trading ideas provided. Consider the market bias and risk factors when planning trades.
+                                            </Typography>
+                                        </Paper>
+                                    )}
+
+                                    {/* Risk Factors - show placeholder when empty */}
+                                    {gptVerdict.risk_factors?.length > 0 ? (
+                                        <Paper variant="outlined" sx={{ p: 2, mb: 2, bgcolor: '#fef2f2', borderColor: '#fecaca' }}>
+                                            <Typography variant="subtitle2" color="error.main" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                                <WarningIcon fontSize="small" /> Risk Factors
                                             </Typography>
                                             <List dense disablePadding>
-                                                {gptVerdict.execution_recommendations.exit_conditions.slice(0, 3).map((condition, i) => (
+                                                {gptVerdict.risk_factors.slice(0, 3).map((risk, i) => (
                                                     <ListItem key={i} disablePadding sx={{ mb: 0.5 }}>
-                                                        <ListItemText primary={condition} primaryTypographyProps={{ variant: 'caption', lineHeight: 1.4 }} />
+                                                        <ListItemText primary={risk} primaryTypographyProps={{ variant: 'body2' }} />
                                                     </ListItem>
                                                 ))}
                                             </List>
                                         </Paper>
-                                    </Grid>
-                                )}
-                            </Grid>
-                            
-                            {gptVerdict.actionable_ideas?.length > 0 && (
-                                <Paper variant="outlined" sx={{ p: 2, mb: 2, bgcolor: '#f0f9ff' }}>
-                                    <Typography variant="subtitle2" color="info.main" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                                        <LightbulbIcon fontSize="small" /> Key Trading Ideas
-                                    </Typography>
-                                    <List dense disablePadding>
-                                        {gptVerdict.actionable_ideas.slice(0, 3).map((idea, i) => (
-                                            <ListItem key={i} disablePadding sx={{ mb: 0.5 }}>
-                                                <ListItemText primary={idea} primaryTypographyProps={{ variant: 'body2' }} />
-                                            </ListItem>
-                                        ))}
-                                    </List>
-                                </Paper>
-                            )}
-                            
-                            {gptVerdict.risk_factors?.length > 0 && (
-                                <Paper variant="outlined" sx={{ p: 2, mb: 2, bgcolor: '#fef2f2', borderColor: '#fecaca' }}>
-                                    <Typography variant="subtitle2" color="error.main" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                                        <WarningIcon fontSize="small" /> Risk Factors
-                                    </Typography>
-                                    <List dense disablePadding>
-                                        {gptVerdict.risk_factors.slice(0, 3).map((risk, i) => (
-                                            <ListItem key={i} disablePadding sx={{ mb: 0.5 }}>
-                                                <ListItemText primary={risk} primaryTypographyProps={{ variant: 'body2' }} />
-                                            </ListItem>
-                                        ))}
-                                    </List>
-                                </Paper>
-                            )}
-                        </Box>
-                    </Collapse>
-                </Paper>
-            )}
+                                    ) : (
+                                        <Paper variant="outlined" sx={{ p: 2, mb: 2, bgcolor: '#f5f5f5', borderColor: '#e0e0e0' }}>
+                                            <Typography variant="subtitle2" color="text.secondary" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                                <WarningIcon fontSize="small" /> Risk Factors
+                                            </Typography>
+                                            <Typography variant="body2" color="text.secondary" fontStyle="italic">
+                                                No specific risk factors identified. Apply general market risk management principles.
+                                            </Typography>
+                                        </Paper>
+                                    )}
+                                </Box>
+                            </Collapse>
+                        </Paper>
+                    );
+                }
+
+                return null;
+            })()}
             
             {/* Strategy Cards */}
             <Box sx={{ mt: 2 }}>
@@ -724,7 +1328,16 @@ const GptVerdictCard = ({ verdict }) => {
   );
 };
 
-const AnalysisDetails = ({ data }) => {
+const AnalysisDetails = ({
+  data,
+  analysisResult,
+  setCautionModeActive,
+  executeAnalysis,
+  selectedExpiration,
+  riskFreeRate,
+  analysisMethod,
+  selectedModel
+}) => {
   const finalBias = data.final_bias || '';
   const biasColor = finalBias.includes('Bullish') ? 'success.main' : finalBias.includes('Bearish') ? 'error.main' : 'warning.main';
 
@@ -786,11 +1399,18 @@ const AnalysisDetails = ({ data }) => {
         </Grid>
       </AnalysisCard>
       
-      <StrategyOrder 
+      <StrategyOrder
         strategies={data.recommended_strategies || [data.recommended_strategy].filter(Boolean)}
-        ticker={data.ticker} 
+        ticker={data.ticker}
         expirationDate={data.expiration_date}
         gptVerdict={data.gpt_verdict}
+        analysisResult={analysisResult}
+        setCautionModeActive={setCautionModeActive}
+        executeAnalysis={executeAnalysis}
+        selectedExpiration={selectedExpiration}
+        riskFreeRate={riskFreeRate}
+        analysisMethod={analysisMethod}
+        selectedModel={selectedModel}
       />
       
       { !isGptResult &&
@@ -876,7 +1496,7 @@ const AnalysisDetails = ({ data }) => {
   );
 };
 
-const ResultsDisplay = ({ analysisResult }) => {
+const ResultsDisplay = ({ analysisResult, setCautionModeActive, executeAnalysis, selectedExpiration, riskFreeRate, analysisMethod, selectedModel }) => {
   if (!analysisResult || !Array.isArray(analysisResult) || analysisResult.length === 0) {
     return <Typography color="text.secondary">No analysis results to display.</Typography>;
   }
@@ -894,7 +1514,16 @@ const ResultsDisplay = ({ analysisResult }) => {
 
       {analysisResult.map((result, index) => (
         <Box key={index} sx={{ mt: index > 0 ? 4 : 0, pt: index > 0 ? 4 : 0, borderTop: index > 0 ? '1px solid #e0e0e0' : 'none' }}>
-          <AnalysisDetails data={result} />
+          <AnalysisDetails
+            data={result}
+            analysisResult={analysisResult}
+            setCautionModeActive={setCautionModeActive}
+            executeAnalysis={executeAnalysis}
+            selectedExpiration={selectedExpiration}
+            riskFreeRate={riskFreeRate}
+            analysisMethod={analysisMethod}
+            selectedModel={selectedModel}
+          />
         </Box>
       ))}
     </Box>
@@ -1172,6 +1801,46 @@ const MethodologyExplanation = ({ methodology }) => {
   return null;
 };
 
+// Error Boundary Component
+class AnalysisErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error('Analysis page error:', error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <Box sx={{ p: 3 }}>
+          <Alert severity="error">
+            <AlertTitle>Application Error</AlertTitle>
+            <Typography>
+              An unexpected error occurred. Please refresh the page and try again.
+            </Typography>
+            <Button
+              onClick={() => window.location.reload()}
+              sx={{ mt: 2 }}
+              variant="outlined"
+            >
+              Refresh Page
+            </Button>
+          </Alert>
+        </Box>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
 const AnalysisPage = () => {
   const [ticker, setTicker] = useStickyState('SPY', 'ticker');
   const [analysisMethod, setAnalysisMethod] = useStickyState('holistic-market-edge', 'analysisMethod');
@@ -1182,6 +1851,10 @@ const AnalysisPage = () => {
   const [analysisResult, setAnalysisResult] = useStickyState(null, 'analysisResult');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+
+  // NEW: Caution mode state management
+  const [cautionModeActive, setCautionModeActive] = useState(false);
+  const [qualityAssessment, setQualityAssessment] = useState(null);
   
   // GPT Model selection state
   const [availableModels, setAvailableModels] = useState([]);
@@ -1356,7 +2029,7 @@ const AnalysisPage = () => {
     fetchHistory();
   }, [fetchHistory, historyReloadVersion]);
 
-  const executeAnalysis = async ({ ticker: targetTicker, expiration: targetExpiration, riskFreeRate: targetRate, analysisMethod: targetMethod, gptModel: targetModel }) => {
+  const executeAnalysis = async ({ ticker: targetTicker, expiration: targetExpiration, riskFreeRate: targetRate, analysisMethod: targetMethod, gptModel: targetModel, cautionMode = false }) => {
     const normalizedTicker = (targetTicker || '').trim().toUpperCase();
     const normalizedExpiration = (targetExpiration || '').trim();
 
@@ -1370,6 +2043,16 @@ const AnalysisPage = () => {
       return;
     }
 
+    if (typeof targetRate !== 'number' || isNaN(targetRate)) {
+      setError('Invalid risk-free rate value.');
+      return;
+    }
+
+    if (!targetMethod) {
+      setError('Please select an analysis method.');
+      return;
+    }
+
     setTicker(normalizedTicker);
     setSelectedExpiration(normalizedExpiration);
 
@@ -1377,17 +2060,41 @@ const AnalysisPage = () => {
     setError('');
     setAnalysisResult(null);
 
+    // Clear quality assessment if not in caution mode
+    if (!cautionMode) {
+      setQualityAssessment(null);
+      setCautionModeActive(false);
+    }
+
     try {
-      const response = await axios.post('/api/analysis/stock', {
+      const requestPayload = {
         ticker: normalizedTicker,
         expiration_date: normalizedExpiration,
         risk_free_rate: targetRate,
         analysis_method: targetMethod,
         gpt_model: targetModel,
-      });
+      };
+
+      // Add caution mode flag if enabled
+      if (cautionMode) {
+        requestPayload.caution_mode = true;
+      }
+
+      const response = await axios.post('/api/analysis/stock', requestPayload);
 
       const result = response.data;
       const normalizedResult = (result && typeof result === 'object' && !Array.isArray(result)) ? [result] : result;
+
+      // Extract quality assessment data from response
+      if (result?.error_details?.quality_assessment) {
+        setQualityAssessment(result.error_details.quality_assessment);
+      }
+
+      // Set caution mode if explicitly requested or if analysis succeeded with warnings
+      if (cautionMode || result?.caution_mode_active) {
+        setCautionModeActive(true);
+      }
+
       setAnalysisResult(normalizedResult);
 
       setHistoryPage(1);
@@ -1400,18 +2107,19 @@ const AnalysisPage = () => {
   };
 
   const handleFetchExpirations = async () => {
-    if (!ticker) {
-      setError('Please enter a ticker symbol first.');
-      return;
-    }
-    setFetchingExpirations(true);
-    setExpirations([]);
-    setSelectedExpiration('');
-    setAnalysisResult(null);
-    setError('');
     try {
+      if (!ticker) {
+        setError('Please enter a ticker symbol first.');
+        return;
+      }
+      setFetchingExpirations(true);
+      setExpirations([]);
+      setSelectedExpiration('');
+      setAnalysisResult(null);
+      setError('');
+
       // This endpoint needs to be created in the backend.
-      const response = await axios.get(`/api/analysis/expirations/${ticker}`);
+      const response = await axios.get(`/api/analysis/expirations/${encodeURIComponent(ticker)}`);
       if (response.data && response.data.length > 0) {
         setExpirations(response.data);
         setSelectedExpiration(response.data[0]); // Default to the first expiration
@@ -1419,6 +2127,7 @@ const AnalysisPage = () => {
         setError('No option expirations found for this ticker.');
       }
     } catch (err) {
+      console.error('Error in handleFetchExpirations:', err);
       setError(err.response?.data?.detail || 'Failed to fetch expirations.');
     } finally {
       setFetchingExpirations(false);
@@ -1426,14 +2135,19 @@ const AnalysisPage = () => {
   };
 
   const handleAnalyze = async (e) => {
-    e.preventDefault();
-    await executeAnalysis({
-      ticker,
-      expiration: selectedExpiration,
-      riskFreeRate,
-      analysisMethod,
-      gptModel: selectedModel,
-    });
+    try {
+      e.preventDefault();
+      await executeAnalysis({
+        ticker,
+        expiration: selectedExpiration,
+        riskFreeRate,
+        analysisMethod,
+        gptModel: selectedModel,
+      });
+    } catch (error) {
+      console.error('Error in handleAnalyze:', error);
+      setError('An error occurred during analysis. Please try again.');
+    }
   };
 
   const handleHistoryAnalyze = async (entry) => {
@@ -1528,12 +2242,14 @@ const AnalysisPage = () => {
                     >
                       {fetchingModels ? (
                         <MenuItem disabled>Loading models...</MenuItem>
-                      ) : (
+                      ) : Array.isArray(availableModels) && availableModels.length > 0 ? (
                         availableModels.map(model => (
                           <MenuItem key={model.id} value={model.id}>
                             {model.name}
                           </MenuItem>
                         ))
+                      ) : (
+                        <MenuItem disabled>No models available</MenuItem>
                       )}
                     </Select>
                   </FormControl>
@@ -1563,7 +2279,7 @@ const AnalysisPage = () => {
               </Button>
             </Grid>
 
-            {expirations.length > 0 && (
+            {Array.isArray(expirations) && expirations.length > 0 && (
               <Grid item xs={12} sm={6} md={2}>
                 <FormControl fullWidth size="small">
                   <InputLabel>Expiration Date</InputLabel>
@@ -1610,8 +2326,94 @@ const AnalysisPage = () => {
         </Box>
 
         {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
-        {loading && <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}><CircularProgress /></Box>}
-        {analysisResult && <ResultsDisplay analysisResult={analysisResult} />}
+        {loading && (
+          <Paper variant="outlined" sx={{ p: 3, mb: 3, textAlign: 'center' }}>
+            <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+              <CircularProgress size={40} />
+              <Typography variant="h6" color="primary">
+                {analysisMethod.includes('gpt') ? 'AI Analysis in Progress' : 'Analysis in Progress'}
+              </Typography>
+
+              {analysisMethod.includes('gpt') && (
+                <Box sx={{ width: '100%', maxWidth: 600 }}>
+                  <Typography variant="body2" color="text.secondary" paragraph>
+                    Multi-stage analysis pipeline running:
+                  </Typography>
+
+                  <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+                    <Paper variant="outlined" sx={{ p: 2, bgcolor: '#e3f2fd', borderColor: '#2196f3' }}>
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                        <Box sx={{
+                          width: 20,
+                          height: 20,
+                          borderRadius: '50%',
+                          bgcolor: 'primary.main',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center'
+                        }}>
+                          <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: 'white' }} />
+                        </Box>
+                        <Typography variant="subtitle2" fontWeight="bold">Stage 1: Data Collection</Typography>
+                      </Box>
+                      <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, ml: 3 }}>
+                        Gathering market data, options chains, and technical indicators
+                      </Typography>
+                    </Paper>
+
+                    <Paper variant="outlined" sx={{ p: 2, bgcolor: '#fff3e0', borderColor: '#ff9800' }}>
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                        <CircularProgress size={16} />
+                        <Typography variant="subtitle2" fontWeight="bold">Stage 2: Market Analysis</Typography>
+                      </Box>
+                      <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, ml: 3 }}>
+                        AI analyzing market conditions, sentiment, and technical patterns
+                      </Typography>
+                    </Paper>
+
+                    <Paper variant="outlined" sx={{ p: 2, bgcolor: '#f5f5f5', borderColor: '#e0e0e0' }}>
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                        <HourglassEmptyIcon color="disabled" />
+                        <Typography variant="subtitle2" color="text.secondary">Stage 3: Strategy Generation</Typography>
+                      </Box>
+                      <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, ml: 3 }}>
+                        Generating executable trading strategies based on analysis
+                      </Typography>
+                    </Paper>
+                  </Box>
+
+                  <Box sx={{ mt: 2 }}>
+                    <Typography variant="caption" color="text.secondary">
+                      This process typically takes 30-60 seconds. Please wait while we generate your personalized trading insights.
+                    </Typography>
+                  </Box>
+                </Box>
+              )}
+
+              {!analysisMethod.includes('gpt') && (
+                <Box sx={{ maxWidth: 400 }}>
+                  <Typography variant="body2" color="text.secondary">
+                    Analyzing market data and calculating option strategies for <strong>{ticker}</strong>
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+                    This usually takes just a few seconds...
+                  </Typography>
+                </Box>
+              )}
+            </Box>
+          </Paper>
+        )}
+        {analysisResult &&
+          <ResultsDisplay
+            analysisResult={analysisResult}
+            setCautionModeActive={setCautionModeActive}
+            executeAnalysis={executeAnalysis}
+            selectedExpiration={selectedExpiration}
+            riskFreeRate={riskFreeRate}
+            analysisMethod={analysisMethod}
+            selectedModel={selectedModel}
+          />
+        }
       </AnalysisCard>
 
       <AnalysisCard title="Recent Analyses">
@@ -1739,4 +2541,11 @@ const AnalysisPage = () => {
   );
 }
 
-export default AnalysisPage;
+// Wrapped component with error boundary
+const AnalysisPageWithErrorBoundary = () => (
+  <AnalysisErrorBoundary>
+    <AnalysisPage />
+  </AnalysisErrorBoundary>
+);
+
+export default AnalysisPageWithErrorBoundary;

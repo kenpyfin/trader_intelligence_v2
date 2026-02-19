@@ -6,6 +6,9 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      # Build args can be used to pass dependency versions if needed
+      # args:
+      #   - BUILD_ENV=production
     # The backend container shares the host's network.
     # It will be accessible on localhost at the port specified in the .env file.
     network_mode: "host"
@@ -15,11 +18,16 @@ services:
       - ./backend/my_libs_py3:/app/my_libs_py3
     env_file:
       - .env
+    environment:
+      # Prefer ib_async backend where available
+      - BROKER_BACKEND=${BROKER_BACKEND:-ib_async}
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      # Enable Docker BuildKit for better caching and performance
+      # Use: DOCKER_BUILDKIT=1 docker-compose build
     ports:
       # Expose the frontend's port to the host machine.
       - "${FRONTEND_PORT}:${FRONTEND_PORT}"

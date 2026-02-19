@@ -41,7 +41,24 @@ class FMPClient:
 
     def realtimequote(self, ticker):
         url = f"{self.url_root_v3}quote/{ticker.upper()}?apikey={self.api_key}"
-        return pd.DataFrame(requests.get(url).json())
+        try:
+            payload = self.fetch_url_with_rate_limit(url)
+        except Exception:
+            return pd.DataFrame()
+
+        if isinstance(payload, list):
+            return pd.DataFrame(payload)
+        if isinstance(payload, dict):
+            # FMP occasionally returns a single quote dict instead of a list.
+            if not payload:
+                return pd.DataFrame()
+            # Error payloads come back with an "Error Message" key; normalize to empty.
+            if any(key.lower().startswith("error") for key in payload.keys()):
+                return pd.DataFrame()
+            return pd.DataFrame([payload])
+
+        # Unexpected payloads (e.g., None/str/int) convert to empty DataFrame.
+        return pd.DataFrame()
 
     def get_delisted_companies(self):
         url = f"{self.url_root_v3}delisted-companies?apikey={self.api_key}"
@@ -164,4 +181,3 @@ class FMPClient:
         except Exception:
             # Gracefully handle missing endpoint or HTTP/rate-limit errors
             return pd.DataFrame()
-

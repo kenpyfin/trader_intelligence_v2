@@ -19,9 +19,10 @@ RUN apt-get update && apt-get install -y \
 COPY ./requirements.txt /app/requirements.txt
 
 # Install any needed packages specified in requirements.txt
-# Using --no-cache-dir reduces the image size.
-# Explicitly install requests, pandas, and numpy to ensure analysis dependencies are met
-RUN pip install --no-cache-dir --upgrade -r /app/requirements.txt requests pandas numpy
+# Using --no-cache-dir reduces the image size and --upgrade ensures latest pip
+# Single step installation prevents dependency conflicts
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir --upgrade -r /app/requirements.txt
 
 # Copy the rest of the backend application's code into the container at /app
 COPY . /app

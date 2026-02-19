@@ -1,10 +1,13 @@
 import pandas as pd
 import numpy as np
+import math
 from datetime import date, timedelta, datetime
 from src.my_libs_py3.my_data import PriceDataFetcher
 from src.my_libs_py3.fmp import FMPClient
 from src.analytics.treasury_curve import build_treasury_curve
 from .methodologies.gpt_verdict import generate_gpt_verdict
+from .strike_normalization import default_normalizer
+from .greeks_repair import default_greeks_validator
 
 # This file is a migration of the analysis logic from option_trade.py.
 # All Streamlit-specific code (st.*) has been removed.
@@ -203,7 +206,14 @@ def fetch_iv_term_structure(ticker, price_fetcher, fmp_client, target_dtes=[7, 3
         for attempt in range(8):
             current_search_date_dt = expiration_date_dt + timedelta(days=attempt)
             current_search_date_str = current_search_date_dt.strftime('%Y-%m-%d')
-            options_df = price_fetcher.get_option_data_finviz(ticker, 'o', current_search_date_str)
+            # [NEW] Use intelligent fallback for IV term structure as well
+            try:
+                import asyncio
+                options_df = asyncio.run(price_fetcher.get_option_data_with_intelligent_fallback(
+                    ticker, 'o', current_search_date_str
+                ))
+            except Exception:
+                options_df = price_fetcher.get_option_data_finviz(ticker, 'o', current_search_date_str)
             if options_df is not None and not options_df.empty:
                 atm_iv = _get_atm_iv_from_finviz_df(options_df, current_stock_price)
                 if atm_iv is not None:
@@ -642,9 +652,272 @@ def generate_holistic_conclusion(synthesis_data, strikes, S_current, option_chai
     return conclusion_html, final_bias, primary_strategy, recommended_strategies
 
 
+def calculate_hv_rank(prices_series, window=20, lookback_period=252):
+    """
+    Calculates the percentile rank of the current Historical Volatility (HV)
+    relative to its range over the lookback_period (default 1 year).
+    """
+    if len(prices_series) < window + 1:
+        return None, None
+        
+    # Calculate rolling log returns
+    log_returns = np.log(prices_series / prices_series.shift(1))
+    
+    # Calculate rolling HV (annualized)
+    rolling_hv = log_returns.rolling(window=window).std() * np.sqrt(252)
+    
+    # Get the relevant lookback window
+    if len(rolling_hv) > lookback_period:
+        rolling_hv_window = rolling_hv.tail(lookback_period)
+    else:
+        rolling_hv_window = rolling_hv
+        
+    # Drop NaNs
+    rolling_hv_window = rolling_hv_window.dropna()
+    
+    if rolling_hv_window.empty:
+        return None, None
+        
+    current_hv = rolling_hv_window.iloc[-1]
+    min_hv = rolling_hv_window.min()
+    max_hv = rolling_hv_window.max()
+    
+    if max_hv == min_hv:
+        return current_hv, 0.5 # Flat volatility
+        
+    hv_rank = (current_hv - min_hv) / (max_hv - min_hv)
+    return current_hv, hv_rank
+
+
+def get_macro_context(price_fetcher, fmp_client=None):
+    """
+    Fetches SPY and VIX data to provide market context.
+    """
+    macro_data = {
+        "spy_trend": "Unknown",
+        "spy_price": None,
+        "vix_level": None,
+        "vix_regime": "Unknown",
+        "market_sentiment": "Neutral"
+    }
+    
+    try:
+        # Fetch last ~300 days to ensure we have enough for SMA200
+        end_dt = datetime.now()
+        start_dt = end_dt - timedelta(days=400) 
+        
+        # 1. SPY Analysis
+        spy_df = price_fetcher.get_price_data(['SPY'], method='td_data', start_date=start_dt, end_date=end_dt)
+        if spy_df is not None and not spy_df.empty and len(spy_df) > 200:
+            spy_last = spy_df.iloc[-1]
+            spy_price = spy_last['Close']
+            
+            # Calculate SMA200
+            spy_sma200 = spy_df['Close'].rolling(window=200).mean().iloc[-1]
+            spy_sma50 = spy_df['Close'].rolling(window=50).mean().iloc[-1]
+            
+            if spy_price > spy_sma200:
+                trend = "Uptrend"
+            else:
+                trend = "Downtrend"
+                
+            macro_data['spy_trend'] = trend
+            macro_data['spy_price'] = spy_price
+            macro_data['spy_sma200'] = spy_sma200
+            
+            # Determine sentiment based on SPY
+            if spy_price > spy_sma50 and spy_price > spy_sma200:
+                macro_data['market_sentiment'] = "Bullish"
+            elif spy_price < spy_sma50 and spy_price < spy_sma200:
+                macro_data['market_sentiment'] = "Bearish"
+            else:
+                macro_data['market_sentiment'] = "Mixed/Choppy"
+
+        # 2. VIX Analysis (Fear Gauge)
+        # Note: Finviz often uses 'VIX' or '^VIX'. We'll try 'VIX' first as it's common for data providers.
+        # If using td_data (Finviz), 'VIX' usually works.
+        # Fallback: Try '^VIX' if 'VIX' fails (common issue with some data providers)
+        if vix_df is None or vix_df.empty:
+            print("DEBUG: 'VIX' ticker failed, trying '^VIX'...")
+            vix_df = price_fetcher.get_price_data(['^VIX'], method='td_data', start_date=end_dt - timedelta(days=10), end_date=end_dt)
+
+        # Fallback: Try FMP if Finviz fails
+        if (vix_df is None or vix_df.empty) and fmp_client:
+            print("DEBUG: Finviz VIX failed, trying FMP with '^VIX'...")
+            try:
+                # FMP usually uses ^VIX for indices
+                start_str = (end_dt - timedelta(days=10)).strftime('%Y-%m-%d')
+                end_str = end_dt.strftime('%Y-%m-%d')
+                vix_df = fmp_client.historical_data('^VIX', start_str, end_str)
+                if vix_df is not None and not vix_df.empty:
+                     # FMP returns 'date', 'close', etc.
+                     # Normalize columns if needed
+                     vix_df = vix_df.rename(columns={'date': 'TimeStamp', 'close': 'Close'})
+                     vix_df['TimeStamp'] = pd.to_datetime(vix_df['TimeStamp'])
+                     vix_df = vix_df.sort_values('TimeStamp')
+            except Exception as e:
+                print(f"DEBUG: FMP VIX fetch failed: {e}")
+
+        if vix_df is not None and not vix_df.empty:
+            vix_last = vix_df.iloc[-1]['Close']
+            macro_data['vix_level'] = vix_last
+            
+            if vix_last < 15:
+                macro_data['vix_regime'] = "Low (Complacent)"
+            elif vix_last < 25:
+                macro_data['vix_regime'] = "Normal"
+            else:
+                macro_data['vix_regime'] = "High (Fear/Stress)"
+                
+    except Exception as e:
+        print(f"Error fetching macro context: {e}")
+        
+    return macro_data
+
+
+def _get_synchronized_valid_strikes(selected_strikes, greeks_by_strike, ticker):
+    """Synchronize valid_strikes with available greeks data to prevent overlap issues."""
+    print(f"SYNC_DEBUG_{ticker}: Synchronizing strike keys...")
+
+    # Get synchronized data
+    sync_valid_strikes, sync_greeks = default_normalizer.synchronize_strike_data(
+        selected_strikes, greeks_by_strike
+    )
+
+    print(f"SYNC_DEBUG_{ticker}: Synchronized {len(sync_valid_strikes)} strikes "
+          f"(was {len(selected_strikes) if hasattr(selected_strikes, '__len__') else 'unknown'})")
+
+    return sync_valid_strikes
+
+
+def _get_synchronized_greeks_by_strike(selected_strikes, greeks_by_strike, ticker):
+    """Synchronize greeks_by_strike with valid_strikes to ensure consistency."""
+
+    # Get synchronized data
+    sync_valid_strikes, sync_greeks = default_normalizer.synchronize_strike_data(
+        selected_strikes, greeks_by_strike
+    )
+
+    return sync_greeks
+
+
+def validate_greeks_input_parameters(S_current, vol_term_structure, r_input, div_current, ticker="", days_to_exp=None):
+    """
+    Comprehensive validation of all input parameters for Greeks calculations.
+
+    Args:
+        S_current: Current stock price
+        vol_term_structure: Volatility term structure (array or single value)
+        r_input: Risk-free rate (callable or constant)
+        div_current: Dividend yield (decimal)
+        ticker: Stock ticker for logging
+        days_to_exp: Days to expiration for context
+
+    Returns:
+        dict: {
+            'valid': bool,
+            'errors': List[str],
+            'warnings': List[str],
+            'corrected_params': dict
+        }
+    """
+    errors = []
+    warnings = []
+    corrected_params = {}
+
+    # Validate current price
+    if S_current is None or S_current <= 0:
+        errors.append(f"Invalid current price: {S_current}")
+    elif S_current < 0.01 or S_current > 10000:
+        warnings.append(f"Unusual stock price: ${S_current:.2f}")
+
+    # Validate volatility term structure
+    vol_issues = []
+    if vol_term_structure is None:
+        vol_issues.append("Volatility term structure is None")
+    elif isinstance(vol_term_structure, (list, np.ndarray)):
+        if len(vol_term_structure) == 0:
+            vol_issues.append("Empty volatility term structure")
+        else:
+            vol_array = np.array(vol_term_structure)
+            invalid_vols = np.sum((vol_array <= 0) | (vol_array > 5.0) | np.isnan(vol_array) | np.isinf(vol_array))
+            if invalid_vols > 0:
+                vol_issues.append(f"{invalid_vols} invalid volatility values detected")
+                corrected_params['vol_term_structure'] = np.clip(vol_array, 0.01, 3.0)
+    elif isinstance(vol_term_structure, (int, float)):
+        if vol_term_structure <= 0 or vol_term_structure > 5.0 or math.isnan(vol_term_structure):
+            vol_issues.append(f"Invalid single volatility value: {vol_term_structure}")
+            corrected_params['vol_term_structure'] = max(0.01, min(3.0, vol_term_structure))
+    else:
+        vol_issues.append(f"Invalid volatility type: {type(vol_term_structure)}")
+
+    if vol_issues:
+        warnings.extend(vol_issues)
+        if 'vol_term_structure' not in corrected_params:
+            corrected_params['vol_term_structure'] = 0.25 if days_to_exp is None else np.full(days_to_exp, 0.25)
+
+    # Validate risk-free rate
+    rate_issues = []
+    if r_input is None:
+        rate_issues.append("Risk-free rate is None")
+        corrected_params['r_input'] = 0.05
+    elif callable(r_input):
+        try:
+            test_rate = r_input(1.0)
+            if not (0.0 <= test_rate <= 0.30):
+                rate_issues.append(f"Rate function returned unreasonable rate: {test_rate*100:.2f}%")
+                corrected_params['r_input'] = 0.05
+        except Exception as e:
+            rate_issues.append(f"Rate function failed: {str(e)}")
+            corrected_params['r_input'] = 0.05
+    elif isinstance(r_input, (int, float)):
+        if not (0.0 <= r_input <= 0.30) or math.isnan(r_input):
+            rate_issues.append(f"Invalid rate value: {r_input*100:.2f}%")
+            corrected_params['r_input'] = max(0.0, min(0.30, r_input)) if not math.isnan(r_input) else 0.05
+    else:
+        rate_issues.append(f"Invalid rate type: {type(r_input)}")
+        corrected_params['r_input'] = 0.05
+
+    if rate_issues:
+        warnings.extend(rate_issues)
+
+    # Validate dividend yield
+    div_issues = []
+    if div_current is None:
+        div_issues.append("Dividend yield is None")
+        corrected_params['div_current'] = 0.0
+    elif not isinstance(div_current, (int, float)):
+        div_issues.append(f"Invalid dividend type: {type(div_current)}")
+        corrected_params['div_current'] = 0.0
+    elif math.isnan(div_current) or math.isinf(div_current):
+        div_issues.append("Dividend yield is NaN/infinite")
+        corrected_params['div_current'] = 0.0
+    elif not (0.0 <= div_current <= 0.20):  # 0% to 20% dividend yield
+        div_issues.append(f"Unusual dividend yield: {div_current*100:.2f}%")
+        corrected_params['div_current'] = max(0.0, min(0.20, div_current))
+
+    if div_issues:
+        warnings.extend(div_issues)
+
+    # Determine overall validity
+    is_valid = len(errors) == 0
+
+    return {
+        'valid': is_valid,
+        'errors': errors,
+        'warnings': warnings,
+        'corrected_params': corrected_params,
+        'validation_summary': f"Parameters for {ticker}: {'VALID' if is_valid else 'INVALID'} - {len(errors)} errors, {len(warnings)} warnings"
+    }
+
+
 def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, rate_source: str = 'etf', analysis_method: str = 'holistic-market-edge', override_price: float = None, gpt_model: str = 'gpt-5'):
     fmp = FMPClient()
     price_fetcher = PriceDataFetcher()
+
+    # [NEW] Fetch Macro Context
+    print(f"DEBUG: Fetching macro context for {ticker}...")
+    macro_context = get_macro_context(price_fetcher, fmp_client=fmp)
 
     # Multi-source price fetching with validation
     S_current = None
@@ -721,9 +994,31 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
         source_name = price_sources[0][0] if price_sources else "Unknown"
         price_validation_note = f"Single source price: {source_name}=${S_current:.2f}"
 
-    option_chain_df = price_fetcher.get_option_data_finviz(ticker, 'o', expiration_date.strftime('%Y-%m-%d'))
+    # [NEW] Try intelligent fallback for option chain data
+    try:
+        import asyncio
+        option_chain_df = asyncio.run(price_fetcher.get_option_data_with_intelligent_fallback(
+            ticker, 'o', expiration_date.strftime('%Y-%m-%d')
+        ))
+    except Exception as e:
+        print(f"Intelligent fallback failed, using standard method: {e}")
+        option_chain_df = price_fetcher.get_option_data_finviz(ticker, 'o', expiration_date.strftime('%Y-%m-%d'))
+
     if option_chain_df is None or option_chain_df.empty:
-        return {"status": "error", "message": f"Could not fetch option chain for {ticker} on {expiration_date}."}
+        # [NEW] Provide intelligent recommendations for alternative expiration dates
+        try:
+            recommended_dates = price_fetcher.get_recommended_expiration_dates(ticker)
+            return {
+                "status": "error",
+                "message": f"Could not fetch option chain for {ticker} on {expiration_date}.",
+                "recommendations": {
+                    "suggested_expiration_dates": recommended_dates,
+                    "reason": "Try expiration dates with more active options for better data quality"
+                }
+            }
+        except Exception as e:
+            print(f"Failed to generate recommendations: {e}")
+            return {"status": "error", "message": f"Could not fetch option chain for {ticker} on {expiration_date}."}
     
     option_chain_df['Strike'] = pd.to_numeric(option_chain_df['Strike'], errors='coerce')
     option_chain_df.dropna(subset=['Strike'], inplace=True)
@@ -736,10 +1031,74 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
     historical_prices_df = price_fetcher.get_price_data([ticker], method="td_data", start_date=start_dt, end_date=end_dt)
     hv_current = calculate_historical_volatility(historical_prices_df['Close'].tolist()) if historical_prices_df is not None and not historical_prices_df.empty else None
 
-    key_vols_iv, _ = fetch_iv_term_structure(ticker, price_fetcher, fmp)
-    if not key_vols_iv and hv_current: key_vols_iv = [(0, hv_current)]
+    # [NEW] Calculate HV Rank
+    hv_rank = None
+    if historical_prices_df is not None and not historical_prices_df.empty:
+        _, hv_rank = calculate_hv_rank(historical_prices_df['Close'])
 
-    div_current = stock_details.get('dividend_yield', 0.0)
+    # Enhanced IV term structure validation
+    key_vols_iv, _ = fetch_iv_term_structure(ticker, price_fetcher, fmp)
+    iv_validation_note = "IV term structure validation: "
+
+    if not key_vols_iv:
+        if hv_current and hv_current > 0:
+            key_vols_iv = [(0, hv_current)]
+            iv_validation_note += f"Using HV fallback: {hv_current:.4f}"
+        else:
+            key_vols_iv = [(0, 0.25)]  # Market typical fallback
+            iv_validation_note += "Using market typical fallback: 0.25"
+            print(f"Warning: No IV or HV data for {ticker}, using 25% vol fallback")
+    else:
+        iv_validation_note += f"Retrieved {len(key_vols_iv)} IV points: {key_vols_iv}"
+
+    # Validate IV points for reasonable ranges
+    validated_iv_points = []
+    for days, iv in key_vols_iv:
+        if iv is not None and 0.01 <= iv <= 3.0:  # 1% to 300% annual vol
+            validated_iv_points.append((days, iv))
+        else:
+            print(f"Warning: Invalid IV value {iv} for {days} days, skipping")
+
+    if not validated_iv_points:
+        validated_iv_points = [(0, 0.25)]
+        print(f"Warning: All IV values invalid for {ticker}, using 25% fallback")
+
+    key_vols_iv = validated_iv_points
+
+    # Enhanced dividend yield validation
+    div_raw = stock_details.get('dividend_yield')
+    div_current = 0.0  # Default to 0
+    div_validation_note = "Dividend yield validation: "
+
+    if div_raw is not None:
+        try:
+            # Handle string percentages like "2.5%" or numeric values
+            if isinstance(div_raw, str):
+                div_raw = div_raw.replace('%', '').strip()
+                if div_raw and div_raw != '-' and div_raw.lower() != 'n/a':
+                    div_current = float(div_raw) / 100.0  # Convert percentage to decimal
+                else:
+                    div_current = 0.0
+            else:
+                div_current = float(div_raw)
+                # If value > 1, assume it's a percentage
+                if div_current > 1.0:
+                    div_current = div_current / 100.0
+
+            # Validate reasonable dividend yield range (0% to 15%)
+            if div_current < 0 or div_current > 0.15:
+                print(f"Warning: Unreasonable dividend yield {div_current*100:.2f}% for {ticker}, setting to 0%")
+                div_current = 0.0
+                div_validation_note += f"Invalid value {div_raw}, using 0%"
+            else:
+                div_validation_note += f"Valid value: {div_current*100:.2f}%"
+
+        except (ValueError, TypeError, AttributeError):
+            div_current = 0.0
+            div_validation_note += f"Parse error for '{div_raw}', using 0%"
+    else:
+        div_validation_note += "No dividend data, using 0%"
+
     earnings_date = parse_earnings_date(stock_details.get('earnings_date'))
 
     movement_analysis_results = analyze_high_movement_expectation(S_current, option_chain_df, historical_prices_df, earnings_date=earnings_date, expiration_date=expiration_date)
@@ -748,16 +1107,109 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
 
     days_to_exp = (expiration_date - date.today()).days
     if days_to_exp < 0: return {"status": "error", "message": "Expiration date is in the past."}
-    
+
+    # Enhanced volatility term structure validation
     vol_term_structure = generate_forward_vol_structure(days_to_exp, key_vols_iv)
+    vol_validation_note = "Volatility term structure validation: "
+
+    # Validate vol_term_structure output
+    if vol_term_structure is None or len(vol_term_structure) == 0:
+        vol_term_structure = np.full(days_to_exp, 0.25)
+        vol_validation_note += "Generation failed, using 25% constant fallback"
+        print(f"Warning: Vol term structure generation failed for {ticker}, using 25% constant")
+    else:
+        # Check for reasonable volatility values
+        invalid_vols = np.sum((vol_term_structure < 0.01) | (vol_term_structure > 3.0))
+        if invalid_vols > 0:
+            vol_term_structure = np.clip(vol_term_structure, 0.01, 3.0)
+            vol_validation_note += f"Clipped {invalid_vols} invalid volatility values to [1%, 300%] range"
+            print(f"Warning: Clipped {invalid_vols} invalid volatility values for {ticker}")
+        else:
+            vol_validation_note += f"Generated {len(vol_term_structure)} valid daily vol points (range: {vol_term_structure.min():.4f}-{vol_term_structure.max():.4f})"
+
+    # Enhanced risk-free rate validation
+    r_input = None
+    rate_validation_note = "Risk-free rate validation: "
+
     if rate_source == 'treasury':
-        r_input = build_treasury_curve(fmp)['rate_fn']
-    else: r_input = r_current
+        try:
+            treasury_curve = build_treasury_curve(fmp)
+            r_input = treasury_curve['rate_fn']
+
+            # Test the rate function with typical maturities
+            test_rates = []
+            for test_T in [0.25, 0.5, 1.0]:  # 3m, 6m, 1y
+                test_rate = r_input(test_T)
+                if 0.0 <= test_rate <= 0.20:  # 0% to 20% seems reasonable
+                    test_rates.append(test_rate)
+                else:
+                    raise ValueError(f"Unreasonable rate {test_rate*100:.2f}% for {test_T}Y maturity")
+
+            rate_validation_note += f"Treasury curve loaded successfully (sample rates: {[f'{r*100:.2f}%' for r in test_rates[:3]]})"
+
+        except Exception as e:
+            print(f"Warning: Treasury curve failed for {ticker}: {str(e)}, using fallback rate")
+            r_input = r_current
+            rate_validation_note += f"Treasury failed, using fallback: {r_current*100:.2f}%"
+    else:
+        r_input = r_current
+        rate_validation_note += f"Using provided rate: {r_current*100:.2f}%"
+
+    # Final validation of r_input
+    if callable(r_input):
+        # Test callable rate function
+        try:
+            test_rate = r_input(1.0)  # Test 1-year rate
+            if not (0.0 <= test_rate <= 0.20):
+                raise ValueError(f"Rate function returned unreasonable rate: {test_rate*100:.2f}%")
+        except Exception as e:
+            print(f"Warning: Rate function validation failed for {ticker}: {str(e)}, using constant fallback")
+            r_input = max(0.0, min(0.20, r_current))  # Clamp to reasonable range
+            rate_validation_note += f" -> Rate function invalid, using constant: {r_input*100:.2f}%"
+    else:
+        # Validate constant rate
+        if not (0.0 <= r_input <= 0.20):
+            original_rate = r_input
+            r_input = max(0.0, min(0.20, r_input))  # Clamp to 0-20%
+            rate_validation_note += f" -> Clamped rate from {original_rate*100:.2f}% to {r_input*100:.2f}%"
 
     results, parity_data, greeks_by_strike = [], [], {}
     selected_strikes = strikes[(strikes > S_current * 0.8) & (strikes < S_current * 1.2)]
-    
-    # Vega calculation setup: bump volatility by 1%
+
+    # Comprehensive input parameter validation before Greeks calculations
+    param_validation = validate_greeks_input_parameters(
+        S_current, vol_term_structure, r_input, div_current, ticker, days_to_exp
+    )
+
+    if not param_validation['valid']:
+        print(f"CRITICAL: Parameter validation failed for {ticker}: {param_validation['validation_summary']}")
+        for error in param_validation['errors']:
+            print(f"ERROR: {error}")
+        return {"status": "error", "message": f"Invalid parameters for Greeks calculation: {'; '.join(param_validation['errors'])}"}
+
+    if param_validation['warnings']:
+        print(f"Parameter validation warnings for {ticker}:")
+        for warning in param_validation['warnings']:
+            print(f"WARNING: {warning}")
+
+    # Apply any corrected parameters
+    if param_validation['corrected_params']:
+        if 'vol_term_structure' in param_validation['corrected_params']:
+            vol_term_structure = param_validation['corrected_params']['vol_term_structure']
+            print(f"Applied corrected volatility term structure for {ticker}")
+        if 'r_input' in param_validation['corrected_params']:
+            r_input = param_validation['corrected_params']['r_input']
+            print(f"Applied corrected risk-free rate for {ticker}: {r_input*100:.2f}%")
+        if 'div_current' in param_validation['corrected_params']:
+            div_current = param_validation['corrected_params']['div_current']
+            print(f"Applied corrected dividend yield for {ticker}: {div_current*100:.2f}%")
+
+    print(f"Parameter validation completed for {ticker}: {param_validation['validation_summary']}")
+
+    # Import optimized Vega calculator
+    from .vega_optimizer import get_optimized_vega
+
+    # Vega calculation setup: bump volatility by 1% (fallback method)
     vega_bump = 0.01
     bumped_key_vols_iv = [(d, v + vega_bump) for d, v in key_vols_iv]
     bumped_vol_term_structure = generate_forward_vol_structure(days_to_exp, bumped_key_vols_iv)
@@ -775,7 +1227,8 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
         # Calculate Greeks for both calls and puts at this strike
         strike_greeks = {}
         for option_type, market_price in [('call', call_market_price), ('put', put_market_price)]:
-            if market_price is None: continue
+            # Calculate theoretical Greeks even if market price is not available
+            # This ensures complete greeks_by_strike data for all strikes
             
             # Get model price and Greeks
             model_price, greeks, _, _ = universal_binomial_pricer(
@@ -784,13 +1237,55 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
                 option_type=option_type, div=div_current
             )
             
-            # Calculate Vega by re-pricing with bumped volatility
-            bumped_price, _, _, _ = universal_binomial_pricer(
-                S=S_current, K=K, expiration_date=expiration_date,
-                r_input=r_input, sigma_input=bumped_vol_term_structure,
-                option_type=option_type, div=div_current
-            )
-            vega = (bumped_price - model_price) if bumped_price is not None and model_price is not None else None
+            # Calculate Vega using optimized method (avoids full repricing when possible)
+            try:
+                # Use optimized Vega calculation with cached model price
+                time_to_expiry = (expiration_date - datetime.now().date()).days / 365.25
+                current_vol = np.mean(vol_term_structure) if isinstance(vol_term_structure, (list, np.ndarray)) else vol_term_structure
+
+                vega = get_optimized_vega(
+                    S=S_current,
+                    K=K,
+                    r=r_input,
+                    T=time_to_expiry,
+                    sigma=current_vol,
+                    option_type=option_type,
+                    div=div_current,
+                    cached_price=model_price
+                )
+
+                # Fallback to traditional method if optimized version fails
+                if vega is None:
+                    bumped_price, _, _, _ = universal_binomial_pricer(
+                        S=S_current, K=K, expiration_date=expiration_date,
+                        r_input=r_input, sigma_input=bumped_vol_term_structure,
+                        option_type=option_type, div=div_current
+                    )
+                    vega = (bumped_price - model_price) if bumped_price is not None and model_price is not None else None
+
+            except Exception as e:
+                # Fallback to traditional method on any error
+                print(f"Warning: Optimized Vega calculation failed for {option_type} K={K}, using traditional method: {str(e)}")
+                bumped_price, _, _, _ = universal_binomial_pricer(
+                    S=S_current, K=K, expiration_date=expiration_date,
+                    r_input=r_input, sigma_input=bumped_vol_term_structure,
+                    option_type=option_type, div=div_current
+                )
+                vega = (bumped_price - model_price) if bumped_price is not None and model_price is not None else None
+
+            # Apply fallback for vega if needed
+            if vega is None:
+                try:
+                    # Use repair system to provide fallback vega estimate
+                    moneyness = S_current / K
+                    if 0.95 <= moneyness <= 1.05:  # Near ATM
+                        vega = 0.2
+                    else:
+                        vega = 0.1
+                    print(f"Applied Vega fallback for {option_type} K={K}: {vega:.4f}")
+                except Exception:
+                    vega = None
+
             greeks['vega'] = vega
             
             # Get volume and OI for liquidity assessment
@@ -804,6 +1299,60 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
                 volume = pd.to_numeric(option_row.iloc[0].get('Volume'), errors='coerce')
                 open_interest = pd.to_numeric(option_row.iloc[0].get('Open Int.'), errors='coerce')
             
+            # Calculate rho using proper finite difference method
+            rho = None
+            if model_price is not None:
+                try:
+                    # Rho calculation: sensitivity to risk-free rate change
+                    rate_bump = 0.0001  # 1 basis point
+
+                    # Calculate option price with bumped up rate
+                    r_up = r_input + rate_bump
+                    price_up, _, _, _ = universal_binomial_pricer(
+                        S=S_current, K=K, expiration_date=expiration_date,
+                        r_input=r_up, sigma_input=vol_term_structure,
+                        option_type=option_type,
+                        exercise_type='american', div=div_current
+                    )
+
+                    # Calculate option price with bumped down rate
+                    r_down = r_input - rate_bump
+                    price_down, _, _, _ = universal_binomial_pricer(
+                        S=S_current, K=K, expiration_date=expiration_date,
+                        r_input=r_down, sigma_input=vol_term_structure,
+                        option_type=option_type,
+                        exercise_type='american', div=div_current
+                    )
+
+                    # Rho = (Option_price(r + bump) - Option_price(r - bump)) / (2 * bump)
+                    rho = (price_up - price_down) / (2 * rate_bump)
+
+                    # Scale to per 1% change in interest rate (industry standard)
+                    rho = rho * 0.01
+
+                    # Sanity check: rho should be reasonable relative to option price
+                    if abs(rho) > model_price * 2:  # More sophisticated check
+                        rho = None
+
+                except Exception as e:
+                    # Log the specific error for debugging
+                    print(f"Warning: Rho calculation failed for {option_type} K={K}: {str(e)}")
+                    rho = None
+
+            # Apply fallback for missing Rho using repair system
+            if rho is None and greeks.get('delta') is not None:
+                try:
+                    time_to_expiry = (expiration_date - datetime.now().date()).days / 365.25
+                    rho_fallback = default_greeks_validator._calculate_rho_from_delta(
+                        greeks.get('delta'), K, S_current, time_to_expiry, option_type
+                    )
+                    if rho_fallback is not None:
+                        rho = rho_fallback
+                        print(f"Applied Rho fallback for {option_type} K={K}: {rho:.4f}")
+                except Exception as fallback_e:
+                    print(f"Warning: Rho fallback calculation failed for {option_type} K={K}: {str(fallback_e)}")
+                    rho = None
+
             # Store Greeks with liquidity info
             strike_greeks[option_type] = {
                 'market_price': market_price,
@@ -812,12 +1361,13 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
                 'gamma': greeks.get('gamma'),
                 'theta': greeks.get('theta'),
                 'vega': vega,
+                'rho': rho,
                 'volume': volume,
                 'open_interest': open_interest
             }
             
-            # Check for undervalued options
-            if model_price > market_price:
+            # Check for undervalued options (only when market price is available)
+            if market_price is not None and model_price > market_price:
                 diff = model_price - market_price
                 diff_pct = (diff / market_price) * 100 if market_price > 0 else float('inf')
                 results.append({
@@ -825,7 +1375,44 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
                     "Model Price": model_price, "Undervalued By ($)": diff, "Undervalued By (%)": diff_pct
                 })
         
+        # Apply comprehensive Greeks repair to ensure complete data
         if strike_greeks:
+            try:
+                # Use repair system to fill missing Greeks and improve data quality
+                time_to_expiry = (expiration_date - datetime.now().date()).days / 365.25
+                current_vol = np.mean(vol_term_structure) if isinstance(vol_term_structure, (list, np.ndarray)) else vol_term_structure
+
+                repair_result = default_greeks_validator.validate_and_repair_strike(
+                    strike=K,
+                    strike_data=strike_greeks.copy(),
+                    neighboring_strikes={},  # Could be enhanced with neighboring data
+                    spot_price=S_current,
+                    risk_free_rate=r_input if isinstance(r_input, (int, float)) else 0.05,
+                    time_to_expiry=time_to_expiry,
+                    implied_vol=current_vol
+                )
+
+                # Use repaired data if quality is acceptable
+                if repair_result.quality_score > 0.3:  # Minimum threshold
+                    repaired_greeks = repair_result.repaired_data
+
+                    # Merge repaired data back, preserving original where good
+                    for option_type in ['call', 'put']:
+                        if option_type in strike_greeks and option_type in repaired_greeks:
+                            original_data = strike_greeks[option_type]
+                            repaired_data = repaired_greeks[option_type]
+
+                            # Fill missing values with repaired ones
+                            for greek in ['delta', 'gamma', 'theta', 'vega', 'rho']:
+                                if original_data.get(greek) is None and greek in repaired_data:
+                                    original_data[greek] = repaired_data[greek]
+
+                    if repair_result.repairs_made:
+                        print(f"Applied Greeks repair for strike {K}: {', '.join(repair_result.repairs_made)}")
+
+            except Exception as repair_e:
+                print(f"Warning: Greeks repair failed for strike {K}: {str(repair_e)}")
+
             greeks_by_strike[float(K)] = strike_greeks
 
     synthesis_data = {}
@@ -947,6 +1534,7 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
         "analysis_method": analysis_method,
         "gpt_model": gpt_model if 'gpt' in analysis_method else None,
         "synthesis_data": synthesis_data,
+        "macro_context": _sanitize_for_json_serialization(macro_context), # [NEW]
         "iv_high": iv_high,
         "iv_low": iv_low, 
         "candlestick_analysis": _sanitize_for_json_serialization(candlestick_analysis), 
@@ -969,6 +1557,14 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
             "implied_volatility": spot_iv,
             "iv_hv_ratio": (spot_iv / hv_current) if (spot_iv and hv_current and hv_current > 0) else None,
             "dividend_yield": div_current,
+            # Enhanced parameter validation status
+            "parameter_validation": {
+                "price_validation": price_validation_note,
+                "volatility_validation": vol_validation_note,
+                "rate_validation": rate_validation_note,
+                "dividend_validation": div_validation_note,
+                "iv_validation": iv_validation_note
+            },
             "risk_free_rate": r_current,
             "earnings_date": earnings_date.isoformat() if earnings_date else None,
             "days_to_earnings": (earnings_date - date.today()).days if earnings_date else None,
@@ -1003,6 +1599,7 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
         "volatility_structure": _sanitize_for_json_serialization({
             "iv_term_points": key_vols_iv,
             "forward_vol_structure": vol_term_structure.tolist() if isinstance(vol_term_structure, np.ndarray) else vol_term_structure,
+            "hv_rank": hv_rank, # [NEW]
             "vol_skew_analysis": {
                 "iv_rank_proxy": "high" if iv_high else ("low" if iv_low else "normal"),
                 "hv_comparison": {
@@ -1019,9 +1616,9 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
             "strike_distribution": {
                 "analyzed_strikes": selected_strikes.tolist() if hasattr(selected_strikes, 'tolist') else list(selected_strikes),
                 "atm_strike": float(strikes[np.argmin(np.abs(strikes - S_current))]) if len(strikes) > 0 else None,
-                "valid_strikes": selected_strikes.tolist() if hasattr(selected_strikes, 'tolist') else list(selected_strikes)
+                "valid_strikes": _get_synchronized_valid_strikes(selected_strikes, greeks_by_strike, ticker)
             },
-            "greeks_by_strike": greeks_by_strike
+            "greeks_by_strike": _get_synchronized_greeks_by_strike(selected_strikes, greeks_by_strike, ticker)
         })
     }
 

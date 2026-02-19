@@ -1,16 +1,14 @@
-"""
-Connection manager to handle single IBTrader instance across multiple service calls.
-This prevents multiple TWS connections from being created simultaneously.
-"""
+"""Singleton manager for sharing a single broker client across service calls."""
 import asyncio
 import time
 from typing import Optional
-from ..my_libs_py3.TD_Order import IBTrader
+from ..my_libs_py3.TD_Order import AlpacaTrader
 
-class IBConnectionManager:
-    """Singleton connection manager for IBTrader to prevent multiple TWS connections."""
+
+class BrokerConnectionManager:
+    """Manage lifecycle for a shared AlpacaTrader instance in async contexts."""
     
-    _instance: Optional['IBConnectionManager'] = None
+    _instance: Optional['BrokerConnectionManager'] = None
     _lock = None
     
     def __new__(cls):
@@ -40,8 +38,8 @@ class IBConnectionManager:
             self._connection_lock = asyncio.Lock()
             self._loop = current_loop
     
-    async def get_trader(self) -> IBTrader:
-        """Get or create the shared IBTrader instance with connection health check."""
+    async def get_trader(self) -> AlpacaTrader:
+        """Get or create the shared AlpacaTrader instance with connection health check."""
         # Ensure lock and resources are bound to current loop
         self._ensure_lock()
         async with self._connection_lock:
@@ -55,18 +53,18 @@ class IBConnectionManager:
             
             if self._trader is None:
                 try:
-                    self._trader = IBTrader()
+                    self._trader = AlpacaTrader()
                     await self._trader.connect()  # Explicitly connect to validate the connection
-                    print("INFO: Connection manager established new TWS connection")
+                    print("INFO: Connection manager established new Alpaca connection")
                 except Exception as e:
-                    print(f"ERROR: Connection manager failed to establish TWS connection: {e}")
+                    print(f"ERROR: Connection manager failed to establish Alpaca connection: {e}")
                     self._last_error_time = current_time
                     self._trader = None
                     raise
             else:
                 # Check if the existing connection is still healthy
                 try:
-                    if not self._trader.client.isConnected():
+                    if not self._trader.client.is_connected():
                         print("INFO: Connection manager detected disconnected client, reconnecting...")
                         await self._trader.connect()
                 except Exception as e:
@@ -75,8 +73,8 @@ class IBConnectionManager:
                         self._trader.disconnect()
                     except:
                         pass
-                    # Create new trader instance (IBTrader handles loop binding internally)
-                    self._trader = IBTrader()
+                    # Create new trader instance (AlpacaTrader handles loop binding internally)
+                    self._trader = AlpacaTrader()
                     await self._trader.connect()
                     
             return self._trader
@@ -88,7 +86,7 @@ class IBConnectionManager:
             if self._trader is not None:
                 try:
                     self._trader.disconnect()
-                    print("INFO: Connection manager disconnected TWS connection")
+                    print("INFO: Connection manager disconnected Alpaca connection")
                 except Exception as e:
                     print(f"WARN: Error during disconnect: {e}")
                 finally:
@@ -107,4 +105,4 @@ class IBConnectionManager:
             print("INFO: Connection manager reset connection")
 
 # Global instance
-connection_manager = IBConnectionManager()
+connection_manager = BrokerConnectionManager()
