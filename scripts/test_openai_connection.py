@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test OPENAI_API_BASE connection (same endpoint as backend /api/gpt-models)."""
+"""Test Gemini connection (same model listing as backend /api/gpt-models)."""
 import os
 import sys
 
@@ -25,33 +25,28 @@ except ImportError:
     print("Error: requests not installed. Run: pip install requests")
     sys.exit(1)
 
-base = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1").rstrip("/")
-api_key = os.getenv("OPENAI_API_KEY")
+api_key = os.getenv("GEMINI_API_KEY")
+url = "https://generativelanguage.googleapis.com/v1beta/models"
 
 def main():
-    print(f"OPENAI_API_BASE: {base}")
-    print(f"OPENAI_API_KEY: {'(set)' if api_key else '(not set)'}")
+    print(f"GEMINI_API_KEY: {'(set)' if api_key else '(not set)'}")
     if not api_key:
-        print("FAIL: OPENAI_API_KEY is not set")
+        print("FAIL: GEMINI_API_KEY is not set")
         sys.exit(1)
-    url = f"{base}/models"
     print(f"GET {url}")
     try:
         r = requests.get(
             url,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
+            params={"key": api_key},
             timeout=15,
         )
         print(f"Status: {r.status_code}")
         if r.status_code == 200:
             data = r.json()
-            models = data.get("data", [])
+            models = data.get("models", [])
             print(f"OK: Connection successful. Models listed: {len(models)}")
             if models:
-                names = [m.get("id", m.get("name", "?")) for m in models[:5]]
+                names = [m.get("name", "?") for m in models[:5]]
                 print(f"Sample: {names}")
             sys.exit(0)
         print(f"Response: {r.text[:500]}")

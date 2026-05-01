@@ -1,0 +1,13 @@
+---
+description: Airflow data source modification - only edit My_Trader2.0 dev version
+alwaysApply: true
+---
+
+# Airflow Data Source Modification
+
+For airflow data source modifications (e.g. IV history, data collection, Alpaca/Finviz integration):
+
+- **Only edit**: `airflowProd/notebook/My_Trader2.0/dataCollector.py` (and related files under `My_Trader2.0/` such as `my_libs_py3/alpaca_trader.py`).
+- **Do NOT edit**: `airflowProd/airflow_notebook/My_Trader/` — that is the production copy synced via git for deployment.
+
+`My_Trader2.0` is the dev version. Production (`My_Trader`) is kept in sync through git and deploy workflow, not by editing both copies.

@@ -1,0 +1,15 @@
+---
+description: When building a new pipeline, create a test Jupyter notebook in Notebooks/
+alwaysApply: true
+---
+
+# Pipeline Test Notebooks
+
+When a **new pipeline** is built (e.g. a new Airflow DAG, a new data collection flow, or a new ETL step):
+
+1. **Create a new test Jupyter notebook** in the `Notebooks/` folder.
+2. Name it clearly after the pipeline, e.g. `test_<pipeline_name>.ipynb` (e.g. `test_alpaca.ipynb`, `test_iv_history.ipynb`).
+3. The notebook should allow **easy, local validation** of the pipeline logic (credentials and paths configurable via env or a single setup cell).
+4. Keep the notebook minimal: setup path/imports, then a few cells to run the key steps (e.g. fetch spot price, fetch IV, or one full pipeline run for one ticker).
+
+This makes it easy to debug pipeline changes without running the full DAG in Airflow.

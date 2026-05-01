@@ -26,7 +26,7 @@ def run_analysis_with_validation(ticker: str,
                                 rate_source: str = 'etf',
                                 analysis_method: str = 'holistic-market-edge',
                                 override_price: float = None,
-                                gpt_model: str = 'gpt-5',
+                                gpt_model: str = 'gemini-2.5-flash',
                                 validation_mode: str = 'strict',
                                 min_quality_threshold: float = 0.45) -> Dict[str, Any]:
     """

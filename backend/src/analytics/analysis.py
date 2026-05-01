@@ -4,6 +4,7 @@ import math
 from datetime import date, timedelta, datetime
 from src.my_libs_py3.my_data import PriceDataFetcher
 from src.my_libs_py3.fmp import FMPClient
+from src.my_libs_py3.db import connect_mongo
 from src.analytics.treasury_curve import build_treasury_curve
 from .methodologies.gpt_verdict import generate_gpt_verdict
 from .strike_normalization import default_normalizer
@@ -689,6 +690,33 @@ def calculate_hv_rank(prices_series, window=20, lookback_period=252):
     return current_hv, hv_rank
 
 
+def calculate_iv_rank(ticker, lookback_days=252):
+    """
+    Queries MongoDB iv_history and computes IV Rank (0-1).
+    Returns None if fewer than 30 data points (cold start period).
+    Uses same formula as calculate_hv_rank().
+    """
+    try:
+        db = connect_mongo("iv_history", ticker)
+        cutoff = datetime.now() - timedelta(days=lookback_days + 30)
+        docs = list(db.table.find(
+            {"Ticker": ticker, "TimeStamp": {"$gte": cutoff}},
+            {"spot_iv": 1}
+        ).sort("TimeStamp", 1))
+
+        iv_values = [d["spot_iv"] for d in docs if d.get("spot_iv") is not None]
+        if len(iv_values) < 30:
+            return None  # not enough history yet
+
+        current_iv = iv_values[-1]
+        min_iv, max_iv = min(iv_values), max(iv_values)
+        if max_iv == min_iv:
+            return 0.5
+        return (current_iv - min_iv) / (max_iv - min_iv)
+    except Exception:
+        return None
+
+
 def get_macro_context(price_fetcher, fmp_client=None):
     """
     Fetches SPY and VIX data to provide market context.
@@ -911,7 +939,7 @@ def validate_greeks_input_parameters(S_current, vol_term_structure, r_input, div
     }
 
 
-def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, rate_source: str = 'etf', analysis_method: str = 'holistic-market-edge', override_price: float = None, gpt_model: str = 'gpt-5'):
+def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, rate_source: str = 'etf', analysis_method: str = 'holistic-market-edge', override_price: float = None, gpt_model: str = 'gemini-2.5-flash'):
     fmp = FMPClient()
     price_fetcher = PriceDataFetcher()
 
@@ -1599,7 +1627,8 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
         "volatility_structure": _sanitize_for_json_serialization({
             "iv_term_points": key_vols_iv,
             "forward_vol_structure": vol_term_structure.tolist() if isinstance(vol_term_structure, np.ndarray) else vol_term_structure,
-            "hv_rank": hv_rank, # [NEW]
+            "hv_rank": hv_rank,
+            "iv_rank": calculate_iv_rank(ticker),  # float 0-1, or None during cold start (<30 days of history)
             "vol_skew_analysis": {
                 "iv_rank_proxy": "high" if iv_high else ("low" if iv_low else "normal"),
                 "hv_comparison": {
@@ -1626,7 +1655,7 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
         print(f"DEBUG: Running GPT Verdict analysis for {ticker} (method: {analysis_method})")
         use_web = 'web' in analysis_method
         # Pass the sub-analyses to the AI
-        gpt_verdict = generate_gpt_verdict(ticker, expiration_date.isoformat(), analysis_result_package, model=gpt_model or 'gpt-5', use_web_search=use_web)
+        gpt_verdict = generate_gpt_verdict(ticker, expiration_date.isoformat(), analysis_result_package, model=gpt_model or 'gemini-2.5-flash', use_web_search=use_web)
         print(f"DEBUG: GPT Verdict response received: {gpt_verdict}")
 
         # Populate the package with AI results

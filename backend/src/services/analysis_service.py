@@ -1005,7 +1005,7 @@ def _sanitize_for_json(item):
         return None
     return item
 
-async def run_full_analysis(ticker: str, expiration_date: date, r_current: float = 0.045, rate_source: str = 'etf', methodology: str = 'holistic-market-edge', gpt_model: str = 'gpt-5', override_price: float = None):
+async def run_full_analysis(ticker: str, expiration_date: date, r_current: float = 0.045, rate_source: str = 'etf', methodology: str = 'holistic-market-edge', gpt_model: str = 'gemini-2.5-flash', override_price: float = None):
     """
     Performs all calculations for the option screener, fully implementing Key Feature 1.
     Now uses the improved run_analysis function with multi-source price validation.

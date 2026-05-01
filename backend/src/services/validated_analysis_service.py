@@ -62,7 +62,7 @@ class ValidatedAnalysisService:
                                    r_current: float = 0.045,
                                    rate_source: str = 'etf',
                                    methodology: str = 'holistic-market-edge',
-                                   gpt_model: str = 'gpt-5',
+                                   gpt_model: str = 'gemini-2.5-flash',
                                    override_price: float = None,
                                    validation_mode: str = None,
                                    min_quality_threshold: float = None,

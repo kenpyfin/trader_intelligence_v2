@@ -50,7 +50,7 @@ class ValidatedAnalysisRequest(BaseModel):
     expiration_date: str = Field(..., description="Option expiration date in YYYYMMDD format")
     risk_free_rate: float = Field(0.045, description="Risk-free interest rate")
     analysis_method: str = Field('holistic-market-edge', description="Analysis methodology")
-    gpt_model: str = Field('gpt-5', description="GPT model for verdict generation")
+    gpt_model: str = Field('gemini-2.5-flash', description="Model for verdict generation")
     override_price: Optional[float] = Field(None, description="Manual price override for testing")
 
     # Validation parameters

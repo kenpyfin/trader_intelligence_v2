@@ -275,6 +275,16 @@ function useStickyState(defaultValue, key) {
   return [value, setValue];
 }
 
+const RISK_FREE_DECIMAL_PLACES = 4;
+
+/** Rounds to 4 decimal places so the rate field does not show float noise from API/storage. */
+function normalizeRiskFreeRate(value, fallback = 0.045) {
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  const f = 10 ** RISK_FREE_DECIMAL_PLACES;
+  return Math.round(n * f) / f;
+}
+
 // --- Helper Components for Display ---
 
 const AnalysisCard = ({ title, children, action }) => (
@@ -1844,7 +1854,20 @@ class AnalysisErrorBoundary extends Component {
 const AnalysisPage = () => {
   const [ticker, setTicker] = useStickyState('SPY', 'ticker');
   const [analysisMethod, setAnalysisMethod] = useStickyState('holistic-market-edge', 'analysisMethod');
-  const [riskFreeRate, setRiskFreeRate] = useStickyState(0.045, 'riskFreeRate');
+  const [riskFreeRate, setRiskFreeRateStored] = useStickyState(0.045, 'riskFreeRate');
+
+  useEffect(() => {
+    setRiskFreeRateStored((prev) => normalizeRiskFreeRate(prev));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const setRiskFreeRate = useCallback((next) => {
+    setRiskFreeRateStored((prev) => {
+      const candidate = typeof next === 'number' ? next : parseFloat(String(next), 10);
+      if (!Number.isFinite(candidate)) return prev;
+      return normalizeRiskFreeRate(candidate);
+    });
+  }, [setRiskFreeRateStored]);
   const [expirations, setExpirations] = useState([]);
   const [selectedExpiration, setSelectedExpiration] = useState('');
   const [fetchingExpirations, setFetchingExpirations] = useState(false);
@@ -1858,7 +1881,7 @@ const AnalysisPage = () => {
   
   // GPT Model selection state
   const [availableModels, setAvailableModels] = useState([]);
-  const [selectedModel, setSelectedModel] = useStickyState('gpt-5', 'selectedGptModel');
+  const [selectedModel, setSelectedModel] = useStickyState('gemini-2.5-flash', 'selectedGptModel');
   const [fetchingModels, setFetchingModels] = useState(false);
   const HISTORY_PAGE_SIZE = 5;
   const HISTORY_SCOPE_ALL = 'all';
@@ -1891,7 +1914,7 @@ const AnalysisPage = () => {
 
   const formatRiskFreeRate = (value) => {
     const numeric = Number(value);
-    return Number.isFinite(numeric) ? numeric.toFixed(3) : '';
+    return Number.isFinite(numeric) ? normalizeRiskFreeRate(numeric).toFixed(RISK_FREE_DECIMAL_PLACES) : '';
   };
 
   const formatExpiration = (value) => {
@@ -2001,7 +2024,7 @@ const AnalysisPage = () => {
         setAvailableModels(response.data.models);
         // Set default model if current selection is not available
         if (!response.data.models.some(model => model.id === selectedModel)) {
-          setSelectedModel(response.data.default || 'gpt-5');
+          setSelectedModel(response.data.default || 'gemini-2.5-flash');
         }
       }
     } catch (error) {
@@ -2009,9 +2032,8 @@ const AnalysisPage = () => {
       console.error('Error details:', error.response?.data || error.message);
       // Fallback to default models if API fails
       setAvailableModels([
-        { id: 'gpt-5', name: 'GPT-5 (Fallback)' },
-        { id: 'gpt-4o', name: 'GPT-4o (Fallback)' },
-        { id: 'claude-3.5-sonnet', name: 'Claude 3.5 Sonnet (Fallback)' }
+        { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash (Fallback)' },
+        { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (Fallback)' }
       ]);
     } finally {
       setFetchingModels(false);
@@ -2302,7 +2324,7 @@ const AnalysisPage = () => {
               <TextField
                 label="Risk-Free Rate"
                 type="number"
-                inputProps={{ step: "0.001" }}
+                inputProps={{ step: 0.0001 }}
                 value={riskFreeRate}
                 onChange={(e) => setRiskFreeRate(parseFloat(e.target.value))}
                 required

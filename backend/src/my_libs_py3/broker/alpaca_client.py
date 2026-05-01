@@ -45,7 +45,14 @@ class AlpacaAsyncClient(AsyncBrokerClient):
         self._key_id = os.getenv("APCA_API_KEY_ID")
         self._secret_key = os.getenv("APCA_API_SECRET_KEY")
         self._base_url = os.getenv("APCA_API_BASE_URL", "https://api.alpaca.markets")
-        self._data_url = os.getenv("APCA_DATA_BASE_URL", "https://data.alpaca.markets")
+        # If not set, use sandbox data URL when trading base is paper (match paper keys)
+        _base = (self._base_url or "").lower()
+        if os.getenv("APCA_DATA_BASE_URL"):
+            self._data_url = os.getenv("APCA_DATA_BASE_URL")
+        elif "paper" in _base or "sandbox" in _base:
+            self._data_url = "https://data.sandbox.alpaca.markets"
+        else:
+            self._data_url = "https://data.alpaca.markets"
         self._trading: Optional[TradingClient] = None
         self._stock_data: Optional[StockHistoricalDataClient] = None
         self._option_data: Optional[OptionHistoricalDataClient] = None
@@ -207,10 +214,20 @@ class AlpacaAsyncClient(AsyncBrokerClient):
             return await asyncio.to_thread(self._trading.get_orders, request_obj)
         return await asyncio.to_thread(self._trading.get_orders)
 
-    async def get_option_chain(self, symbol: str):
+    async def get_option_chain(
+        self,
+        symbol: str,
+        expiration_date_gte: Optional[str] = None,
+        expiration_date_lte: Optional[str] = None,
+    ):
+        """Fetch option chain snapshots, optionally filtered by expiration date range."""
         if self._option_data is None:
             raise RuntimeError("Option data client is not initialized.")
-        request = _build_option_chain_request(symbol)
+        request = _build_option_chain_request(
+            symbol,
+            expiration_date_gte=expiration_date_gte,
+            expiration_date_lte=expiration_date_lte,
+        )
         return await asyncio.to_thread(self._option_data.get_option_chain, request)
 
     def _is_paper(self) -> bool:
@@ -325,36 +342,43 @@ def _resolve_option_chain_feed():
     return None
 
 
-def _build_option_chain_request(symbol: str) -> OptionChainRequest:
+def _normalize_expiry_for_api(expiry: str) -> str:
+    """Convert expiry to YYYY-MM-DD for Alpaca API."""
+    expiry = expiry.strip().replace("-", "")
+    if len(expiry) == 8 and expiry.isdigit():
+        return f"{expiry[:4]}-{expiry[4:6]}-{expiry[6:8]}"
+    if len(expiry) == 6 and expiry.isdigit():
+        return f"20{expiry[:2]}-{expiry[2:4]}-{expiry[4:6]}"
+    return expiry
+
+
+def _build_option_chain_request(
+    symbol: str,
+    expiration_date_gte: Optional[str] = None,
+    expiration_date_lte: Optional[str] = None,
+) -> OptionChainRequest:
     symbol_upper = symbol.upper()
     feed = _resolve_option_chain_feed()
-    attempts = []
+    kwargs: Dict[str, Any] = {"underlying_symbol": symbol_upper}
     if feed is not None:
-        attempts.extend([
-            {"underlying_symbol": symbol_upper, "feed": feed},
-            {"root_symbol": symbol_upper, "feed": feed},
-        ])
-    attempts.extend([
-        {"underlying_symbol": symbol_upper},
-        {"root_symbol": symbol_upper},
-    ])
-    errors = []
-    for kwargs in attempts:
-        try:
-            request = OptionChainRequest(**kwargs)
-            if feed is not None and getattr(request, "feed", None) in (None, ""):
-                try:
-                    request.feed = feed
-                except Exception:
-                    pass
-            return request
-        except Exception as err:
-            errors.append((kwargs, err))
-            continue
-    detail = "; ".join(f"{attempt}: {error}" for attempt, error in errors if error)
-    raise RuntimeError(
-        f"Unable to construct OptionChainRequest for symbol {symbol_upper}: {detail or errors[-1][1] if errors else 'unknown error'}"
-    )
+        kwargs["feed"] = feed
+    if expiration_date_gte:
+        kwargs["expiration_date_gte"] = _normalize_expiry_for_api(expiration_date_gte)
+    if expiration_date_lte:
+        kwargs["expiration_date_lte"] = _normalize_expiry_for_api(expiration_date_lte)
+
+    try:
+        request = OptionChainRequest(**kwargs)
+        if feed is not None and getattr(request, "feed", None) in (None, ""):
+            try:
+                request.feed = feed
+            except Exception:
+                pass
+        return request
+    except Exception as err:
+        raise RuntimeError(
+            f"Unable to construct OptionChainRequest for symbol {symbol_upper}: {err}"
+        )
 
 
 def _build_stock_order(payload: Dict[str, Any]) -> Any:

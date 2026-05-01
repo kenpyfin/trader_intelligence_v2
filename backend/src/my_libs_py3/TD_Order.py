@@ -12,6 +12,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 import pandas as pd
 
 from .broker.alpaca_client import AlpacaAsyncClient, build_occ_symbol
+from .iv_from_alpaca import calculate_iv_points_from_alpaca_chain
 
 TIMEOUT = int(os.getenv("ALPACA_ORDER_TIMEOUT", "60"))
 DEFAULT_TIF = os.getenv("ALPACA_DEFAULT_TIME_IN_FORCE", "day")
@@ -575,16 +576,21 @@ class AlpacaTrader:
         """
         Fetches the option chain for a specific expiration date from Alpaca
         and returns it as a pandas DataFrame.
+        Uses server-side expiration filter to ensure the requested expiry is in the first page.
         """
         await self.connect()
-        chain = await self.client.get_option_chain(symbol)
+        norm_expiration = _normalize_expiry(expiration_date).replace("-", "")
+        chain = await self.client.get_option_chain(
+            symbol,
+            expiration_date_gte=norm_expiration,
+            expiration_date_lte=norm_expiration,
+        )
         if not isinstance(chain, dict):
             print(f"DEBUG(TD_Order): get_option_chain for {symbol} returned non-dict: {type(chain)}")
             return pd.DataFrame()
-        
+
         print(f"DEBUG(TD_Order): Received raw chain for {symbol} with {len(chain)} contracts.")
         rows = []
-        norm_expiration = _normalize_expiry(expiration_date).replace("-", "")
         print(f"DEBUG(TD_Order): Filtering for expiration date {norm_expiration}...")
 
         match_count = 0
@@ -612,6 +618,55 @@ class AlpacaTrader:
             return pd.DataFrame()
 
         return pd.DataFrame(rows)
+
+    def _run_sync(self, coro):
+        """Run async coroutine from sync context (works in Jupyter or script)."""
+        try:
+            asyncio.get_running_loop()
+            # Already in async context: run in a new thread to avoid blocking
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(asyncio.run, coro).result()
+        except RuntimeError:
+            return asyncio.run(coro)
+
+    def get_spot_price_from_data_api(self, symbol: str) -> Optional[float]:
+        """
+        Sync wrapper: fetch spot price from Alpaca Data API (stock latest quote).
+        Used by the IV pipeline; same data source as option chain for calculating IV.
+        """
+        try:
+            return self._run_sync(self.get_current_price(symbol, "STK"))
+        except Exception:
+            return None
+
+    def calculate_iv_points_from_data_api(
+        self,
+        symbol: str,
+        risk_free_rate: float = 0.05,
+    ) -> Optional[Dict[str, float]]:
+        """
+        Compute IV points (spot, 7d, 30d, 90d) from Alpaca option chain + spot.
+        Alpaca does not provide IV; we back it out from option prices via binomial pricer.
+        Same mechanism can be saved to MongoDB for IV rank in trader intelligence.
+        """
+        async def _get_spot_and_chain():
+            await self.connect()
+            spot = await self.get_current_price(symbol, "STK")
+            if spot is None or spot <= 0:
+                return None, None
+            chain = await self.client.get_option_chain(symbol)
+            return spot, chain
+
+        try:
+            spot, chain = self._run_sync(_get_spot_and_chain())
+        except Exception:
+            return None
+        if spot is None or not isinstance(chain, dict):
+            return None
+        return calculate_iv_points_from_alpaca_chain(
+            chain, float(spot), risk_free_rate=risk_free_rate
+        )
 
 
 IBTrader = AlpacaTrader

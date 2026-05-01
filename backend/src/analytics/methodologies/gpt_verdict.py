@@ -30,6 +30,32 @@ if not logger.handlers:
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
+DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_DEFAULT_MODEL", "gemini-2.5-flash")
+
+
+def _resolve_gemini_model(model: str) -> str:
+    """
+    Maps legacy GPT/OpenAI model names to Gemini defaults.
+    Preserves explicit Gemini model names unchanged.
+    """
+    if not model:
+        return DEFAULT_GEMINI_MODEL
+
+    normalized = model.strip()
+    lowered = normalized.lower()
+    if lowered.startswith("models/"):
+        normalized = normalized.split("/", 1)[1]
+        lowered = normalized.lower()
+
+    if lowered.startswith("gemini"):
+        return normalized
+
+    # Backward compatibility for existing saved/default GPT model values.
+    if lowered.startswith("gpt-") or lowered.startswith("o3") or lowered.startswith("o1"):
+        return DEFAULT_GEMINI_MODEL
+
+    return normalized
+
 class FailureCategory(Enum):
     """Categorizes different types of failures for better diagnostics."""
     API_TIMEOUT = "api_timeout"
@@ -668,11 +694,20 @@ def _build_analyst_messages(ticker: str, expiration_date: str, analysis_payload:
         "You do NOT execute trades; you provide the directional bias and risk assessment for the execution trader. "
         "\n\n"
         "DATA SOURCES TO ANALYZE:\n"
-        "1. MACRO CONTEXT: Check `macro_context` (SPY Trend, VIX Regime). Is the broad market supportive?\n"
+        "1. MACRO CONTEXT: Check `macro_context` (Broad Market Trend, VIX Regime). Use ONLY to describe broad market backdrop (e.g., 'bullish backdrop', 'low volatility environment'). DO NOT cite specific SPY price points or other indices - focus on regime and sentiment.\n"
         "2. FUNDAMENTALS: Check `stock_fundamentals` (Valuation, Growth). Is this a quality asset?\n"
         "3. TECHNICALS: Check `technical_analysis` (Trend, RSI, Support/Resistance).\n"
-        "4. VOLATILITY: Check `volatility_structure` (HV Rank, IV vs HV). Is vol cheap or expensive?\n"
-        "5. SENTIMENT: Check `options_positioning` (Put/Call Parity, Flows).\n"
+        "4. VOLATILITY: Check `volatility_structure`.\n"
+        "   - Primary signal: use `iv_rank` (0.0–1.0 scale) if not null:\n"
+        "     iv_rank > 0.7 → IV expensive → favor selling premium (credit spreads)\n"
+        "     iv_rank < 0.3 → IV cheap → favor buying premium (debit spreads / long options)\n"
+        "     0.3–0.7 → neutral vol regime\n"
+        "   - Fallback: if `iv_rank` is null (< 30 days of history), use `hv_rank` with the same thresholds.\n"
+        "   - Secondary confirmation: `iv_hv_ratio` in `market_data` (ratio > 1.2 = expensive, ratio < 0.8 = cheap).\n"
+        "5. SENTIMENT/POSITIONING: Check `options_positioning` (total_undervalued_options, top_opportunity strike/type, ATM strike). Use the top undervalued option type (Call vs Put) to gauge market directional bias.\n"
+        "6. MARKET DATA: Check `market_data` (current_price, implied_volatility, historical_volatility, iv_hv_ratio, earnings_date, days_to_earnings). "
+        "CRITICAL: If days_to_earnings is within or close to the expiration window, flag earnings risk — IV will expand pre-earnings then crush post-earnings. "
+        "Use iv_hv_ratio (IV/HV) directly: ratio > 1.2 means vol is expensive (favor selling premium), ratio < 0.8 means vol is cheap (favor buying premium).\n"
         "\n\n"
         "OUTPUT REQUIREMENTS - CRITICAL:\n"
         "- Return ONLY valid JSON. Do NOT include markdown, code blocks, or explanatory text.\n"
@@ -718,19 +753,29 @@ def _build_analyst_messages(ticker: str, expiration_date: str, analysis_payload:
         "✓ rationale MUST be 15-20 sentences (not 1-2 sentences)\n"
         "✓ summary_html MUST be valid HTML (not markdown or plain text)\n"
         "✓ Lists must contain actual values (not empty arrays)\n"
+        "✓ In the rationale, cite {ticker} data ONLY (technicals, fundamentals, vol, sentiment). Macro context should only mention broad market regime (e.g., 'supportive uptrend' or 'low volatility environment'), NOT specific SPY or other index price points.\n"
         "✓ Return ONLY the JSON object - nothing else"
     )
+
+    # Fix {ticker} placeholder — system is a plain string, not an f-string
+    system = system.replace('{ticker}', ticker)
 
     if use_web_search:
         system += " You MUST use web search to find recent catalysts/earnings."
 
     user_content = f"Analyze {ticker} for expiration {expiration_date}.\n\n"
-    
-    # Add sections
-    sections = ["macro_context", "stock_fundamentals", "technical_analysis", "volatility_structure", "parity_analysis", "volume_oi_analysis", "synthesis_data"]
+
+    # Add sections — options_positioning is stripped of greeks_by_strike for the Analyst
+    # (the Analyst needs positioning signals, not the full chain; Trader gets full greeks)
+    sections = ["macro_context", "market_data", "stock_fundamentals", "technical_analysis", "volatility_structure", "options_positioning", "parity_analysis", "volume_oi_analysis", "synthesis_data"]
     for sec in sections:
         if sec in analysis_payload and analysis_payload[sec]:
-            user_content += f"<{sec}>\n{json.dumps(analysis_payload[sec])}\n</{sec}>\n"
+            data = analysis_payload[sec]
+            if sec == "options_positioning":
+                data = {k: v for k, v in data.items() if k != "greeks_by_strike"}
+            elif sec == "market_data":
+                data = {k: v for k, v in data.items() if k not in ("parameter_validation", "price_sources_checked", "price_context", "price_validation")}
+            user_content += f"<{sec}>\n{json.dumps(data)}\n</{sec}>\n"
 
     return [{"role": "system", "content": system}, {"role": "user", "content": user_content}]
 
@@ -822,11 +867,12 @@ def _build_trader_messages(ticker: str, expiration_date: str, analyst_verdict: D
 
 def _openai_chat_completion_with_retry(
     messages,
-    model: str = "gpt-5",
+    model: str = "gemini-2.5-flash",
     temperature: float = 0.2,
     stage: str = "unknown",
     retry_config: Optional[RetryConfig] = None,
-    timeout_config: Optional[TimeoutConfig] = None
+    timeout_config: Optional[TimeoutConfig] = None,
+    use_web_search: bool = False
 ) -> Tuple[Dict[str, Any], APICallMetrics, RetryMetrics]:
     """
     Enhanced API call with retry logic, circuit breaker, and separate timeouts.
@@ -882,7 +928,7 @@ def _openai_chat_completion_with_retry(
 
             # Make the API call
             result, api_metrics = _openai_chat_completion(
-                messages, model, temperature, timeout, stage
+                messages, model, temperature, timeout, stage, use_web_search
             )
 
             if result is not None:
@@ -1002,11 +1048,17 @@ def _extract_choice_content(ch: dict) -> str:
         return ""
 
 
-def _openai_chat_completion(messages, model: str = "gpt-5", temperature: float = 0.2, timeout: int = None, stage: str = "unknown") -> Tuple[Dict[str, Any], APICallMetrics]:
+def _openai_chat_completion(
+    messages,
+    model: str = "gemini-2.5-flash",
+    temperature: float = 0.2,
+    timeout: int = None,
+    stage: str = "unknown",
+    use_web_search: bool = False
+) -> Tuple[Dict[str, Any], APICallMetrics]:
     """
-    Enhanced OpenAI-compatible completion with comprehensive error handling and diagnostics.
-    Uses chat/completions for chat models, completions for non-chat models.
-    Honors OPENAI_API_BASE and OPENAI_API_KEY from environment.
+    Gemini completion call with comprehensive error handling and diagnostics.
+    Honors GEMINI_API_KEY from environment.
 
     Returns:
         Tuple of (response_dict, metrics)
@@ -1020,22 +1072,25 @@ def _openai_chat_completion(messages, model: str = "gpt-5", temperature: float =
         start_time=time.time()
     )
 
-    base = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1").rstrip("/")
-    key = os.getenv("OPENAI_API_KEY")
+    key = os.getenv("GEMINI_API_KEY")
+    resolved_model = _resolve_gemini_model(model)
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{resolved_model}:generateContent"
 
     logger.info(f"Starting {stage} API call", extra={
-        "model": model,
+        "requested_model": model,
+        "resolved_model": resolved_model,
         "temperature": temperature,
         "timeout": metrics.timeout,
         "message_count": len(messages),
-        "api_base": base
+        "provider": "gemini",
+        "use_web_search": use_web_search
     })
 
     if not key:
         metrics.failure_category = FailureCategory.AUTHENTICATION_ERROR
-        metrics.error_message = "OPENAI_API_KEY not set"
-        logger.error("Authentication failed: OPENAI_API_KEY not set")
-        raise RuntimeError("OPENAI_API_KEY not set")
+        metrics.error_message = "GEMINI_API_KEY not set"
+        logger.error("Authentication failed: GEMINI_API_KEY not set")
+        raise RuntimeError("GEMINI_API_KEY not set")
 
     # Calculate request size for monitoring
     try:
@@ -1045,344 +1100,147 @@ def _openai_chat_completion(messages, model: str = "gpt-5", temperature: float =
     except Exception as e:
         logger.warning(f"Failed to calculate request size: {e}")
 
-    # Validate API key format
-    if not key.startswith(('sk-', 'org-')):
-        logger.debug(f"Using custom API key format: {key[:20]}...")
-
     # Use environment variable for timeout, default to 180 seconds (3 minutes)
     if timeout is None:
         timeout = metrics.timeout
 
-    # Determine endpoint based on model type
-    # GPT realtime models and some others use completions endpoint
-    is_realtime_model = "realtime" in model.lower() or model.startswith("gpt-4o-realtime")
-    is_completions_model = is_realtime_model or model in ["text-davinci-003", "text-davinci-002", "davinci", "curie", "babbage", "ada"]
-    
-    if is_completions_model:
-        url = f"{base}/completions"
-        # Convert messages to single prompt for completions endpoint
-        prompt = ""
-        for msg in messages:
-            if msg["role"] == "system":
-                prompt += f"System: {msg['content']}\n\n"
-            elif msg["role"] == "user":
-                prompt += f"User: {msg['content']}\n\n"
-        prompt += "Assistant:"
-        
-        payload = {
-            "model": model,
-            "prompt": prompt,
-            "max_tokens": 4000,
-            "stream": False
+    system_parts = []
+    conversation_parts = []
+    for msg in messages:
+        role = (msg or {}).get("role")
+        text = str((msg or {}).get("content", "")).strip()
+        if not text:
+            continue
+        if role == "system":
+            system_parts.append(text)
+        else:
+            conversation_parts.append(f"{role or 'user'}:\n{text}")
+
+    conversation_prompt = "\n\n".join(conversation_parts).strip()
+    if not conversation_prompt:
+        conversation_prompt = "Provide the requested response in valid JSON."
+
+    payload = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": conversation_prompt}]
+            }
+        ],
+        "generationConfig": {
+            "temperature": temperature,
+            "maxOutputTokens": 4096,
+            "responseMimeType": "application/json"
         }
-        
-        # Add temperature only for models that support it
-        if not model.startswith("gpt-5") and not model.startswith("o3"):
-            payload["temperature"] = temperature
-            
-        headers = {
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json"
-        }
-        
-        logger.debug(f"Making completions request to {url}", extra={
-            "payload_keys": list(payload.keys()),
-            "model_in_payload": payload.get('model')
+    }
+    if system_parts:
+        payload["system_instruction"] = {"parts": [{"text": "\n\n".join(system_parts)}]}
+    if use_web_search:
+        payload["tools"] = [{"google_search": {}}]
+
+    logger.debug(f"Making Gemini request to {url}", extra={
+        "payload_keys": list(payload.keys()),
+        "resolved_model": resolved_model
+    })
+
+    try:
+        resp = requests.post(url, params={"key": key}, json=payload, timeout=timeout)
+        metrics.end_time = time.time()
+        metrics.status_code = resp.status_code
+
+        if hasattr(resp, 'content'):
+            metrics.response_size = len(resp.content)
+            logger.debug(f"Response size: {metrics.response_size} bytes")
+
+        logger.info(f"Gemini API response received", extra={
+            "status_code": resp.status_code,
+            "duration": metrics.duration
         })
 
-        try:
-            resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=timeout)
-            metrics.end_time = time.time()
-            metrics.status_code = resp.status_code
-
-            logger.info(f"Completions API response received", extra={
-                "status_code": resp.status_code,
-                "duration": metrics.duration
-            })
-
-            # Calculate response size
-            if hasattr(resp, 'content'):
-                metrics.response_size = len(resp.content)
-                logger.debug(f"Response size: {metrics.response_size} bytes")
-
-            resp.raise_for_status()
-
-        except requests.exceptions.Timeout as e:
-            metrics.end_time = time.time()
-            metrics.failure_category = FailureCategory.API_TIMEOUT
-            metrics.error_message = f"API timeout after {timeout}s"
-            logger.error(f"API timeout for {stage}", extra={
-                "timeout": timeout,
-                "duration": metrics.duration,
-                "error": str(e)
-            })
-            return None, metrics
-
-        except requests.exceptions.HTTPError as e:
-            metrics.end_time = time.time()
-            if resp.status_code == 401:
-                metrics.failure_category = FailureCategory.AUTHENTICATION_ERROR
-            elif resp.status_code == 429:
-                metrics.failure_category = FailureCategory.RATE_LIMIT_ERROR
-            else:
-                metrics.failure_category = FailureCategory.API_ERROR
-
-            metrics.error_message = f"HTTP {resp.status_code}: {str(e)}"
-            logger.error(f"HTTP error for {stage}", extra={
-                "status_code": resp.status_code,
-                "error": str(e),
-                "response_text": resp.text[:500] if hasattr(resp, 'text') else "No response text"
-            })
-            return None, metrics
-
-        except requests.exceptions.ConnectionError as e:
-            metrics.end_time = time.time()
-            metrics.failure_category = FailureCategory.NETWORK_ERROR
-            metrics.error_message = f"Connection error: {str(e)}"
-            logger.error(f"Network error for {stage}", extra={
-                "error": str(e)
-            })
-            return None, metrics
-
-        except Exception as e:
-            metrics.end_time = time.time()
-            metrics.failure_category = FailureCategory.API_ERROR
-            metrics.error_message = f"Unexpected error: {str(e)}"
-            logger.error(f"Unexpected API error for {stage}", extra={
-                "error": str(e),
-                "traceback": traceback.format_exc()
-            })
-            return None, metrics
-
-        # Parse response
-        try:
-            data = resp.json()
-            logger.debug(f"Response parsed successfully", extra={
-                "response_keys": list(data.keys())
-            })
-        except json.JSONDecodeError as e:
-            metrics.failure_category = FailureCategory.MALFORMED_RESPONSE
-            metrics.error_message = f"Invalid JSON response: {str(e)}"
-            logger.error(f"Invalid JSON response for {stage}", extra={
-                "error": str(e),
-                "response_text": resp.text[:500] if hasattr(resp, 'text') else "No response text"
-            })
-            return None, metrics
-
-        # Check for empty response or missing choices
-        if "choices" not in data or not data["choices"]:
-            metrics.failure_category = FailureCategory.EMPTY_RESPONSE
-            metrics.error_message = "No choices in API response"
-            logger.error(f"Empty choices in response for {stage}", extra={
-                "response_data": data
-            })
-            return None, metrics
-
-        # Prefer text, but some proxies may return message-style payloads even on /completions
-        choice0 = data["choices"][0]
-        content = (choice0.get("text") or "").strip()
-        if not content and isinstance(choice0, dict) and "message" in choice0:
-            msg = choice0.get("message") or {}
-            content = (msg.get("content") or "").strip()
-            # Some non-standard providers return content as a list of blocks
-            if not content and isinstance(msg.get("content"), list):
-                try:
-                    blocks = msg.get("content")
-                    parts = []
-                    for b in blocks:
-                        if isinstance(b, dict) and b.get("type") == "text":
-                            parts.append(b.get("text") or "")
-                        elif isinstance(b, str):
-                            parts.append(b)
-                    content = "\n".join([p for p in parts if p]).strip()
-                except Exception:
-                    content = ""
-            # Function/tool-call fallbacks
-            if not content:
-                # tool_calls (OpenAI tool calling)
-                tool_calls = msg.get("tool_calls")
-                if isinstance(tool_calls, list) and tool_calls:
-                    try:
-                        fn = tool_calls[0].get("function", {})
-                        args = fn.get("arguments")
-                        if isinstance(args, (dict, list)):
-                            content = json.dumps(args)
-                        elif isinstance(args, str):
-                            content = args
-                    except Exception:
-                        pass
-                # legacy function_call
-                if not content and isinstance(msg.get("function_call"), dict):
-                    args = msg["function_call"].get("arguments")
-                    if isinstance(args, (dict, list)):
-                        content = json.dumps(args)
-                    elif isinstance(args, str):
-                        content = args
-        
-        # Check for empty content
-        if not content:
-            metrics.failure_category = FailureCategory.EMPTY_RESPONSE
-            metrics.error_message = "Empty content in completions response"
-            logger.warning(f"Empty content in completions response for {stage}", extra={
-                "full_response": data
-            })
-            # Do not raise here; allow downstream fallback to handle gracefully
-            content = ""
-    else:
-        url = f"{base}/chat/completions"
-        payload = {
-            "model": model,
-            "messages": messages,
-            "max_tokens": 4000,
-            "stream": False
-        }
-        # Prefer structured JSON output if the provider supports it
-        payload_with_json_mode = dict(payload)
-        payload_with_json_mode["response_format"] = {"type": "json_object"}
-
-        # Add temperature only for models that support it
-        if not model.startswith("gpt-5") and not model.startswith("o3"):
-            payload["temperature"] = temperature
-            payload_with_json_mode["temperature"] = temperature
-            
-        headers = {
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json"
-        }
-        
-        logger.debug(f"Making chat completions request to {url}", extra={
-            "payload_keys_json_mode": list(payload_with_json_mode.keys()),
-            "model_in_payload": payload.get('model'),
-            "messages_count": len(messages)
-        })
-
-        # Try JSON mode first, then gracefully fall back if the provider/model doesn't support it
-        data = None
-        json_mode_attempted = False
-
-        try:
-            # First attempt with JSON mode
-            json_mode_attempted = True
-            resp = requests.post(url, headers=headers, data=json.dumps(payload_with_json_mode), timeout=timeout)
-            metrics.end_time = time.time()
-            metrics.status_code = resp.status_code
-
-            logger.info(f"Chat API response received (JSON mode)", extra={
-                "status_code": resp.status_code,
-                "duration": metrics.duration
-            })
-
-            if hasattr(resp, 'content'):
-                metrics.response_size = len(resp.content)
-
-            resp.raise_for_status()
-            data = resp.json()
-
-        except requests.exceptions.HTTPError as http_err:
-            body = getattr(http_err, 'response', None)
-            body_text = body.text if body is not None else ''
-            logger.warning(f"Chat API JSON mode failed, retrying without JSON mode", extra={
-                "status_code": getattr(body, 'status_code', 'NA'),
-                "error_snippet": body_text[:200]
-            })
-
-            # Retry without response_format
-            try:
-                resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=timeout)
-                metrics.end_time = time.time()
-                metrics.status_code = resp.status_code
-
-                logger.info(f"Chat API response received (fallback)", extra={
-                    "status_code": resp.status_code,
-                    "duration": metrics.duration
-                })
-
-                if hasattr(resp, 'content'):
-                    metrics.response_size = len(resp.content)
-
-                resp.raise_for_status()
-                data = resp.json()
-
-            except requests.exceptions.Timeout as e:
-                metrics.end_time = time.time()
-                metrics.failure_category = FailureCategory.API_TIMEOUT
-                metrics.error_message = f"API timeout after {timeout}s (fallback)"
-                logger.error(f"API timeout for {stage} (fallback)", extra={
-                    "timeout": timeout,
-                    "duration": metrics.duration
-                })
-                return None, metrics
-
-            except Exception as fallback_e:
-                metrics.end_time = time.time()
-                metrics.failure_category = FailureCategory.API_ERROR
-                metrics.error_message = f"Fallback request failed: {str(fallback_e)}"
-                logger.error(f"Fallback request failed for {stage}", extra={
-                    "error": str(fallback_e),
-                    "original_error": str(http_err)
-                })
-                return None, metrics
-
-        except requests.exceptions.Timeout as e:
-            metrics.end_time = time.time()
-            metrics.failure_category = FailureCategory.API_TIMEOUT
-            metrics.error_message = f"API timeout after {timeout}s"
-            logger.error(f"API timeout for {stage}", extra={
-                "timeout": timeout,
-                "duration": metrics.duration,
-                "json_mode_attempted": json_mode_attempted
-            })
-            return None, metrics
-
-        except Exception as e:
-            metrics.end_time = time.time()
-            metrics.failure_category = FailureCategory.API_ERROR
-            metrics.error_message = f"Chat API error: {str(e)}"
-            logger.error(f"Chat API error for {stage}", extra={
-                "error": str(e),
-                "json_mode_attempted": json_mode_attempted,
-                "traceback": traceback.format_exc()
-            })
-            return None, metrics
-
-        # Validate response data
-        if data is None:
-            metrics.failure_category = FailureCategory.EMPTY_RESPONSE
-            metrics.error_message = "Received null response data"
-            logger.error(f"Null response data for {stage}")
-            return None, metrics
-
-        logger.debug(f"Response parsed successfully", extra={
-            "response_keys": list(data.keys())
-        })
-
-        # Check for empty response or missing choices
-        if "choices" not in data or not data["choices"]:
-            metrics.failure_category = FailureCategory.EMPTY_RESPONSE
-            metrics.error_message = "No choices in chat API response"
-            logger.error(f"Empty choices in chat response for {stage}", extra={
-                "response_data": data
-            })
-            return None, metrics
-            
-        # Robustly extract content from the first choice
-        choice = data["choices"][0]
-        content = _extract_choice_content(choice)
-
-        if not content:
-            metrics.failure_category = FailureCategory.EMPTY_RESPONSE
-            metrics.error_message = "Empty content extracted from choice"
-            logger.error(f"Empty content extracted for {stage}", extra={
-                "choice_data": choice
-            })
-            return None, metrics
-
-        # Mark as successful if we got content
-        metrics.success = True
-        logger.info(f"{stage} API call completed successfully", extra={
+        resp.raise_for_status()
+    except requests.exceptions.Timeout as e:
+        metrics.end_time = time.time()
+        metrics.failure_category = FailureCategory.API_TIMEOUT
+        metrics.error_message = f"API timeout after {timeout}s"
+        logger.error(f"API timeout for {stage}", extra={
+            "timeout": timeout,
             "duration": metrics.duration,
-            "response_length": len(content)
+            "error": str(e)
         })
+        return None, metrics
+    except requests.exceptions.HTTPError as e:
+        metrics.end_time = time.time()
+        status_code = getattr(resp, "status_code", 0)
+        if status_code in (401, 403):
+            metrics.failure_category = FailureCategory.AUTHENTICATION_ERROR
+        elif status_code == 429:
+            metrics.failure_category = FailureCategory.RATE_LIMIT_ERROR
+        else:
+            metrics.failure_category = FailureCategory.API_ERROR
+        error_snippet = resp.text[:500] if hasattr(resp, "text") else str(e)
+        metrics.error_message = f"HTTP {status_code}: {error_snippet}"
+        logger.error(f"HTTP error for {stage}", extra={
+            "status_code": status_code,
+            "error": str(e),
+            "response_text": error_snippet
+        })
+        return None, metrics
+    except requests.exceptions.ConnectionError as e:
+        metrics.end_time = time.time()
+        metrics.failure_category = FailureCategory.NETWORK_ERROR
+        metrics.error_message = f"Connection error: {str(e)}"
+        logger.error(f"Network error for {stage}", extra={"error": str(e)})
+        return None, metrics
+    except Exception as e:
+        metrics.end_time = time.time()
+        metrics.failure_category = FailureCategory.API_ERROR
+        metrics.error_message = f"Unexpected error: {str(e)}"
+        logger.error(f"Unexpected Gemini API error for {stage}", extra={
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        })
+        return None, metrics
+
+    try:
+        data = resp.json()
+    except json.JSONDecodeError as e:
+        metrics.failure_category = FailureCategory.MALFORMED_RESPONSE
+        metrics.error_message = f"Invalid JSON response: {str(e)}"
+        logger.error(f"Invalid JSON response for {stage}", extra={
+            "error": str(e),
+            "response_text": resp.text[:500] if hasattr(resp, 'text') else "No response text"
+        })
+        return None, metrics
+
+    logger.debug("Gemini response parsed successfully", extra={
+        "response_keys": list(data.keys()) if isinstance(data, dict) else []
+    })
+
+    candidates = data.get("candidates", []) if isinstance(data, dict) else []
+    if not candidates:
+        metrics.failure_category = FailureCategory.EMPTY_RESPONSE
+        metrics.error_message = f"No candidates in Gemini response: {str(data)[:300]}"
+        logger.error(f"Empty candidates in response for {stage}", extra={"response_data": data})
+        return None, metrics
+
+    parts = ((candidates[0] or {}).get("content") or {}).get("parts", [])
+    content_parts = []
+    for part in parts:
+        if isinstance(part, dict) and part.get("text"):
+            content_parts.append(part["text"])
+    content = "\n".join(content_parts).strip()
+
+    if not content:
+        metrics.failure_category = FailureCategory.EMPTY_RESPONSE
+        metrics.error_message = f"Empty content in Gemini response (finish_reason={candidates[0].get('finishReason')})"
+        logger.error(f"Empty content extracted for {stage}", extra={"candidate": candidates[0]})
+        return None, metrics
+
+    metrics.success = True
+    logger.info(f"{stage} API call completed successfully", extra={
+        "duration": metrics.duration,
+        "response_length": len(content)
+    })
     
     def _extract_json_from_response(text: str, stage: str = "unknown") -> Tuple[dict, JSONParsingDiagnostics]:
         """
@@ -1938,7 +1796,7 @@ def generate_gpt_verdict(
     ticker: str,
     expiration_date: str,
     analysis_result: Dict[str, Any],
-    model: str = "gpt-5",
+    model: str = "gemini-2.5-flash",
     use_web_search: bool = False,
     retry_config: Optional[RetryConfig] = None,
     timeout_config: Optional[TimeoutConfig] = None
@@ -1988,7 +1846,8 @@ def generate_gpt_verdict(
         temperature=0.3,
         stage="Analyst",
         retry_config=retry_config,
-        timeout_config=timeout_config
+        timeout_config=timeout_config,
+        use_web_search=use_web_search
     )
 
     # Handle analyst response with retry information
@@ -2269,7 +2128,8 @@ def generate_gpt_verdict(
         temperature=0.1,
         stage="Trader",
         retry_config=retry_config,
-        timeout_config=timeout_config
+        timeout_config=timeout_config,
+        use_web_search=False
     )
 
     # Handle trader response with retry information

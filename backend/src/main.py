@@ -261,7 +261,7 @@ async def get_saved_verdict(doc_id: str):
 @app.post("/analysis/stock-gpt")
 async def analyze_stock_with_gpt(request: AnalysisRequest):
     """
-    Alternative methodology: run the standard sub-analyses, then ask an LLM (gpt-5) to produce the final verdict
+    Alternative methodology: run the standard sub-analyses, then ask an LLM to produce the final verdict
     and enhanced conclusion, including a brief external search if available.
     """
     from datetime import datetime
@@ -403,41 +403,46 @@ async def fetch_expirations(ticker: str):
 @app.get("/api/gpt-models")
 @app.get("/gpt-models")  # Alias for Docker/proxy compatibility
 async def get_available_gpt_models():
-    """Fetches available models from OpenWebUI API for GPT verdict analysis."""
+    """Fetches available Gemini models for GPT verdict analysis."""
     try:
-        base_url = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1").rstrip("/")
-        api_key = os.getenv("OPENAI_API_KEY")
+        api_key = os.getenv("GEMINI_API_KEY")
         
         if not api_key:
-            raise HTTPException(status_code=500, detail="OpenAI API key not configured")
+            raise HTTPException(status_code=500, detail="Gemini API key not configured")
         
-        # Fetch models from OpenWebUI API
+        # Fetch available models from Gemini API.
         response = requests.get(
-            f"{base_url}/models",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
-            },
+            "https://generativelanguage.googleapis.com/v1beta/models",
+            params={"key": api_key},
             timeout=10
         )
         
         if response.status_code != 200:
-            raise HTTPException(status_code=500, detail=f"Failed to fetch models: {response.status_code}")
+            detail_text = response.text[:200] if response.text else ""
+            mapped_status = response.status_code if response.status_code in (401, 403, 429) else 500
+            raise HTTPException(
+                status_code=mapped_status,
+                detail=f"Failed to fetch Gemini models ({response.status_code}): {detail_text}"
+            )
         
         models_data = response.json()
         
-        # Extract model list from OpenAI API response format
-        if "data" in models_data:
-            models = [
+        # Extract model list from Gemini API response format.
+        models = []
+        for model in models_data.get("models", []):
+            name = model.get("name", "")
+            if not name.startswith("models/"):
+                continue
+            generation_methods = model.get("supportedGenerationMethods", [])
+            if "generateContent" not in generation_methods:
+                continue
+            model_id = name.split("/", 1)[1]
+            models.append(
                 {
-                    "id": model["id"],
-                    "name": model.get("id", model["id"]),  # Use id as display name if no name field
-                    "created": model.get("created", 0)
+                    "id": model_id,
+                    "name": model.get("displayName", model_id),
                 }
-                for model in models_data["data"]
-            ]
-        else:
-            models = []
+            )
         
         # Sort models by name for better UX
         models.sort(key=lambda x: x["name"])
@@ -445,9 +450,11 @@ async def get_available_gpt_models():
         return {
             "status": "success",
             "models": models,
-            "default": "gpt-5"  # Default model to select
+            "default": os.getenv("GEMINI_DEFAULT_MODEL", "gemini-2.5-flash")
         }
         
+    except HTTPException:
+        raise
     except requests.RequestException as e:
         print(f"Error fetching models: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to connect to model service: {e}")
