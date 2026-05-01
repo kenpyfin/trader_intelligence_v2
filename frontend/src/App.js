@@ -18,6 +18,7 @@ import Box from '@mui/material/Box';
 import AnalysisPage from './pages/Analysis';
 import PortfolioPage from './pages/Portfolio';
 import YieldCurvePage from './pages/YieldCurve';
+import TopStocksByGroupPage from './pages/TopStocksByGroup';
 
 const theme = createTheme({
   palette: {
@@ -74,6 +75,9 @@ const Navigation = () => {
           <Button component={NavLink} to="/rates" sx={getButtonStyle('/rates')}>
             Rates
           </Button>
+          <Button component={NavLink} to="/stock-selection" sx={getButtonStyle('/stock-selection')}>
+            Stock Selection
+          </Button>
         </Box>
       </Toolbar>
     </AppBar>
@@ -91,6 +95,7 @@ const App = () => {
             <Route path="/" element={<AnalysisPage />} />
             <Route path="/portfolio" element={<PortfolioPage />} />
             <Route path="/rates" element={<YieldCurvePage />} />
+            <Route path="/stock-selection" element={<TopStocksByGroupPage />} />
           </Routes>
         </Container>
       </Router>

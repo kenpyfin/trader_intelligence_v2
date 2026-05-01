@@ -15,7 +15,7 @@ from .services.analysis_history_service import (
 )
 from .services.macro_service import get_macro_futures_data, calculate_market_implied_risk_free_rate
 from .services import broker_service, analysis_service
-from .routers import portfolio
+from .routers import portfolio, stock_selection
 from .my_libs_py3.my_data import PriceDataFetcher
 from .analytics.treasury_curve import build_treasury_curve
 from .my_libs_py3.fmp import FMPClient
@@ -64,6 +64,7 @@ app.add_middleware(
 )
 
 app.include_router(portfolio.router)
+app.include_router(stock_selection.router)
 
 @app.get("/")
 def read_root():

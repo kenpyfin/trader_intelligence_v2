@@ -1,6 +1,11 @@
-# Stock Selection Data Tables
+# Stock Selection Data Dictionary
 
-This document catalogs current MongoDB data availability for stock selection in Trader Intelligence and maps each dataset to backend usage.
+This document is the canonical stock-selection data dictionary for Trader Intelligence. It includes:
+
+- live MongoDB availability snapshot,
+- collection-level purpose and quality notes,
+- field-level definitions and typing guidance,
+- expected use in peer modeling and stock selection.
 
 Audit timestamp: **2026-04-30** (live Mongo inspection against configured host).
 
@@ -48,6 +53,167 @@ Notes:
 | `trader_intelligence.analysis_history` (`created_at`) | 2025-10-01 | 2026-05-01 00:27:40 | Good |
 | `trade_log` (sample collection `PDD`) | 2020-11-16 | 2020-11-17 | Stale for selection use |
 | `pair_trade_log` (sample `BJ_SU`) | 2023-10-30 | 2023-11-08 | Stale for selection use |
+
+---
+
+## Canonical Data Dictionary
+
+Use this section as the source of truth for field semantics when implementing selection features.
+
+### Dictionary Columns
+
+| Column | Meaning |
+| --- | --- |
+| `Field` | Canonical field name used in code and docs |
+| `Type` | Practical type expectation in pipeline (`string`, `float`, `datetime`, etc.) |
+| `Required` | Whether required for selection pipeline (`Yes`, `Optional`, `No`) |
+| `Definition` | Business meaning |
+| `Used In` | Primary feature blocks or services that consume it |
+
+### 1) `stocks_daily.<TICKER>` (collection per ticker)
+
+| Field | Type | Required | Definition | Used In |
+| --- | --- | --- | --- | --- |
+| `Ticker` | string | Yes | Equity symbol key | joins, sanity checks |
+| `TimeStamp` | datetime | Yes | Bar timestamp (daily cadence) | range filters, freshness checks |
+| `Open` | float | Optional | Daily open price | optional price features |
+| `High` | float | Optional | Daily high price | optional volatility/range features |
+| `Low` | float | Optional | Daily low price | optional volatility/range features |
+| `Close` | float | Yes | Daily close price | returns, trend, drawdown |
+| `Volume` | float/int | Yes | Daily traded shares | liquidity (`adv20_shares`) |
+| `Return` | float | Optional | Single-period return | fallback return signal |
+| `Fwd_Return` | float | Optional | Forward log-return (if precomputed) | labeling/backtest diagnostics |
+| `adjClose` | float | Optional | Vendor-adjusted close | fallback adjusted-price handling |
+| `vwap` | float | Optional | Daily VWAP | quality/trend confirmation |
+| `change` | float | Optional | Absolute daily change | diagnostics |
+| `changePercent` | float | Optional | Percent daily change | diagnostics |
+| `changeOverTime` | float | Optional | Relative move over baseline | diagnostics |
+| `unadjustedVolume` | float/int | Optional | Vendor unadjusted volume | diagnostics |
+| `label` | string | No | Vendor display label | display only |
+
+### 2) `stocks_10minute.<TICKER>` (collection per ticker)
+
+| Field | Type | Required | Definition | Used In |
+| --- | --- | --- | --- | --- |
+| `Ticker` | string | Yes | Equity symbol key | joins, sanity checks |
+| `TimeStamp` | datetime | Yes | Intraday bar timestamp | intraday recency |
+| `Time` | string/datetime | Optional | Alternate bar time field | compatibility handling |
+| `Open` | float | Optional | Intraday open | optional micro-trend |
+| `High` | float | Optional | Intraday high | optional range features |
+| `Low` | float | Optional | Intraday low | optional range features |
+| `Close` | float | Yes | Intraday close | intraday trend and volatility |
+| `Volume` | float/int | Optional | Intraday traded volume | intraday liquidity |
+| `Return` | float | Optional | Intraday return | diagnostics |
+| `Fwd_Return` | float | Optional | Intraday forward return | diagnostics/backtests |
+
+### 3) `iv_history.<TICKER>` (collection per ticker)
+
+| Field | Type | Required | Definition | Used In |
+| --- | --- | --- | --- | --- |
+| `Ticker` | string | Yes | Equity symbol key | joins, sanity checks |
+| `TimeStamp` | datetime | Yes | Daily IV snapshot time | IV history windowing |
+| `spot_iv` | float | Yes | Primary current IV point | `iv_rank`, mode overlay |
+| `iv_7d` | float | Optional | Approx IV at 7 DTE tenor | term slope (`iv_term_slope`) |
+| `iv_30d` | float | Optional | Approx IV at 30 DTE tenor | term slope and diagnostics |
+| `iv_90d` | float | Optional | Approx IV at 90 DTE tenor | term structure diagnostics |
+
+### 4) `all_symbol.screenerModel` (fixed collection)
+
+| Field | Type | Required | Definition | Used In |
+| --- | --- | --- | --- | --- |
+| `Ticker` | string | Yes | Equity symbol key | joins and universe |
+| `Sector` | string | Yes | High-level sector classification | context features, cluster prior |
+| `Industry` | string | Yes | Industry classification | context features, cluster prior |
+| `Refresh_Date` | datetime | Yes | Snapshot refresh timestamp | freshness gating |
+| `P/E` | float-like | Optional | Price-to-earnings ratio | value composite |
+| `P/S` | float-like | Optional | Price-to-sales ratio | value composite |
+| `P/Cash` | float-like | Optional | Price-to-cash ratio | value composite |
+| `P/Free Cash Flow` | float-like | Optional | Price-to-FCF ratio | value composite |
+| `Gross Margin` | percent-like | Optional | Gross margin | quality composite |
+| `Operating Margin` | percent-like | Optional | Operating margin | quality composite |
+| `Profit Margin` | percent-like | Optional | Net margin | quality composite |
+| `EPS (ttm)` | float-like | Optional | EPS trailing twelve months | quality composite |
+| `Current Ratio` | float-like | Optional | Current assets/liabilities ratio | resilience composite |
+| `Quick Ratio` | float-like | Optional | Quick liquidity ratio | resilience composite |
+| `Total Debt/Equity` | float-like | Optional | Leverage ratio | resilience composite |
+| `Institutional Ownership` | percent-like | Optional | Institutional ownership fraction | positioning composite |
+| `Insider Ownership` | percent-like | Optional | Insider ownership fraction | positioning composite |
+| `Analyst Recom` | float-like | Optional | Analyst recommendation score | positioning composite |
+| `Market_cap` / `Market Cap` | float-like/string | Optional | Market capitalization | cap bucket and universe ordering |
+| `Performance (Week)` | percent-like | Optional | 1-week price performance | optional momentum feature |
+| `Sales growth quarter over quarter` | percent-like | Optional | QoQ sales growth | optional growth overlay |
+
+### 5) `trader_intelligence.analysis_history`
+
+| Field | Type | Required | Definition | Used In |
+| --- | --- | --- | --- | --- |
+| `ticker` | string | Yes | Symbol analyzed | meta analytics |
+| `analysis_method` | string | Optional | Methodology id | performance slicing |
+| `gpt_model` | string | Optional | GPT model identifier | model diagnostics |
+| `risk_free_rate` | float | Optional | Rate used in run | reproducibility |
+| `override_price` | float | Optional | Manual price override | run traceability |
+| `expiration_date` | string/date | Optional | Expiration used | run context |
+| `expiration_date_raw` | string | Optional | Raw expiration payload | parsing diagnostics |
+| `request_payload` | object | Optional | Original request payload | replay/debug |
+| `analysis_result` | object | Optional | Full analysis output | research/meta signals |
+| `primary_verdict` | object | Optional | Primary verdict object | meta labeling |
+| `final_bias` | string | Optional | Directional bias | downstream analysis |
+| `created_at` | datetime | Yes | Record creation time | time slicing and recency |
+
+### 6) `trader_intelligence.verdicts`
+
+| Field | Type | Required | Definition | Used In |
+| --- | --- | --- | --- | --- |
+| `ticker` | string | Yes | Symbol key | verdict history |
+| `expiration_date` | string/date | Optional | Expiration context | verdict comparison |
+| `analysis_method` | string | Optional | Methodology id | model comparison |
+| `gpt_model` | string | Optional | GPT model id | diagnostics |
+| `final_bias` | string | Optional | Final directional bias | qualitative overlays |
+| `label` | string | Optional | User label | manual curation |
+| `overview` | object | Optional | Compact verdict summary | history views |
+| `data` | object | Optional | Full verdict payload | research |
+| `created_at` | datetime | Yes | Record creation time | recency |
+
+### 7) `trader_intelligence.tracked_orders`
+
+| Field | Type | Required | Definition | Used In |
+| --- | --- | --- | --- | --- |
+| `ticker` | string | Yes | Underlying symbol | execution analytics |
+| `expiration_date` | string/date | Optional | Option expiration | strategy traceability |
+| `size` | int | Optional | Strategy size multiplier | execution analytics |
+| `is_credit_spread` | bool | Optional | Credit/debit style flag | strategy slicing |
+| `legs` | array<object> | Optional | Legs for strategy | replay/inspection |
+| `signature` | string | Optional | Normalized strategy signature | dedupe/matching |
+| `gpt_snapshot` | object | Optional | Saved GPT guidance snapshot | post-trade review |
+| `broker_order_id` / `ib_order_id` | string/int | Optional | Broker order id fields | reconciliation |
+| `broker_perm_id` / `ib_perm_id` | string/int | Optional | Broker perm id fields | reconciliation |
+| `broker_trade` | object | Optional | Raw broker trade payload | audit trail |
+| `placed_at` | datetime | Yes | Placement timestamp | recency and MTM windows |
+| `status` | string | Optional | Current order status | monitoring |
+
+### 8) Operational Logs (non-core for selection)
+
+#### `trade_log.<TICKER>`
+
+| Field | Type | Required | Definition | Used In |
+| --- | --- | --- | --- | --- |
+| `TimeStamp` | datetime | Yes | Log event time | execution history |
+| `Ticker` | string | Yes | Symbol | execution history |
+| `size` | float/int | Optional | Signed position change | PnL reconstruction |
+| `raw_size` | float/int | Optional | Original strategy size | reconciliation |
+| `Price` | float | Optional | Execution price | trade analytics |
+| `Strategy` | string | Optional | Strategy label | strategy slicing |
+| `Hold_days` | int | Optional | Intended hold horizon | diagnostics |
+
+#### `pair_trade_log.<TICKER1_TICKER2>`
+
+| Field | Type | Required | Definition | Used In |
+| --- | --- | --- | --- | --- |
+| `TimeStamp` | datetime | Yes | Pair log event time | pair-trade history |
+| `Ticker1`, `Ticker2` | string | Yes | Pair symbols | pair reconstruction |
+| `size1`, `size2` | float/int | Optional | Signed position deltas | pair PnL |
+| `Price1`, `Price2` | float | Optional | Leg prices | pair analytics |
+| `strategy_size1`, `strategy_size2` | float/int | Optional | Intended strategy sizes | reconciliation |
 
 ---
 

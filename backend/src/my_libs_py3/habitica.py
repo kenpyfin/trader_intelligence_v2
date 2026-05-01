@@ -1,7 +1,10 @@
 
 import json
-
+import os
 import requests
+
+from dotenv import load_dotenv
+load_dotenv()
 
 API_URI_BASE = 'api/v3'
 API_CONTENT_TYPE = 'application/json'
@@ -90,7 +93,8 @@ class habiticaImp(habitica):
         rv = {'url': "https://habitica.com",
               'checklists':"false",
               'x-api-user': "1da76d7e-9002-4cdf-9322-81806481ea95",
-              'x-api-key': "eb667fc1-8f44-4b44-ada4-c122945ac916"
+              'x-api-key': os.getenv("HABITICA_API_KEY"),
+         
         }
         super().__init__(rv)
 
