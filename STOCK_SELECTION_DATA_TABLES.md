@@ -272,6 +272,9 @@ Notes:
 
 Use this as the first table contract for the new stock selection output.
 
+Updated strategy note:
+- For the revised factor-classification peer model (cluster-members, market-regime buckets, dual-mode options ranking), see [`FACTOR_PEER_CLASSIFICATION_SPEC.md`](FACTOR_PEER_CLASSIFICATION_SPEC.md).
+
 | Output field | Type | Source | Description |
 | --- | --- | --- | --- |
 | `ticker` | string | all core datasets | Symbol key |
