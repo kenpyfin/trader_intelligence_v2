@@ -39,11 +39,31 @@ const mockPayload = {
 
 describe('TopStocksByGroup page', () => {
   beforeEach(() => {
-    axios.get.mockResolvedValue({
-      data: {
-        status: 'success',
-        payload: mockPayload,
-      },
+    axios.get.mockImplementation((url) => {
+      if (url === '/api/stock-selection/strategies') {
+        return Promise.resolve({
+          data: {
+            status: 'success',
+            strategies: [{ strategy_id: 'peer_v1', label: 'Peer Classification v1' }],
+          },
+        });
+      }
+      if (url === '/api/stock-selection/strategy-doc') {
+        return Promise.resolve({
+          data: {
+            status: 'success',
+            strategy_id: 'peer_v1',
+            title: 'Strategy peer_v1',
+            markdown: '## Active Built-In Strategy: `peer_v1`\nFull strategy text',
+          },
+        });
+      }
+      return Promise.resolve({
+        data: {
+          status: 'success',
+          payload: mockPayload,
+        },
+      });
     });
     axios.post.mockResolvedValue({
       data: {
@@ -69,6 +89,11 @@ describe('TopStocksByGroup page', () => {
       expect(screen.getByText('AAPL')).toBeInTheDocument();
       expect(screen.getByRole('button', { name: /Analyze/i })).toBeInTheDocument();
       expect(screen.getByRole('link', { name: 'AAPL' })).toHaveAttribute('href', expect.stringContaining('finviz.com/quote.ashx?t=AAPL'));
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /Active Strategy \(Full Text\)/i }));
+    await waitFor(() => {
+      expect(screen.getByText(/Full strategy text/i)).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole('tab', { name: /Sectors/i }));

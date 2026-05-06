@@ -440,6 +440,7 @@ Use this as the first table contract for the new stock selection output.
 
 Updated strategy note:
 - For the revised factor-classification peer model (cluster-members, market-regime buckets, dual-mode options ranking), see [`FACTOR_PEER_CLASSIFICATION_SPEC.md`](FACTOR_PEER_CLASSIFICATION_SPEC.md).
+- For the canonical runtime strategy reference consumed by API/UI, see [`backend/docs/STOCK_SELECTION_STRATEGIES.md`](backend/docs/STOCK_SELECTION_STRATEGIES.md).
 
 | Output field | Type | Source | Description |
 | --- | --- | --- | --- |

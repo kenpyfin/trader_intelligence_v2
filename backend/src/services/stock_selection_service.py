@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import os
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -12,7 +14,11 @@ from ..analytics.peer_classification import (
     cluster_peers,
     preprocess_feature_frame,
 )
-from ..analytics.swing_ranker import run_dual_mode_ranking
+from ..analytics.strategy_registry import (
+    DEFAULT_STRATEGY_ID,
+    get_strategy,
+    list_strategies as list_registered_strategies,
+)
 from ..my_libs_py3.db import connect_mongo
 
 
@@ -296,7 +302,124 @@ def _shape_payload(
     }
 
 
-def run_selection_snapshot(max_tickers: int = 800, top_n_per_group: int = 10) -> Dict[str, Any]:
+def _latest_snapshot_query(strategy_id: str) -> Dict[str, Any]:
+    if strategy_id == DEFAULT_STRATEGY_ID:
+        return {
+            "status": "success",
+            "$or": [
+                {"strategy_id": strategy_id},
+                {"strategy_id": {"$exists": False}},
+            ],
+        }
+    return {"status": "success", "strategy_id": strategy_id}
+
+
+def _strategy_doc_candidates(strategy_id: str) -> list[Path]:
+    """Ordered search paths for strategy markdown (first existing wins)."""
+    strategy = get_strategy(strategy_id)
+    doc_ref = strategy.documentation_file.strip()
+    service_file = Path(__file__).resolve()
+    # .../backend/src/services/stock_selection_service.py -> backend root
+    backend_root = service_file.parents[2]
+
+    candidates: list[Path] = []
+
+    explicit = os.getenv("STOCK_SELECTION_STRATEGIES_PATH", "").strip()
+    if explicit:
+        candidates.append(Path(explicit).expanduser().resolve())
+
+    env_root = os.getenv("TRADER_INTELLIGENCE_PROJECT_ROOT", "").strip()
+    if env_root:
+        root = Path(env_root).expanduser().resolve()
+        candidates.append(root / doc_ref if "/" not in doc_ref else root / Path(doc_ref))
+
+    if "/" in doc_ref or doc_ref.startswith("docs" + os.sep):
+        candidates.append((backend_root / doc_ref).resolve())
+    else:
+        candidates.append((backend_root / "docs" / doc_ref).resolve())
+        for parent in service_file.parents:
+            candidates.append((parent / doc_ref).resolve())
+            candidates.append((parent / "docs" / doc_ref).resolve())
+
+    candidates.append((Path.cwd() / doc_ref).resolve())
+    candidates.append((Path.cwd() / "docs" / doc_ref).resolve())
+
+    seen: set[str] = set()
+    ordered: list[Path] = []
+    for path in candidates:
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            ordered.append(path)
+    return ordered
+
+
+def _strategy_doc_path(strategy_id: str) -> Path:
+    ordered = _strategy_doc_candidates(strategy_id)
+    for path in ordered:
+        if path.exists():
+            return path
+    return ordered[0] if ordered else Path(get_strategy(strategy_id).documentation_file)
+
+
+
+def _extract_strategy_markdown(markdown: str, strategy_id: str) -> str:
+    lines = markdown.splitlines()
+    header = f"## Active Built-In Strategy: `{strategy_id}`"
+    start_idx = -1
+    for idx, line in enumerate(lines):
+        if line.strip() == header:
+            start_idx = idx
+            break
+    if start_idx < 0:
+        return markdown.strip()
+
+    end_idx = len(lines)
+    for idx in range(start_idx + 1, len(lines)):
+        if lines[idx].startswith("## ") and lines[idx].strip() != header:
+            end_idx = idx
+            break
+    return "\n".join(lines[start_idx:end_idx]).strip()
+
+
+def list_available_strategies() -> Dict[str, Any]:
+    return {"status": "success", "strategies": list_registered_strategies()}
+
+
+def get_strategy_document(strategy_id: str = DEFAULT_STRATEGY_ID) -> Dict[str, Any]:
+    candidates = _strategy_doc_candidates(strategy_id)
+    doc_path = next((p for p in candidates if p.exists()), None)
+    if doc_path is None:
+        preview = ", ".join(str(p) for p in candidates[:5])
+        return {
+            "status": "error",
+            "strategy_id": strategy_id,
+            "title": "Strategy Documentation Missing",
+            "markdown": "",
+            "message": (
+                "Strategy documentation not found. "
+                f"Tried (first of {len(candidates)}): {preview}. "
+                "Set STOCK_SELECTION_STRATEGIES_PATH to the markdown file, "
+                "or TRADER_INTELLIGENCE_PROJECT_ROOT to the repo root, "
+                "or include backend/docs/STOCK_SELECTION_STRATEGIES.md in the image."
+            ),
+        }
+    full_text = doc_path.read_text(encoding="utf-8")
+    return {
+        "status": "success",
+        "strategy_id": strategy_id,
+        "title": f"Strategy {strategy_id}",
+        "markdown": _extract_strategy_markdown(full_text, strategy_id),
+        "source_path": str(doc_path),
+    }
+
+
+def run_selection_snapshot(
+    max_tickers: int = 800,
+    top_n_per_group: int = 10,
+    strategy_id: str = DEFAULT_STRATEGY_ID,
+) -> Dict[str, Any]:
+    strategy = get_strategy(strategy_id)
     generated_at = datetime.utcnow()
     fundamentals = _load_fundamentals(max_tickers=max_tickers)
     if fundamentals.empty:
@@ -317,12 +440,13 @@ def run_selection_snapshot(max_tickers: int = 800, top_n_per_group: int = 10) ->
     if clustered.clustered_frame.empty:
         return {"status": "error", "message": "No eligible stocks after filtering and clustering."}
 
-    grouped = run_dual_mode_ranking(clustered.clustered_frame, top_n_per_group=top_n_per_group)
+    grouped = strategy.runner(clustered.clustered_frame, top_n_per_group=top_n_per_group)
     as_of = generated_at.date().isoformat()
     metadata = {
         "as_of": as_of,
         "generated_at": generated_at,
         "model_version": MODEL_VERSION,
+        "strategy_id": strategy_id,
         "freshness_minutes": FRESHNESS_TARGET_MINUTES,
         "tickers_considered": int(len(feature_frame)),
         "tickers_ranked": int(len(clustered.clustered_frame)),
@@ -334,6 +458,7 @@ def run_selection_snapshot(max_tickers: int = 800, top_n_per_group: int = 10) ->
         "as_of": as_of,
         "generated_at": generated_at,
         "model_version": MODEL_VERSION,
+        "strategy_id": strategy_id,
         "status": "success",
         "metadata": _sanitize_for_json(metadata),
         "payload_by_mode": _sanitize_for_json(
@@ -348,14 +473,20 @@ def run_selection_snapshot(max_tickers: int = 800, top_n_per_group: int = 10) ->
         "status": "success",
         "snapshot_id": str(insert_res.inserted_id),
         "as_of": as_of,
+        "strategy_id": strategy_id,
         "tickers_considered": metadata["tickers_considered"],
         "tickers_ranked": metadata["tickers_ranked"],
         "tickers_excluded": metadata["tickers_excluded"],
     }
 
 
-def get_latest_snapshot(view: str = "all", mode: str = "sell_premium") -> Dict[str, Any]:
-    doc = _snapshot_collection().find_one({"status": "success"}, sort=[("generated_at", -1)])
+def get_latest_snapshot(
+    view: str = "all",
+    mode: str = "sell_premium",
+    strategy_id: str = DEFAULT_STRATEGY_ID,
+) -> Dict[str, Any]:
+    get_strategy(strategy_id)
+    doc = _snapshot_collection().find_one(_latest_snapshot_query(strategy_id), sort=[("generated_at", -1)])
     if not doc:
         return {"status": "error", "message": "No cached stock selection snapshot available."}
     payload = (doc.get("payload_by_mode") or {}).get(mode, {})
@@ -364,11 +495,25 @@ def get_latest_snapshot(view: str = "all", mode: str = "sell_premium") -> Dict[s
             "metadata": payload.get("metadata"),
             view: payload.get(view, []),
         }
-    return {"status": "success", "view": view, "mode": mode, "payload": payload}
+    return {
+        "status": "success",
+        "view": view,
+        "mode": mode,
+        "strategy_id": doc.get("strategy_id", DEFAULT_STRATEGY_ID),
+        "payload": payload,
+    }
 
 
-def get_snapshot_by_date(as_of: str, view: str = "all", mode: str = "sell_premium") -> Dict[str, Any]:
-    doc = _snapshot_collection().find_one({"as_of": as_of, "status": "success"}, sort=[("generated_at", -1)])
+def get_snapshot_by_date(
+    as_of: str,
+    view: str = "all",
+    mode: str = "sell_premium",
+    strategy_id: str = DEFAULT_STRATEGY_ID,
+) -> Dict[str, Any]:
+    get_strategy(strategy_id)
+    query = {"as_of": as_of}
+    query.update(_latest_snapshot_query(strategy_id))
+    doc = _snapshot_collection().find_one(query, sort=[("generated_at", -1)])
     if not doc:
         return {"status": "error", "message": f"No snapshot found for as_of={as_of}"}
     payload = (doc.get("payload_by_mode") or {}).get(mode, {})
@@ -377,17 +522,30 @@ def get_snapshot_by_date(as_of: str, view: str = "all", mode: str = "sell_premiu
             "metadata": payload.get("metadata"),
             view: payload.get(view, []),
         }
-    return {"status": "success", "view": view, "mode": mode, "payload": payload}
+    return {
+        "status": "success",
+        "view": view,
+        "mode": mode,
+        "strategy_id": doc.get("strategy_id", DEFAULT_STRATEGY_ID),
+        "payload": payload,
+    }
 
 
-def get_health() -> Dict[str, Any]:
-    doc = _snapshot_collection().find_one({"status": "success"}, sort=[("generated_at", -1)])
+def get_health(strategy_id: str = DEFAULT_STRATEGY_ID) -> Dict[str, Any]:
+    get_strategy(strategy_id)
+    doc = _snapshot_collection().find_one(_latest_snapshot_query(strategy_id), sort=[("generated_at", -1)])
     if not doc:
-        return {"status": "empty", "freshness_target_minutes": FRESHNESS_TARGET_MINUTES, "details": {}}
+        return {
+            "status": "empty",
+            "strategy_id": strategy_id,
+            "freshness_target_minutes": FRESHNESS_TARGET_MINUTES,
+            "details": {},
+        }
     generated_at = doc.get("generated_at")
     if not isinstance(generated_at, datetime):
         return {
             "status": "stale",
+            "strategy_id": strategy_id,
             "freshness_target_minutes": FRESHNESS_TARGET_MINUTES,
             "details": {"reason": "invalid_generated_at"},
         }
@@ -395,6 +553,7 @@ def get_health() -> Dict[str, Any]:
     status = "healthy" if age_minutes <= FRESHNESS_TARGET_MINUTES else "stale"
     return {
         "status": status,
+        "strategy_id": doc.get("strategy_id", DEFAULT_STRATEGY_ID),
         "latest_as_of": doc.get("as_of"),
         "generated_at": generated_at,
         "age_minutes": age_minutes,
@@ -407,9 +566,14 @@ def run_selection_snapshot_if_stale(
     max_age_minutes: int = FRESHNESS_TARGET_MINUTES,
     max_tickers: int = 800,
     top_n_per_group: int = 10,
+    strategy_id: str = DEFAULT_STRATEGY_ID,
 ) -> Dict[str, Any]:
-    health = get_health()
+    health = get_health(strategy_id=strategy_id)
     if health.get("status") == "healthy":
         return {"status": "success", "message": "Snapshot is already fresh; no run needed."}
-    return run_selection_snapshot(max_tickers=max_tickers, top_n_per_group=top_n_per_group)
+    return run_selection_snapshot(
+        max_tickers=max_tickers,
+        top_n_per_group=top_n_per_group,
+        strategy_id=strategy_id,
+    )
 

@@ -1,5 +1,41 @@
 from pydantic import BaseModel, root_validator
-from typing import List, Optional, Dict, Any, Literal
+from typing import Any, Dict, List, Literal, Optional
+
+
+def _normalize_leg_action(value: Any) -> str:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise ValueError("'action' is required; use 'BUY' or 'SELL'")
+    if not isinstance(value, str):
+        raise ValueError("'action' must be a string (e.g. 'BUY' or 'SELL')")
+    normalized = value.strip().upper()
+    if normalized not in ("BUY", "SELL"):
+        raise ValueError(
+            f"Invalid leg action {value!r}; expected 'BUY' or 'SELL' (case-insensitive)"
+        )
+    return normalized
+
+
+def _normalize_option_right(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(
+            "'right' must be a string (e.g. 'C', 'P', 'Call', or 'Put')"
+        )
+    s = value.strip()
+    if len(s) == 1:
+        u = s.upper()
+        if u in ("C", "P"):
+            return u
+    low = s.lower()
+    if low == "call":
+        return "C"
+    if low == "put":
+        return "P"
+    raise ValueError(
+        f"Invalid option right {value!r}; use 'C', 'P', 'Call', or 'Put'"
+    )
+
 
 class OrderLeg(BaseModel):
     secType: Literal['STK', 'OPT'] = 'OPT'
@@ -7,6 +43,17 @@ class OrderLeg(BaseModel):
     strike: Optional[float] = None
     right: Optional[Literal['C', 'P']] = None
     expiry: Optional[str] = None # YYYY-MM-DD
+
+    @root_validator(pre=True)
+    def normalize_leg_strings(cls, values):
+        if not isinstance(values, dict):
+            return values
+        out = dict(values)
+        if "action" in out:
+            out["action"] = _normalize_leg_action(out["action"])
+        if "right" in out and out.get("right") is not None:
+            out["right"] = _normalize_option_right(out["right"])
+        return out
 
     @root_validator(skip_on_failure=True)
     def check_leg_type_consistency(cls, values):

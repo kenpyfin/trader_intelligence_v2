@@ -2,6 +2,9 @@ import React, { useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
 import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
   Alert,
   Box,
   Button,
@@ -18,6 +21,7 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 
 const viewToParam = {
@@ -68,17 +72,28 @@ const TopStocksByGroup = () => {
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState('clusters');
   const [mode, setMode] = useState('sell_premium');
+  const [strategyId, setStrategyId] = useState('peer_v1');
+  const [strategyOptions, setStrategyOptions] = useState([
+    { strategy_id: 'peer_v1', label: 'Peer Classification v1' },
+  ]);
+  const [strategyDocMarkdown, setStrategyDocMarkdown] = useState('');
+  const [strategyDocError, setStrategyDocError] = useState('');
+  const [strategyExpanded, setStrategyExpanded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [running, setRunning] = useState(false);
   const [payload, setPayload] = useState(null);
   const [error, setError] = useState('');
 
-  const fetchData = async (view, nextMode) => {
+  const fetchData = async (view, nextMode, nextStrategyId) => {
     setLoading(true);
     setError('');
     try {
       const response = await axios.get('/api/stock-selection/latest', {
-        params: { view: viewToParam[view], mode: nextMode },
+        params: {
+          view: viewToParam[view],
+          mode: nextMode,
+          strategy_id: nextStrategyId,
+        },
       });
       if (response.data?.status !== 'success') {
         throw new Error(response.data?.message || 'Failed to load stock selection snapshot.');
@@ -100,11 +115,12 @@ const TopStocksByGroup = () => {
         force: true,
         max_tickers: 800,
         top_n_per_group: 10,
+        strategy_id: strategyId,
       });
       if (response.data?.status !== 'success') {
         throw new Error(response.data?.message || 'Failed to refresh stock selection snapshot.');
       }
-      await fetchData(activeTab, mode);
+      await fetchData(activeTab, mode, strategyId);
     } catch (err) {
       setError(err?.response?.data?.detail || err?.message || 'Unable to refresh stock selection snapshot.');
     } finally {
@@ -113,8 +129,43 @@ const TopStocksByGroup = () => {
   };
 
   useEffect(() => {
-    fetchData(activeTab, mode);
-  }, [activeTab, mode]);
+    fetchData(activeTab, mode, strategyId);
+  }, [activeTab, mode, strategyId]);
+
+  useEffect(() => {
+    const fetchStrategies = async () => {
+      try {
+        const response = await axios.get('/api/stock-selection/strategies');
+        if (response.data?.status === 'success' && Array.isArray(response.data.strategies) && response.data.strategies.length > 0) {
+          setStrategyOptions(response.data.strategies);
+        }
+      } catch (_err) {
+        // Best effort: keep default built-in option when strategy list endpoint is unavailable.
+      }
+    };
+    fetchStrategies();
+  }, []);
+
+  useEffect(() => {
+    const fetchStrategyDoc = async () => {
+      setStrategyDocError('');
+      try {
+        const response = await axios.get('/api/stock-selection/strategy-doc', {
+          params: { strategy_id: strategyId },
+        });
+        if (response.data?.status !== 'success') {
+          throw new Error(response.data?.message || 'Failed to load strategy documentation.');
+        }
+        setStrategyDocMarkdown(response.data?.markdown || '');
+      } catch (err) {
+        setStrategyDocMarkdown('');
+        setStrategyDocError(
+          err?.response?.data?.detail || err?.message || 'Unable to load strategy documentation.'
+        );
+      }
+    };
+    fetchStrategyDoc();
+  }, [strategyId]);
 
   const groups = useMemo(() => {
     if (!payload) return [];
@@ -149,6 +200,21 @@ const TopStocksByGroup = () => {
       <Card sx={{ mb: 3 }}>
         <CardContent>
           <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2, alignItems: 'center' }}>
+            <FormControl size="small" sx={{ minWidth: 240 }}>
+              <InputLabel id="strategy-select-label">Strategy</InputLabel>
+              <Select
+                labelId="strategy-select-label"
+                value={strategyId}
+                label="Strategy"
+                onChange={(e) => setStrategyId(e.target.value)}
+              >
+                {strategyOptions.map((option) => (
+                  <MenuItem key={option.strategy_id} value={option.strategy_id}>
+                    {option.label || option.strategy_id}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
             <FormControl size="small" sx={{ minWidth: 220 }}>
               <InputLabel id="mode-select-label">Ranking Mode</InputLabel>
               <Select
@@ -177,6 +243,33 @@ const TopStocksByGroup = () => {
           )}
         </CardContent>
       </Card>
+
+      <Accordion
+        expanded={strategyExpanded}
+        onChange={(_, nextExpanded) => setStrategyExpanded(nextExpanded)}
+        sx={{ mb: 3 }}
+      >
+        <AccordionSummary expandIcon={<ExpandMoreIcon />} aria-controls="active-strategy-content">
+          <Typography variant="h6">Active Strategy (Full Text)</Typography>
+        </AccordionSummary>
+        <AccordionDetails>
+          {strategyDocError ? (
+            <Alert severity="warning">{strategyDocError}</Alert>
+          ) : (
+            <Box
+              component="pre"
+              sx={{
+                margin: 0,
+                whiteSpace: 'pre-wrap',
+                fontFamily: 'inherit',
+                fontSize: '0.9rem',
+              }}
+            >
+              {strategyDocMarkdown || 'No strategy documentation available.'}
+            </Box>
+          )}
+        </AccordionDetails>
+      </Accordion>
 
       <Tabs
         value={activeTab}

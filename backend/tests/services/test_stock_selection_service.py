@@ -59,3 +59,40 @@ def test_load_fundamentals_accepts_market_cap_with_space(monkeypatch):
     assert "market_cap_num" in frame.columns
     assert frame["market_cap_num"].iloc[0] > 0
 
+
+def test_extract_strategy_markdown_returns_strategy_section():
+    markdown = """
+# Stock Selection Strategies
+
+## Active Built-In Strategy: `peer_v1`
+Line A
+Line B
+
+## Strategy Selection Contract
+Line C
+""".strip()
+    section = stock_selection_service._extract_strategy_markdown(markdown, "peer_v1")
+    assert "Line A" in section
+    assert "Line C" not in section
+
+
+def test_latest_snapshot_query_supports_legacy_default_strategy():
+    query = stock_selection_service._latest_snapshot_query("peer_v1")
+    assert query["status"] == "success"
+    assert "$or" in query
+
+
+def test_strategy_doc_path_respects_explicit_file_env(monkeypatch, tmp_path):
+    doc = tmp_path / "STOCK_SELECTION_STRATEGIES.md"
+    doc.write_text("# test", encoding="utf-8")
+    monkeypatch.setenv("STOCK_SELECTION_STRATEGIES_PATH", str(doc))
+    resolved = stock_selection_service._strategy_doc_path("peer_v1")
+    assert resolved == doc
+
+
+def test_get_strategy_document_peer_v1_loads_markdown():
+    result = stock_selection_service.get_strategy_document("peer_v1")
+    assert result["status"] == "success"
+    assert "peer_v1" in result["markdown"]
+    assert "sell_premium" in result["markdown"]
+

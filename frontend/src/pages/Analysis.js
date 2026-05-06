@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, Component } from 'react';
+import React, { useState, useEffect, useCallback, useRef, Component } from 'react';
 import axios from 'axios';
 import Plot from 'react-plotly.js';
 import {
@@ -1540,7 +1540,7 @@ const ResultsDisplay = ({ analysisResult, setCautionModeActive, executeAnalysis,
   );
 };
 
-const SavedVerdictsControls = ({ ticker, currentResult }) => {
+const SavedVerdictsControls = ({ ticker, currentResult, scrollAnchorRef }) => {
   const [saving, setSaving] = useState(false);
   const [saveLabel, setSaveLabel] = useState('');
   const [saveMsg, setSaveMsg] = useState('');
@@ -1637,6 +1637,7 @@ const SavedVerdictsControls = ({ ticker, currentResult }) => {
   const biasChanged = previousBias && currentBias && previousBias !== currentBias;
 
   return (
+    <Box ref={scrollAnchorRef}>
     <AnalysisCard title="Verdict History">
       <Grid container spacing={3}>
         <Grid item xs={12} md={4}>
@@ -1744,6 +1745,7 @@ const SavedVerdictsControls = ({ ticker, currentResult }) => {
         </Grid>
       </Grid>
     </AnalysisCard>
+    </Box>
   );
 };
 
@@ -1894,6 +1896,7 @@ const AnalysisPage = () => {
   const [historyHasMore, setHistoryHasMore] = useState(false);
   const [historyTotal, setHistoryTotal] = useState(0);
   const [historyReloadVersion, setHistoryReloadVersion] = useState(0);
+  const verdictHistorySectionRef = useRef(null);
 
   const normalizedTickerForHistory = (ticker || '').trim().toUpperCase();
   const hasHistoryTicker = normalizedTickerForHistory.length > 0;
@@ -2172,11 +2175,26 @@ const AnalysisPage = () => {
     }
   };
 
+  const normalizeHistoryEntryTicker = (entry) => {
+    if (!entry) return '';
+    const payload = entry.request_payload || {};
+    return (payload.ticker || entry.ticker || '').trim().toUpperCase();
+  };
+
+  const handlePortTickerToVerdictHistory = (entry) => {
+    const normalizedTicker = normalizeHistoryEntryTicker(entry);
+    if (!normalizedTicker) return;
+    setTicker(normalizedTicker);
+    verdictHistorySectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
   const handleHistoryAnalyze = async (entry) => {
     if (!entry) return;
 
+    const normalizedTicker = normalizeHistoryEntryTicker(entry);
+    if (!normalizedTicker) return;
+
     const payload = entry.request_payload || {};
-    const rawTicker = payload.ticker || entry.ticker || '';
     const rawExpiration = payload.expiration_date || entry.expiration_date_raw || entry.expiration_date || '';
     const nextMethod = payload.analysis_method || entry.analysis_method || analysisMethod;
     const nextRateCandidate = payload.risk_free_rate ?? entry.risk_free_rate ?? riskFreeRate;
@@ -2185,8 +2203,6 @@ const AnalysisPage = () => {
     const nextModel = needsGptModel
       ? (payload.gpt_model || entry.gpt_model || selectedModel)
       : selectedModel;
-
-    const normalizedTicker = rawTicker.trim().toUpperCase();
 
     let normalizedExpiration = rawExpiration.trim();
     if (/^\d{4}-\d{2}-\d{2}$/.test(normalizedExpiration)) {
@@ -2488,12 +2504,31 @@ const AnalysisPage = () => {
                 {historyItems.map((entry) => (
                   <Paper key={entry.id} variant="outlined" sx={{ mb: 1 }}>
                     <ListItem
+                      onClick={() => handlePortTickerToVerdictHistory(entry)}
+                      sx={{
+                        cursor: 'pointer',
+                        '&:hover': { bgcolor: 'action.hover' },
+                      }}
                       secondaryAction={
                         <Box>
-                          <Button size="small" onClick={() => handleHistoryAnalyze(entry)} sx={{ mr: 1 }}>
+                          <Button
+                            size="small"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleHistoryAnalyze(entry);
+                            }}
+                            sx={{ mr: 1 }}
+                          >
                             Analyze Again
                           </Button>
-                          <IconButton edge="end" size="small" onClick={() => handleRemoveHistoryItem(entry.id)}>
+                          <IconButton
+                            edge="end"
+                            size="small"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleRemoveHistoryItem(entry.id);
+                            }}
+                          >
                             <DeleteIcon fontSize="small" />
                           </IconButton>
                         </Box>
@@ -2558,6 +2593,7 @@ const AnalysisPage = () => {
       <SavedVerdictsControls
         ticker={ticker}
         currentResult={analysisResult && Array.isArray(analysisResult) ? analysisResult[0] : null}
+        scrollAnchorRef={verdictHistorySectionRef}
       />
     </Box>
   );

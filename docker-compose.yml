@@ -16,6 +16,7 @@ services:
       # Mount the source code for hot-reloading during development
       - ./backend/src:/app/src
       - ./backend/my_libs_py3:/app/my_libs_py3
+      - ./backend/docs:/app/docs
     env_file:
       - .env
     environment:

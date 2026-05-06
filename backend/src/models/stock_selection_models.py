@@ -6,18 +6,21 @@ from pydantic import BaseModel, Field
 
 SelectionView = Literal["all", "clusters", "sectors", "regimes"]
 SelectionMode = Literal["sell_premium", "buy_premium"]
+SelectionStrategy = Literal["peer_v1"]
 
 
 class StockSelectionRunRequest(BaseModel):
     max_tickers: int = Field(800, ge=50, le=5000, description="Max universe size to evaluate")
     top_n_per_group: int = Field(10, ge=1, le=50, description="Top stocks to keep per grouping")
     force: bool = Field(False, description="Force recompute even if a fresh cache exists")
+    strategy_id: SelectionStrategy = Field("peer_v1", description="Built-in strategy identifier")
 
 
 class StockSelectionRunResponse(BaseModel):
     status: Literal["success", "error"]
     snapshot_id: Optional[str] = None
     as_of: Optional[str] = None
+    strategy_id: Optional[SelectionStrategy] = None
     tickers_considered: int = 0
     tickers_ranked: int = 0
     tickers_excluded: int = 0
@@ -71,8 +74,21 @@ class StockSelectionLatestResponse(BaseModel):
     status: Literal["success", "error"]
     view: SelectionView = "all"
     mode: SelectionMode = "sell_premium"
+    strategy_id: SelectionStrategy = "peer_v1"
     payload: Optional[StockSelectionSnapshotPayload] = None
     message: Optional[str] = None
+
+
+class StockSelectionStrategyDocResponse(BaseModel):
+    status: Literal["success", "error"]
+    strategy_id: SelectionStrategy
+    title: str
+    markdown: str
+
+
+class StockSelectionStrategyListResponse(BaseModel):
+    status: Literal["success", "error"]
+    strategies: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class StockSelectionHealthResponse(BaseModel):
