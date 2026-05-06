@@ -1609,6 +1609,7 @@ const SavedVerdictsControls = ({ ticker, currentResult, scrollAnchorRef }) => {
         label: saveLabel || undefined,
       });
       setSaveMsg(`Saved (id: ${resp.data?.id || 'unknown'})`);
+      setSaveLabel('');
       await loadList();
     } catch (e) {
       setSaveMsg(`Save failed: ${e.response?.data?.detail || e.message}`);
@@ -1733,6 +1734,9 @@ const SavedVerdictsControls = ({ ticker, currentResult, scrollAnchorRef }) => {
           {selectedDoc && (
             <Paper variant="outlined" sx={{ mt: 2, p: 2, bgcolor: '#f9f9f9' }}>
               <Typography variant="subtitle2">Saved Bias: {previousBias || 'N/A'}</Typography>
+              {selectedDoc?.label && (
+                <Typography variant="subtitle2" color="primary">Label: {selectedDoc.label}</Typography>
+              )}
               {biasChanged && (
                 <Typography variant="subtitle2" color="error">Changed vs Current: {currentBias || 'N/A'}</Typography>
               )}
@@ -1853,6 +1857,65 @@ class AnalysisErrorBoundary extends Component {
   }
 }
 
+const StockRankingsDisplay = ({ ticker, analysisResult }) => {
+  const [rankings, setRankings] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!ticker || !analysisResult) {
+      setRankings([]);
+      return;
+    }
+    const fetchRankings = async () => {
+      setLoading(true);
+      try {
+        const response = await axios.get(`/api/stock-selection/rankings/${encodeURIComponent(ticker)}`);
+        if (response.data?.status === 'success') {
+          setRankings(response.data.rankings || []);
+        }
+      } catch (err) {
+        console.error('Failed to fetch stock rankings:', err);
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchRankings();
+  }, [ticker, analysisResult]);
+
+  if (!analysisResult) return null;
+  if (loading) return <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', mb: 2 }}><CircularProgress size={16} /><Typography variant="caption">Checking selection rankings...</Typography></Box>;
+  if (rankings.length === 0) return null;
+
+  return (
+    <Box sx={{ mb: 3 }}>
+      <Typography variant="subtitle2" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+        <CheckCircleIcon fontSize="small" color="success" />
+        Top Ranked Stock Selection
+      </Typography>
+      <Grid container spacing={2}>
+        {rankings.map((r, i) => (
+          <Grid item xs={12} sm={6} md={4} key={i}>
+            <Paper variant="outlined" sx={{ p: 1.5, bgcolor: '#f0fdf4', borderColor: '#4caf50' }}>
+              <Typography variant="caption" color="text.secondary" display="block">
+                Strategy: <strong>{r.strategy_label}</strong> ({r.mode.replace('_', ' ')})
+              </Typography>
+              <Typography variant="body2" sx={{ mt: 0.5 }}>
+                Global Rank: <strong>{r.global_rank}</strong>
+              </Typography>
+              <Typography variant="body2">
+                Cluster Rank: <strong>{r.cluster_rank}</strong>
+              </Typography>
+              <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+                Score: {Number(r.selection_score).toFixed(3)} | {r.group_label || r.regime_bucket}
+              </Typography>
+            </Paper>
+          </Grid>
+        ))}
+      </Grid>
+    </Box>
+  );
+};
+
 const AnalysisPage = () => {
   const [ticker, setTicker] = useStickyState('SPY', 'ticker');
   const [analysisMethod, setAnalysisMethod] = useStickyState('holistic-market-edge', 'analysisMethod');
@@ -1875,6 +1938,7 @@ const AnalysisPage = () => {
   const [fetchingExpirations, setFetchingExpirations] = useState(false);
   const [analysisResult, setAnalysisResult] = useStickyState(null, 'analysisResult');
   const [loading, setLoading] = useState(false);
+  const [analysisStage, setAnalysisStage] = useState('idle'); // 'idle', 'data_collection', 'guardrail_pause', 'full_analysis'
   const [error, setError] = useState('');
 
   // NEW: Caution mode state management
@@ -2089,6 +2153,9 @@ const AnalysisPage = () => {
     if (!cautionMode) {
       setQualityAssessment(null);
       setCautionModeActive(false);
+      setAnalysisStage('data_collection');
+    } else {
+      setAnalysisStage('full_analysis');
     }
 
     try {
@@ -2099,6 +2166,39 @@ const AnalysisPage = () => {
         analysis_method: targetMethod,
         gpt_model: targetModel,
       };
+
+      // 1. If not in caution mode, check data quality first
+      if (!cautionMode) {
+        try {
+          const qualityCheckResponse = await axios.post('/api/analysis/data-quality-check', requestPayload);
+          const qualityAssessment = qualityCheckResponse.data?.quality_assessment;
+          
+          if (qualityAssessment) {
+            setQualityAssessment(qualityAssessment);
+            const qualityLevel = qualityAssessment.overall_quality_level || 'failed';
+            const combinedScore = qualityAssessment.combined_score || 0;
+            const passThreshold = qualityAssessment.pass_threshold || 0.6;
+            
+            // Guardrail: Pause if data quality is below threshold
+            if (combinedScore < passThreshold || ['acceptable', 'poor', 'failed'].includes(qualityLevel)) {
+              setAnalysisStage('guardrail_pause');
+              setLoading(false);
+              return; // Stop here, wait for user confirmation
+            }
+          }
+        } catch (err) {
+          console.warn("Data quality check failed, falling back to full analysis:", err);
+          // If the quality check fails (e.g. 500 error), we can optionally show an error or just proceed.
+          // For now, let's show an error so the user knows.
+          setError(err.response?.data?.detail || 'Data quality check failed.');
+          setLoading(false);
+          setAnalysisStage('idle');
+          return;
+        }
+      }
+
+      // 2. Proceed to full analysis
+      setAnalysisStage('full_analysis');
 
       // Add caution mode flag if enabled
       if (cautionMode) {
@@ -2127,7 +2227,11 @@ const AnalysisPage = () => {
     } catch (err) {
       setError(err.response?.data?.detail || 'An unexpected error occurred.');
     } finally {
-      setLoading(false);
+      // Only disable loading if we are not paused at the guardrail
+      if (analysisStage !== 'guardrail_pause') {
+        setLoading(false);
+        setAnalysisStage('idle');
+      }
     }
   };
 
@@ -2364,6 +2468,37 @@ const AnalysisPage = () => {
         </Box>
 
         {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+        
+        {analysisStage === 'guardrail_pause' && qualityAssessment && (
+          <Box sx={{ mb: 3 }}>
+            <Alert severity="warning" sx={{ mb: 2 }}>
+              <AlertTitle>Data Quality Warning</AlertTitle>
+              The data collected for <strong>{ticker}</strong> on <strong>{selectedExpiration}</strong> has quality issues. Running the AI analysis may yield inaccurate results.
+            </Alert>
+            <DataQualityCard 
+              qualityData={qualityAssessment}
+              allowCaution={true}
+              onProceedWithCaution={() => executeAnalysis({
+                ticker,
+                expiration: selectedExpiration,
+                riskFreeRate,
+                analysisMethod,
+                gptModel,
+                cautionMode: true
+              })}
+              showRetryOptions={true}
+            />
+            <Box sx={{ display: 'flex', gap: 2, mt: 2 }}>
+              <Button 
+                variant="outlined" 
+                onClick={() => setAnalysisStage('idle')}
+              >
+                Cancel Analysis
+              </Button>
+            </Box>
+          </Box>
+        )}
+
         {loading && (
           <Paper variant="outlined" sx={{ p: 3, mb: 3, textAlign: 'center' }}>
             <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
@@ -2379,19 +2514,23 @@ const AnalysisPage = () => {
                   </Typography>
 
                   <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
-                    <Paper variant="outlined" sx={{ p: 2, bgcolor: '#e3f2fd', borderColor: '#2196f3' }}>
+                    <Paper variant="outlined" sx={{ p: 2, bgcolor: analysisStage === 'data_collection' ? '#fff3e0' : '#e3f2fd', borderColor: analysisStage === 'data_collection' ? '#ff9800' : '#2196f3' }}>
                       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                        <Box sx={{
-                          width: 20,
-                          height: 20,
-                          borderRadius: '50%',
-                          bgcolor: 'primary.main',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center'
-                        }}>
-                          <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: 'white' }} />
-                        </Box>
+                        {analysisStage === 'data_collection' ? (
+                          <CircularProgress size={16} />
+                        ) : (
+                          <Box sx={{
+                            width: 20,
+                            height: 20,
+                            borderRadius: '50%',
+                            bgcolor: 'primary.main',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center'
+                          }}>
+                            <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: 'white' }} />
+                          </Box>
+                        )}
                         <Typography variant="subtitle2" fontWeight="bold">Stage 1: Data Collection</Typography>
                       </Box>
                       <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, ml: 3 }}>
@@ -2399,9 +2538,13 @@ const AnalysisPage = () => {
                       </Typography>
                     </Paper>
 
-                    <Paper variant="outlined" sx={{ p: 2, bgcolor: '#fff3e0', borderColor: '#ff9800' }}>
+                    <Paper variant="outlined" sx={{ p: 2, bgcolor: analysisStage === 'full_analysis' ? '#fff3e0' : '#f5f5f5', borderColor: analysisStage === 'full_analysis' ? '#ff9800' : '#e0e0e0' }}>
                       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                        <CircularProgress size={16} />
+                        {analysisStage === 'full_analysis' ? (
+                          <CircularProgress size={16} />
+                        ) : (
+                          <HourglassEmptyIcon color="disabled" />
+                        )}
                         <Typography variant="subtitle2" fontWeight="bold">Stage 2: Market Analysis</Typography>
                       </Box>
                       <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, ml: 3 }}>
@@ -2441,17 +2584,20 @@ const AnalysisPage = () => {
             </Box>
           </Paper>
         )}
-        {analysisResult &&
-          <ResultsDisplay
-            analysisResult={analysisResult}
-            setCautionModeActive={setCautionModeActive}
-            executeAnalysis={executeAnalysis}
-            selectedExpiration={selectedExpiration}
-            riskFreeRate={riskFreeRate}
-            analysisMethod={analysisMethod}
-            selectedModel={selectedModel}
-          />
-        }
+        {analysisResult && (
+          <>
+            <StockRankingsDisplay ticker={ticker} analysisResult={analysisResult} />
+            <ResultsDisplay
+              analysisResult={analysisResult}
+              setCautionModeActive={setCautionModeActive}
+              executeAnalysis={executeAnalysis}
+              selectedExpiration={selectedExpiration}
+              riskFreeRate={riskFreeRate}
+              analysisMethod={analysisMethod}
+              selectedModel={selectedModel}
+            />
+          </>
+        )}
       </AnalysisCard>
 
       <AnalysisCard title="Recent Analyses">

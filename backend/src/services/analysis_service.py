@@ -1024,3 +1024,29 @@ async def run_full_analysis(ticker: str, expiration_date: date, r_current: float
     )
     
     return analysis_result
+
+async def check_data_quality_only(ticker: str, expiration_date: date):
+    """
+    Fetches option data and assesses data quality without running the full analysis.
+    Used for early guardrails.
+    """
+    from src.my_libs_py3.my_data import PriceDataFetcher
+    from src.analytics.data_quality_fallback_manager import DataQualityFallbackManager
+    from src.analytics.expiration_fallback_config import create_default_fallback_config
+    
+    data_fetcher = PriceDataFetcher()
+    
+    # Try to fetch using finviz first to assess quality
+    df = data_fetcher.get_option_data_finviz(
+        tic=ticker,
+        option_type='o',
+        expiration_date=expiration_date.isoformat(),
+        max_retries=1
+    )
+    
+    # Assess quality
+    config = create_default_fallback_config()
+    fallback_manager = DataQualityFallbackManager(config)
+    quality_assessment = fallback_manager._assess_data_quality(df, ticker)
+    
+    return quality_assessment

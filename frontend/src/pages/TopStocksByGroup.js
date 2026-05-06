@@ -23,6 +23,8 @@ import {
 } from '@mui/material';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 const viewToParam = {
   clusters: 'clusters',
@@ -68,11 +70,37 @@ const columnDefinitions = [
   },
 ];
 
+// A custom hook to keep state in localStorage
+function useStickyState(defaultValue, key) {
+  const [value, setValue] = useState(() => {
+    const stickyValue = window.localStorage.getItem(key);
+    if (stickyValue !== null) {
+      try {
+        return JSON.parse(stickyValue);
+      } catch (error) {
+        console.error(`Error reading localStorage key "${key}":`, error);
+        return defaultValue;
+      }
+    }
+    return defaultValue;
+  });
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(key, JSON.stringify(value));
+    } catch (error) {
+      console.error(`Error setting localStorage key "${key}":`, error);
+    }
+  }, [key, value]);
+
+  return [value, setValue];
+}
+
 const TopStocksByGroup = () => {
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState('clusters');
-  const [mode, setMode] = useState('sell_premium');
-  const [strategyId, setStrategyId] = useState('peer_v1');
+  const [activeTab, setActiveTab] = useStickyState('clusters', 'topStocksActiveTab');
+  const [mode, setMode] = useStickyState('sell_premium', 'topStocksMode');
+  const [strategyId, setStrategyId] = useStickyState('peer_v1', 'topStocksStrategyId');
   const [strategyOptions, setStrategyOptions] = useState([
     { strategy_id: 'peer_v1', label: 'Peer Classification v1' },
   ]);
@@ -257,15 +285,22 @@ const TopStocksByGroup = () => {
             <Alert severity="warning">{strategyDocError}</Alert>
           ) : (
             <Box
-              component="pre"
               sx={{
                 margin: 0,
-                whiteSpace: 'pre-wrap',
                 fontFamily: 'inherit',
                 fontSize: '0.9rem',
+                '& img': { maxWidth: '100%' },
+                '& table': { borderCollapse: 'collapse', width: '100%', mb: 2 },
+                '& th, & td': { border: '1px solid #ddd', p: 1 },
               }}
             >
-              {strategyDocMarkdown || 'No strategy documentation available.'}
+              {strategyDocMarkdown ? (
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {strategyDocMarkdown}
+                </ReactMarkdown>
+              ) : (
+                <Typography>No strategy documentation available.</Typography>
+              )}
             </Box>
           )}
         </AccordionDetails>

@@ -465,6 +465,36 @@ async def get_available_gpt_models():
 
 
 @app.post("/analysis/stock")
+@app.post("/api/analysis/data-quality-check")
+async def check_data_quality(request: AnalysisRequest):
+    """
+    Endpoint to check data quality for a specific ticker and expiration
+    without running the full analysis. Used for early guardrails.
+    """
+    try:
+        from src.services.analysis_service import check_data_quality_only
+        
+        # We need to parse the date string from the request
+        from datetime import datetime
+        try:
+            exp_date = datetime.strptime(request.expiration_date, '%Y-%m-%d').date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+
+        quality_assessment = await check_data_quality_only(
+            ticker=request.ticker,
+            expiration_date=exp_date
+        )
+        
+        return {"quality_assessment": quality_assessment}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        import logging
+        logging.error(f"Error checking data quality: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/api/analysis/stock")  # Alias for nginx proxy compatibility
 async def analyze_stock(request: AnalysisRequest):
     """

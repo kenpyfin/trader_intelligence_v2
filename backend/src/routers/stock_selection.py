@@ -77,3 +77,13 @@ async def get_stock_selection_strategy_doc(strategy_id: SelectionStrategy = Quer
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to fetch stock selection strategy documentation: {e}")
 
+
+@router.get("/stock-selection/rankings/{ticker}")
+@router.get("/api/stock-selection/rankings/{ticker}")
+async def get_ticker_rankings_api(ticker: str):
+    try:
+        return stock_selection_service.get_ticker_rankings(ticker)
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to fetch ticker rankings: {e}")
+

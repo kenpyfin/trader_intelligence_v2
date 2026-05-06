@@ -577,3 +577,48 @@ def run_selection_snapshot_if_stale(
         strategy_id=strategy_id,
     )
 
+
+def get_ticker_rankings(ticker: str) -> Dict[str, Any]:
+    ticker = ticker.strip().upper()
+    strategies = list_registered_strategies()
+    results = []
+
+    for strategy in strategies:
+        strategy_id = strategy.get("strategy_id")
+        if not strategy_id:
+            continue
+            
+        doc = _snapshot_collection().find_one(_latest_snapshot_query(strategy_id), sort=[("generated_at", -1)])
+        if not doc:
+            continue
+
+        payload_by_mode = doc.get("payload_by_mode", {})
+        for mode, payload in payload_by_mode.items():
+            clusters = payload.get("clusters", [])
+            found_in_mode = False
+            for cluster in clusters:
+                if found_in_mode:
+                    break
+                stocks = cluster.get("stocks", [])
+                for stock in stocks:
+                    if stock.get("ticker", "").upper() == ticker:
+                        results.append({
+                            "strategy_id": strategy_id,
+                            "strategy_label": strategy.get("label", strategy_id),
+                            "mode": mode,
+                            "global_rank": stock.get("global_rank"),
+                            "cluster_rank": stock.get("cluster_rank"),
+                            "selection_score": stock.get("selection_score"),
+                            "confidence_score": stock.get("confidence_score"),
+                            "regime_bucket": stock.get("regime_bucket"),
+                            "group_label": cluster.get("group_label"),
+                        })
+                        found_in_mode = True
+                        break
+
+    return {
+        "status": "success",
+        "ticker": ticker,
+        "rankings": results
+    }
+
