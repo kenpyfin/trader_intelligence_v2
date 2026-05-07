@@ -52,7 +52,8 @@ import {
   HourglassEmpty as HourglassEmptyIcon,
   Info as InfoIcon,
   Build as BuildIcon,
-  Skeleton as SkeletonIcon
+  Skeleton as SkeletonIcon,
+  OpenInNew as OpenInNewIcon
 } from '@mui/icons-material';
 
 // Import enhanced quality components
@@ -1830,6 +1831,7 @@ class AnalysisErrorBoundary extends Component {
 
   componentDidCatch(error, errorInfo) {
     console.error('Analysis page error:', error, errorInfo);
+    this.setState({ error: error });
   }
 
   render() {
@@ -1841,6 +1843,13 @@ class AnalysisErrorBoundary extends Component {
             <Typography>
               An unexpected error occurred. Please refresh the page and try again.
             </Typography>
+            {this.state.error && (
+              <Box sx={{ mt: 2, p: 2, bgcolor: 'rgba(0,0,0,0.05)', borderRadius: 1 }}>
+                <Typography variant="body2" color="error" sx={{ fontFamily: 'monospace' }}>
+                  {this.state.error.toString()}
+                </Typography>
+              </Box>
+            )}
             <Button
               onClick={() => window.location.reload()}
               sx={{ mt: 2 }}
@@ -2158,6 +2167,8 @@ const AnalysisPage = () => {
       setAnalysisStage('full_analysis');
     }
 
+    let isPaused = false;
+
     try {
       const requestPayload = {
         ticker: normalizedTicker,
@@ -2175,16 +2186,6 @@ const AnalysisPage = () => {
           
           if (qualityAssessment) {
             setQualityAssessment(qualityAssessment);
-            const qualityLevel = qualityAssessment.overall_quality_level || 'failed';
-            const combinedScore = qualityAssessment.combined_score || 0;
-            const passThreshold = qualityAssessment.pass_threshold || 0.6;
-            
-            // Guardrail: Pause if data quality is below threshold
-            if (combinedScore < passThreshold || ['acceptable', 'poor', 'failed'].includes(qualityLevel)) {
-              setAnalysisStage('guardrail_pause');
-              setLoading(false);
-              return; // Stop here, wait for user confirmation
-            }
           }
         } catch (err) {
           console.warn("Data quality check failed, falling back to full analysis:", err);
@@ -2228,7 +2229,7 @@ const AnalysisPage = () => {
       setError(err.response?.data?.detail || 'An unexpected error occurred.');
     } finally {
       // Only disable loading if we are not paused at the guardrail
-      if (analysisStage !== 'guardrail_pause') {
+      if (!isPaused) {
         setLoading(false);
         setAnalysisStage('idle');
       }
@@ -2344,15 +2345,31 @@ const AnalysisPage = () => {
       <AnalysisCard title="Stock and Option Analysis">
         <Box component="form" onSubmit={handleAnalyze} sx={{ mb: 3 }}>
           <Grid container spacing={2} alignItems="flex-end">
-            <Grid item xs={12} sm={6} md={2}>
-              <TextField
-                label="Ticker"
-                value={ticker}
-                onChange={(e) => setTicker(e.target.value)}
-                required
-                fullWidth
-                size="small"
-              />
+            <Grid item xs={12} sm={6} md={3}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                <TextField
+                  label="Ticker"
+                  value={ticker}
+                  onChange={(e) => setTicker(e.target.value)}
+                  required
+                  fullWidth
+                  size="small"
+                />
+                {ticker && (
+                  <Tooltip title={`View ${ticker} on Finviz`}>
+                    <IconButton 
+                      size="small" 
+                      component="a" 
+                      href={`https://finviz.com/quote.ashx?t=${ticker}`} 
+                      target="_blank" 
+                      rel="noopener noreferrer"
+                      sx={{ flexShrink: 0 }}
+                    >
+                      <OpenInNewIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                )}
+              </Box>
             </Grid>
 
             <Grid item xs={12} sm={6} md={3}>
@@ -2469,33 +2486,9 @@ const AnalysisPage = () => {
 
         {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
         
-        {analysisStage === 'guardrail_pause' && qualityAssessment && (
+        {!loading && qualityAssessment && (
           <Box sx={{ mb: 3 }}>
-            <Alert severity="warning" sx={{ mb: 2 }}>
-              <AlertTitle>Data Quality Warning</AlertTitle>
-              The data collected for <strong>{ticker}</strong> on <strong>{selectedExpiration}</strong> has quality issues. Running the AI analysis may yield inaccurate results.
-            </Alert>
-            <DataQualityCard 
-              qualityData={qualityAssessment}
-              allowCaution={true}
-              onProceedWithCaution={() => executeAnalysis({
-                ticker,
-                expiration: selectedExpiration,
-                riskFreeRate,
-                analysisMethod,
-                gptModel,
-                cautionMode: true
-              })}
-              showRetryOptions={true}
-            />
-            <Box sx={{ display: 'flex', gap: 2, mt: 2 }}>
-              <Button 
-                variant="outlined" 
-                onClick={() => setAnalysisStage('idle')}
-              >
-                Cancel Analysis
-              </Button>
-            </Box>
+            <DataQualityCard qualityData={qualityAssessment} showRetryOptions={true} />
           </Box>
         )}
 

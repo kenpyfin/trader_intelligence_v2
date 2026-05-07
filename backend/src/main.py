@@ -464,7 +464,7 @@ async def get_available_gpt_models():
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
 
 
-@app.post("/analysis/stock")
+@app.post("/analysis/data-quality-check")
 @app.post("/api/analysis/data-quality-check")
 async def check_data_quality(request: AnalysisRequest):
     """
@@ -477,9 +477,12 @@ async def check_data_quality(request: AnalysisRequest):
         # We need to parse the date string from the request
         from datetime import datetime
         try:
-            exp_date = datetime.strptime(request.expiration_date, '%Y-%m-%d').date()
+            exp_date = datetime.strptime(request.expiration_date, '%Y%m%d').date()
         except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+            try:
+                exp_date = datetime.strptime(request.expiration_date, '%Y-%m-%d').date()
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid date format. Use YYYYMMDD or YYYY-MM-DD")
 
         quality_assessment = await check_data_quality_only(
             ticker=request.ticker,
@@ -495,6 +498,7 @@ async def check_data_quality(request: AnalysisRequest):
         logging.error(f"Error checking data quality: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/analysis/stock")
 @app.post("/api/analysis/stock")  # Alias for nginx proxy compatibility
 async def analyze_stock(request: AnalysisRequest):
     """
