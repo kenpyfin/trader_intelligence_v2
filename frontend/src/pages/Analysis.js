@@ -66,6 +66,9 @@ import {
   QualityScoreBadge
 } from '../components/CautionModeIndicator';
 
+import { useTaskPolling } from '../hooks/useTaskPolling';
+import { useTasks } from '../hooks/useTasks';
+
 // Missing Data Detection Utilities
 const MissingDataStates = {
   LOADING: 'LOADING',
@@ -1971,6 +1974,8 @@ const AnalysisPage = () => {
   const [historyReloadVersion, setHistoryReloadVersion] = useState(0);
   const verdictHistorySectionRef = useRef(null);
 
+  const { startTask: runAnalysisTask, loading: asyncLoading, taskStatus, error: asyncError, result: asyncResult, setError: setAsyncError } = useTaskPolling();
+
   const normalizedTickerForHistory = (ticker || '').trim().toUpperCase();
   const hasHistoryTicker = normalizedTickerForHistory.length > 0;
 
@@ -2154,87 +2159,28 @@ const AnalysisPage = () => {
     setTicker(normalizedTicker);
     setSelectedExpiration(normalizedExpiration);
 
-    setLoading(true);
-    setError('');
-    setAnalysisResult(null);
-
-    // Clear quality assessment if not in caution mode
-    if (!cautionMode) {
-      setQualityAssessment(null);
-      setCautionModeActive(false);
-      setAnalysisStage('data_collection');
-    } else {
-      setAnalysisStage('full_analysis');
-    }
-
-    let isPaused = false;
-
-    try {
-      const requestPayload = {
-        ticker: normalizedTicker,
-        expiration_date: normalizedExpiration,
-        risk_free_rate: targetRate,
-        analysis_method: targetMethod,
-        gpt_model: targetModel,
-      };
-
-      // 1. If not in caution mode, check data quality first
-      if (!cautionMode) {
-        try {
-          const qualityCheckResponse = await axios.post('/api/analysis/data-quality-check', requestPayload);
-          const qualityAssessment = qualityCheckResponse.data?.quality_assessment;
-          
-          if (qualityAssessment) {
-            setQualityAssessment(qualityAssessment);
-          }
-        } catch (err) {
-          console.warn("Data quality check failed, falling back to full analysis:", err);
-          // If the quality check fails (e.g. 500 error), we can optionally show an error or just proceed.
-          // For now, let's show an error so the user knows.
-          setError(err.response?.data?.detail || 'Data quality check failed.');
-          setLoading(false);
-          setAnalysisStage('idle');
-          return;
-        }
-      }
-
-      // 2. Proceed to full analysis
-      setAnalysisStage('full_analysis');
-
-      // Add caution mode flag if enabled
-      if (cautionMode) {
-        requestPayload.caution_mode = true;
-      }
-
-      const response = await axios.post('/api/analysis/stock', requestPayload);
-
-      const result = response.data;
-      const normalizedResult = (result && typeof result === 'object' && !Array.isArray(result)) ? [result] : result;
-
-      // Extract quality assessment data from response
-      if (result?.error_details?.quality_assessment) {
-        setQualityAssessment(result.error_details.quality_assessment);
-      }
-
-      // Set caution mode if explicitly requested or if analysis succeeded with warnings
-      if (cautionMode || result?.caution_mode_active) {
-        setCautionModeActive(true);
-      }
-
-      setAnalysisResult(normalizedResult);
-
-      setHistoryPage(1);
-      setHistoryReloadVersion((prev) => prev + 1);
-    } catch (err) {
-      setError(err.response?.data?.detail || 'An unexpected error occurred.');
-    } finally {
-      // Only disable loading if we are not paused at the guardrail
-      if (!isPaused) {
-        setLoading(false);
-        setAnalysisStage('idle');
-      }
-    }
+    // Call the new async analysis hook
+    runAnalysisTask('/api/analysis/stock/async', {
+      ticker: normalizedTicker,
+      expiration_date: normalizedExpiration,
+      risk_free_rate: targetRate,
+      analysis_method: targetMethod,
+      gpt_model: targetModel,
+    }, 'Analysis');
   };
+
+  useEffect(() => {
+    if (asyncResult) {
+      setAnalysisResult(asyncResult);
+      setHistoryReloadVersion(v => v + 1);
+    }
+  }, [asyncResult, setAnalysisResult]);
+
+  useEffect(() => {
+    if (asyncError) {
+      setError(asyncError);
+    }
+  }, [asyncError]);
 
   const handleFetchExpirations = async () => {
     try {
@@ -2486,94 +2432,35 @@ const AnalysisPage = () => {
 
         {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
         
-        {!loading && qualityAssessment && (
+        {/* NEW: Show quality assessment as soon as it's available, even during loading */}
+        {qualityAssessment && (
           <Box sx={{ mb: 3 }}>
-            <DataQualityCard qualityData={qualityAssessment} showRetryOptions={true} />
+            <DataQualityCard qualityData={qualityAssessment} showRetryOptions={!loading} />
           </Box>
         )}
 
-        {loading && (
+        {asyncLoading && (
           <Paper variant="outlined" sx={{ p: 3, mb: 3, textAlign: 'center' }}>
             <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
               <CircularProgress size={40} />
               <Typography variant="h6" color="primary">
-                {analysisMethod.includes('gpt') ? 'AI Analysis in Progress' : 'Analysis in Progress'}
+                {taskStatus?.name || 'Analysis in Progress'}
               </Typography>
+              <Typography variant="body1">
+                {taskStatus?.message || 'Initializing...'}
+              </Typography>
+              
+              <Box sx={{ width: '100%', maxWidth: 400, mt: 2 }}>
+                <LinearProgress variant="determinate" value={taskStatus?.progress || 0} />
+                <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+                  Overall Progress: {taskStatus?.progress || 0}%
+                </Typography>
+              </Box>
 
-              {analysisMethod.includes('gpt') && (
-                <Box sx={{ width: '100%', maxWidth: 600 }}>
-                  <Typography variant="body2" color="text.secondary" paragraph>
-                    Multi-stage analysis pipeline running:
-                  </Typography>
-
-                  <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
-                    <Paper variant="outlined" sx={{ p: 2, bgcolor: analysisStage === 'data_collection' ? '#fff3e0' : '#e3f2fd', borderColor: analysisStage === 'data_collection' ? '#ff9800' : '#2196f3' }}>
-                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                        {analysisStage === 'data_collection' ? (
-                          <CircularProgress size={16} />
-                        ) : (
-                          <Box sx={{
-                            width: 20,
-                            height: 20,
-                            borderRadius: '50%',
-                            bgcolor: 'primary.main',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center'
-                          }}>
-                            <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: 'white' }} />
-                          </Box>
-                        )}
-                        <Typography variant="subtitle2" fontWeight="bold">Stage 1: Data Collection</Typography>
-                      </Box>
-                      <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, ml: 3 }}>
-                        Gathering market data, options chains, and technical indicators
-                      </Typography>
-                    </Paper>
-
-                    <Paper variant="outlined" sx={{ p: 2, bgcolor: analysisStage === 'full_analysis' ? '#fff3e0' : '#f5f5f5', borderColor: analysisStage === 'full_analysis' ? '#ff9800' : '#e0e0e0' }}>
-                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                        {analysisStage === 'full_analysis' ? (
-                          <CircularProgress size={16} />
-                        ) : (
-                          <HourglassEmptyIcon color="disabled" />
-                        )}
-                        <Typography variant="subtitle2" fontWeight="bold">Stage 2: Market Analysis</Typography>
-                      </Box>
-                      <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, ml: 3 }}>
-                        AI analyzing market conditions, sentiment, and technical patterns
-                      </Typography>
-                    </Paper>
-
-                    <Paper variant="outlined" sx={{ p: 2, bgcolor: '#f5f5f5', borderColor: '#e0e0e0' }}>
-                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                        <HourglassEmptyIcon color="disabled" />
-                        <Typography variant="subtitle2" color="text.secondary">Stage 3: Strategy Generation</Typography>
-                      </Box>
-                      <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, ml: 3 }}>
-                        Generating executable trading strategies based on analysis
-                      </Typography>
-                    </Paper>
-                  </Box>
-
-                  <Box sx={{ mt: 2 }}>
-                    <Typography variant="caption" color="text.secondary">
-                      This process typically takes 30-60 seconds. Please wait while we generate your personalized trading insights.
-                    </Typography>
-                  </Box>
-                </Box>
-              )}
-
-              {!analysisMethod.includes('gpt') && (
-                <Box sx={{ maxWidth: 400 }}>
-                  <Typography variant="body2" color="text.secondary">
-                    Analyzing market data and calculating option strategies for <strong>{ticker}</strong>
-                  </Typography>
-                  <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
-                    This usually takes just a few seconds...
-                  </Typography>
-                </Box>
-              )}
+              <Alert severity="info" sx={{ mt: 2, width: '100%' }}>
+                <AlertTitle>Background Task Started</AlertTitle>
+                You can safely navigate to other pages while this analysis runs. You'll find it in the notification center (top right) when it's done.
+              </Alert>
             </Box>
           </Paper>
         )}
