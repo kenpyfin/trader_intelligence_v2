@@ -18,6 +18,7 @@ import {
   List,
   ListItem,
   ListItemText,
+  LinearProgress,
   MenuItem,
   Paper,
   Select,
@@ -67,7 +68,6 @@ import {
 } from '../components/CautionModeIndicator';
 
 import { useTaskPolling } from '../hooks/useTaskPolling';
-import { useTasks } from '../hooks/useTasks';
 
 // Missing Data Detection Utilities
 const MissingDataStates = {
@@ -81,6 +81,37 @@ const MissingDataStates = {
   PARTIAL_SUCCESS: 'PARTIAL_SUCCESS',
   COMPLETE: 'COMPLETE',
   COMPLETE_WITH_CAUTION: 'COMPLETE_WITH_CAUTION'  // NEW: Complete but with warnings
+};
+
+const ANALYSIS_PROGRESS_STAGES = [
+  { id: 'queued', label: 'Task queued', threshold: 0 },
+  { id: 'data_collection', label: 'Collecting market and options data', threshold: 15 },
+  { id: 'guardrail_pause', label: 'Running quality and fallback checks', threshold: 40 },
+  { id: 'full_analysis', label: 'Computing models and signals', threshold: 65 },
+  { id: 'finalizing', label: 'Finalizing verdict and response', threshold: 90 },
+];
+
+const resolveAnalysisStage = (progressValue) => {
+  const progress = Number.isFinite(progressValue) ? progressValue : 0;
+  let currentStage = ANALYSIS_PROGRESS_STAGES[0].id;
+  ANALYSIS_PROGRESS_STAGES.forEach((stage) => {
+    if (progress >= stage.threshold) {
+      currentStage = stage.id;
+    }
+  });
+  return currentStage;
+};
+
+const extractQualityAssessmentFromResult = (payload) => {
+  if (!payload) return null;
+  const firstItem = Array.isArray(payload) ? payload[0] : payload;
+  if (!firstItem || typeof firstItem !== 'object') return null;
+
+  return (
+    firstItem.error_details?.quality_assessment
+    || firstItem.quality_assessment
+    || null
+  );
 };
 
 const detectStrategyState = (strategy, gptVerdict, analysisResult, setCautionModeActive, executeAnalysis, ticker, selectedExpiration, riskFreeRate, analysisMethod, selectedModel) => {
@@ -1949,7 +1980,6 @@ const AnalysisPage = () => {
   const [selectedExpiration, setSelectedExpiration] = useState('');
   const [fetchingExpirations, setFetchingExpirations] = useState(false);
   const [analysisResult, setAnalysisResult] = useStickyState(null, 'analysisResult');
-  const [loading, setLoading] = useState(false);
   const [analysisStage, setAnalysisStage] = useState('idle'); // 'idle', 'data_collection', 'guardrail_pause', 'full_analysis'
   const [error, setError] = useState('');
 
@@ -1974,7 +2004,7 @@ const AnalysisPage = () => {
   const [historyReloadVersion, setHistoryReloadVersion] = useState(0);
   const verdictHistorySectionRef = useRef(null);
 
-  const { startTask: runAnalysisTask, loading: asyncLoading, taskStatus, error: asyncError, result: asyncResult, setError: setAsyncError } = useTaskPolling();
+  const { startTask: runAnalysisTask, loading: asyncLoading, taskStatus, error: asyncError, result: asyncResult } = useTaskPolling();
 
   const normalizedTickerForHistory = (ticker || '').trim().toUpperCase();
   const hasHistoryTicker = normalizedTickerForHistory.length > 0;
@@ -2158,20 +2188,74 @@ const AnalysisPage = () => {
 
     setTicker(normalizedTicker);
     setSelectedExpiration(normalizedExpiration);
+    if (!cautionMode) {
+      setQualityAssessment(null);
+      setCautionModeActive(false);
+    }
+    setError('');
 
-    // Call the new async analysis hook
-    runAnalysisTask('/api/analysis/stock/async', {
+    const requestPayload = {
       ticker: normalizedTicker,
       expiration_date: normalizedExpiration,
       risk_free_rate: targetRate,
       analysis_method: targetMethod,
       gpt_model: targetModel,
+      caution_mode: cautionMode,
+    };
+
+    // Run pre-check before async analysis when override is not enabled.
+    if (!cautionMode) {
+      try {
+        const qualityCheckResponse = await axios.post('/api/analysis/data-quality-check', requestPayload);
+        const nextAssessment = qualityCheckResponse.data?.quality_assessment;
+
+        if (nextAssessment) {
+          setQualityAssessment(nextAssessment);
+          const qualityLevel = nextAssessment.overall_level || 'failed';
+          const combinedScore = nextAssessment.combined_score || nextAssessment.quality_score || 0;
+          const passThreshold = nextAssessment?.thresholds_used?.pass_threshold || 0.6;
+          const qualityFailed = (
+            combinedScore < passThreshold ||
+            ['acceptable', 'poor', 'failed'].includes(qualityLevel)
+          );
+
+          if (qualityFailed) {
+            setAnalysisStage('guardrail_pause');
+            return;
+          }
+        }
+      } catch (err) {
+        console.warn('Data quality pre-check failed, blocking analysis by default:', err);
+        setError('Data quality check failed. Please retry or use a different expiration date.');
+        setAnalysisStage('guardrail_pause');
+        return;
+      }
+    }
+
+    setAnalysisStage('full_analysis');
+    if (cautionMode) {
+      setCautionModeActive(true);
+    }
+
+    // Call the async analysis hook
+    runAnalysisTask('/api/analysis/stock/async', {
+      ...requestPayload,
     }, 'Analysis');
   };
 
   useEffect(() => {
     if (asyncResult) {
+      const firstItem = Array.isArray(asyncResult) ? asyncResult[0] : asyncResult;
+      if (firstItem?.analysis_blocked) {
+        setQualityAssessment(firstItem.quality_assessment || null);
+        setAnalysisResult(null);
+        setAnalysisStage('guardrail_pause');
+        setError(firstItem.message || 'Analysis blocked due to data quality.');
+        return;
+      }
+
       setAnalysisResult(asyncResult);
+      setQualityAssessment(extractQualityAssessmentFromResult(asyncResult));
       setHistoryReloadVersion(v => v + 1);
     }
   }, [asyncResult, setAnalysisResult]);
@@ -2179,8 +2263,17 @@ const AnalysisPage = () => {
   useEffect(() => {
     if (asyncError) {
       setError(asyncError);
+      setQualityAssessment(null);
     }
   }, [asyncError]);
+
+  useEffect(() => {
+    if (!asyncLoading) {
+      setAnalysisStage((prev) => (prev === 'guardrail_pause' ? prev : 'idle'));
+      return;
+    }
+    setAnalysisStage(resolveAnalysisStage(taskStatus?.progress));
+  }, [asyncLoading, taskStatus]);
 
   const handleFetchExpirations = async () => {
     try {
@@ -2420,9 +2513,9 @@ const AnalysisPage = () => {
               <Button 
                 type="submit" 
                 variant="contained" 
-                disabled={loading || !selectedExpiration}
+                disabled={asyncLoading || !selectedExpiration}
                 fullWidth
-                startIcon={loading ? <CircularProgress size={20} color="inherit" /> : <SmartToyIcon />}
+                startIcon={asyncLoading ? <CircularProgress size={20} color="inherit" /> : <SmartToyIcon />}
               >
                 2. Run Analysis
               </Button>
@@ -2432,10 +2525,47 @@ const AnalysisPage = () => {
 
         {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
         
-        {/* NEW: Show quality assessment as soon as it's available, even during loading */}
-        {qualityAssessment && (
+        {analysisStage === 'guardrail_pause' && qualityAssessment && (
           <Box sx={{ mb: 3 }}>
-            <DataQualityCard qualityData={qualityAssessment} showRetryOptions={!loading} />
+            <Alert severity="warning" sx={{ mb: 2 }}>
+              <AlertTitle>Data Quality Gate</AlertTitle>
+              Data quality did not pass for <strong>{ticker}</strong> on <strong>{selectedExpiration}</strong>. Analysis is currently stopped.
+            </Alert>
+            <DataQualityCard qualityData={qualityAssessment} showRetryOptions={!asyncLoading} />
+            <Box sx={{ display: 'flex', gap: 2, mt: 2 }}>
+              <Button
+                variant="contained"
+                color="warning"
+                disabled={asyncLoading}
+                onClick={() => executeAnalysis({
+                  ticker,
+                  expiration: selectedExpiration,
+                  riskFreeRate,
+                  analysisMethod,
+                  gptModel: selectedModel,
+                  cautionMode: true
+                })}
+              >
+                Override and Continue
+              </Button>
+              <Button
+                variant="outlined"
+                disabled={asyncLoading}
+                onClick={() => {
+                  setAnalysisStage('idle');
+                  setCautionModeActive(false);
+                }}
+              >
+                Cancel
+              </Button>
+            </Box>
+          </Box>
+        )}
+
+        {/* Show quality assessment as soon as it's available, even during loading */}
+        {qualityAssessment && analysisStage !== 'guardrail_pause' && (
+          <Box sx={{ mb: 3 }}>
+            <DataQualityCard qualityData={qualityAssessment} showRetryOptions={!asyncLoading} />
           </Box>
         )}
 
@@ -2457,10 +2587,34 @@ const AnalysisPage = () => {
                 </Typography>
               </Box>
 
-              <Alert severity="info" sx={{ mt: 2, width: '100%' }}>
-                <AlertTitle>Background Task Started</AlertTitle>
-                You can safely navigate to other pages while this analysis runs. You'll find it in the notification center (top right) when it's done.
-              </Alert>
+              <Paper variant="outlined" sx={{ width: '100%', maxWidth: 520, p: 2, textAlign: 'left' }}>
+                <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1.5 }}>
+                  Analysis Stages
+                </Typography>
+                <Stack spacing={1}>
+                  {ANALYSIS_PROGRESS_STAGES.map((stage) => {
+                    const stageReached = (taskStatus?.progress || 0) >= stage.threshold;
+                    const isCurrentStage = analysisStage === stage.id;
+                    return (
+                      <Box key={stage.id} sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                        {stageReached ? (
+                          <CheckCircleIcon color={isCurrentStage ? 'primary' : 'success'} fontSize="small" />
+                        ) : (
+                          <HourglassEmptyIcon color="disabled" fontSize="small" />
+                        )}
+                        <Typography
+                          variant="body2"
+                          color={isCurrentStage ? 'primary.main' : (stageReached ? 'text.primary' : 'text.secondary')}
+                          sx={{ fontWeight: isCurrentStage ? 600 : 400 }}
+                        >
+                          {stage.label}
+                        </Typography>
+                      </Box>
+                    );
+                  })}
+                </Stack>
+              </Paper>
+
             </Box>
           </Paper>
         )}

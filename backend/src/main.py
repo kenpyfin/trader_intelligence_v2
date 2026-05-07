@@ -21,6 +21,7 @@ from .analytics.treasury_curve import build_treasury_curve
 from .my_libs_py3.fmp import FMPClient
 from .analytics.methodologies.gpt_verdict import generate_gpt_verdict
 from .services.verdict_service import save_verdict_document, list_verdicts, get_verdict_by_id
+from .services.task_manager import task_manager
 import numpy as np
 import math
 import os
@@ -92,6 +93,30 @@ def cors_test():
         "origin_allowed": True,
         "timestamp": date.today().isoformat()
     }
+
+
+@app.get("/tasks/{task_id}")
+@app.get("/api/tasks/{task_id}")
+async def get_background_task_status(task_id: str):
+    task = task_manager.get_status(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return {"status": "success", "task": task}
+
+
+@app.get("/tasks/{task_id}/result")
+@app.get("/api/tasks/{task_id}/result")
+async def get_background_task_result(task_id: str):
+    task = task_manager.get_result(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    state = task.get("state")
+    if state == "SUCCESS":
+        return {"status": "success", "task_id": task_id, "result": task.get("result")}
+    if state == "FAILURE":
+        return {"status": "failure", "task_id": task_id, "error": task.get("error")}
+    return {"status": "pending", "task_id": task_id, "state": state}
 
 @app.get("/macro-data")
 @app.get("/api/macro-data")  # Alias for nginx proxy compatibility
@@ -226,7 +251,11 @@ async def get_risk_free_rate(request: RiskFreeRateRequest):
 async def save_verdict(request: SaveVerdictRequest):
     """Save an analysis verdict snapshot for later retrieval/compare."""
     try:
-        result = save_verdict_document(request.verdict, request.label)
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: save_verdict_document(request.verdict, request.label)
+        )
         return result
     except Exception as e:
         print(traceback.format_exc())
@@ -237,7 +266,11 @@ async def save_verdict(request: SaveVerdictRequest):
 async def list_saved_verdicts(ticker: str, page: int = 1, page_size: int = 25):
     """List saved verdicts for a ticker with pagination (most recent first)."""
     try:
-        data = list_verdicts(ticker.upper(), page=page, page_size=page_size)
+        loop = asyncio.get_running_loop()
+        data = await loop.run_in_executor(
+            None,
+            lambda: list_verdicts(ticker.upper(), page=page, page_size=page_size)
+        )
         data['status'] = 'success'
         return data
     except Exception as e:
@@ -249,7 +282,8 @@ async def list_saved_verdicts(ticker: str, page: int = 1, page_size: int = 25):
 async def get_saved_verdict(doc_id: str):
     """Fetch a saved verdict by its ID."""
     try:
-        doc = get_verdict_by_id(doc_id)
+        loop = asyncio.get_running_loop()
+        doc = await loop.run_in_executor(None, lambda: get_verdict_by_id(doc_id))
         if not doc:
             raise HTTPException(status_code=404, detail="Verdict not found")
         return {"status": "success", "item": doc}
@@ -361,7 +395,11 @@ async def analyze_stock_with_gpt(request: AnalysisRequest):
 
         # Auto-save verdict history (best-effort)
         try:
-            save_verdict_document(result, None)
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: save_verdict_document(result, None)
+            )
         except Exception as _e:
             print(f"WARNING: Autosave of GPT verdict failed: {_e}")
 
@@ -519,6 +557,33 @@ async def analyze_stock(request: AnalysisRequest):
             f"expiration={request.expiration_date}, method={request.analysis_method}"
         )
 
+        quality_assessment = await analysis_service.check_data_quality_only(
+            ticker=request.ticker.upper(),
+            expiration_date=expiration_date
+        )
+
+        quality_level = quality_assessment.get("overall_level", "failed")
+        combined_score = quality_assessment.get("combined_score", quality_assessment.get("quality_score", 0.0))
+        pass_threshold = quality_assessment.get("thresholds_used", {}).get("pass_threshold", 0.6)
+        quality_failed = (
+            combined_score < pass_threshold or
+            quality_level in ["acceptable", "poor", "failed"]
+        )
+
+        if quality_failed and not request.caution_mode:
+            blocked_result = {
+                "status": "analysis_blocked",
+                "analysis_blocked": True,
+                "message": (
+                    f"Analysis blocked for {request.ticker.upper()} {request.expiration_date}. "
+                    f"Data quality did not pass (level={quality_level}, score={combined_score:.2f}, "
+                    f"threshold={pass_threshold:.2f})."
+                ),
+                "quality_assessment": quality_assessment,
+                "allow_override": True
+            }
+            return [blocked_result]
+
         analysis_result = await run_full_analysis(
             ticker=request.ticker.upper(),
             expiration_date=expiration_date,
@@ -554,6 +619,8 @@ async def analyze_stock(request: AnalysisRequest):
         # We also calculate and add the DTE (days to expiration) for display purposes.
         analysis_result['expiration_date'] = request.expiration_date
         analysis_result['dte'] = (expiration_date - date.today()).days
+        analysis_result['quality_assessment'] = quality_assessment
+        analysis_result['caution_mode_active'] = bool(request.caution_mode and quality_failed)
 
         payload_to_persist = {
             'ticker': request.ticker,
@@ -575,7 +642,10 @@ async def analyze_stock(request: AnalysisRequest):
 
         # Auto-save verdict history (best-effort)
         try:
-            save_verdict_document(analysis_result, None)
+            await loop.run_in_executor(
+                None,
+                lambda: save_verdict_document(analysis_result, None)
+            )
         except Exception as _e:
             # Do not fail the request if autosave fails
             print(f"WARNING: Autosave of verdict failed: {_e}")
@@ -589,6 +659,18 @@ async def analyze_stock(request: AnalysisRequest):
         if isinstance(e, HTTPException):
             raise e
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
+
+
+async def _run_analysis_in_executor(request: AnalysisRequest):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, lambda: asyncio.run(analyze_stock(request)))
+
+
+@app.post("/analysis/stock/async")
+@app.post("/api/analysis/stock/async")
+async def analyze_stock_async(request: AnalysisRequest):
+    task_id = task_manager.submit("Analysis", lambda: _run_analysis_in_executor(request))
+    return {"task_id": task_id, "status_url": f"/api/tasks/{task_id}"}
 
 
 @app.get("/analysis/history")

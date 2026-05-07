@@ -12,6 +12,7 @@ class AnalysisRequest(BaseModel):
     analysis_method: str = 'holistic-market-edge'
     gpt_model: str = 'gemini-2.5-flash'  # Model to use for verdict analysis
     override_price: Optional[float] = None  # Manual price override for testing/debugging
+    caution_mode: bool = False  # Manual override for quality gate
 
 
 class RiskFreeRateRequest(BaseModel):
