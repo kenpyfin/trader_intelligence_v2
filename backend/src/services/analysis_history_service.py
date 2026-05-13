@@ -8,6 +8,8 @@ from bson import ObjectId
 from ..my_libs_py3.db import connect_mongo
 from .analysis_service import _sanitize_for_json
 
+MALFORMED_AI_JSON_NOTE = 'AI response could not be parsed as JSON'
+
 
 def _get_collection():
     """Return the Mongo collection used for persisting analysis history."""
@@ -45,6 +47,19 @@ def save_analysis_record(request_payload: Dict[str, Any], analysis_result: Any) 
         primary_verdict = sanitized_result[0] if sanitized_result else None
     else:
         primary_verdict = sanitized_result
+
+    # Skip persistence for malformed AI JSON fallback responses.
+    if isinstance(primary_verdict, dict):
+        summary_html = primary_verdict.get('summary_html')
+        final_conclusion_html = primary_verdict.get('final_conclusion_html')
+        if (
+            isinstance(summary_html, str)
+            and MALFORMED_AI_JSON_NOTE in summary_html
+        ) or (
+            isinstance(final_conclusion_html, str)
+            and MALFORMED_AI_JSON_NOTE in final_conclusion_html
+        ):
+            return {'status': 'skipped', 'reason': 'malformed_ai_json'}
 
     expiration_info = _normalize_expiration(sanitized_request.get('expiration_date'))
 

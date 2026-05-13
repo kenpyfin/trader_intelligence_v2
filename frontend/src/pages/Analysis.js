@@ -18,7 +18,6 @@ import {
   List,
   ListItem,
   ListItemText,
-  LinearProgress,
   MenuItem,
   Paper,
   Select,
@@ -112,6 +111,19 @@ const extractQualityAssessmentFromResult = (payload) => {
     || firstItem.quality_assessment
     || null
   );
+};
+
+const MALFORMED_AI_JSON_NOTE = 'AI response could not be parsed as JSON';
+
+const isMalformedAiJsonResponse = (payload) => {
+  if (!payload) return false;
+  const firstItem = Array.isArray(payload) ? payload[0] : payload;
+  if (!firstItem || typeof firstItem !== 'object') return false;
+
+  const summaryHtml = typeof firstItem.summary_html === 'string' ? firstItem.summary_html : '';
+  const finalConclusionHtml = typeof firstItem.final_conclusion_html === 'string' ? firstItem.final_conclusion_html : '';
+
+  return summaryHtml.includes(MALFORMED_AI_JSON_NOTE) || finalConclusionHtml.includes(MALFORMED_AI_JSON_NOTE);
 };
 
 const detectStrategyState = (strategy, gptVerdict, analysisResult, setCautionModeActive, executeAnalysis, ticker, selectedExpiration, riskFreeRate, analysisMethod, selectedModel) => {
@@ -1708,6 +1720,7 @@ const SavedVerdictsControls = ({ ticker, currentResult, scrollAnchorRef }) => {
                 <TableHead>
                   <TableRow>
                     <TableCell>Saved At</TableCell>
+                    <TableCell>Ticker</TableCell>
                     <TableCell>Label</TableCell>
                     <TableCell>Type</TableCell>
                     <TableCell>Bias</TableCell>
@@ -1732,6 +1745,7 @@ const SavedVerdictsControls = ({ ticker, currentResult, scrollAnchorRef }) => {
                           sx={{ cursor: 'pointer', bgcolor: isSelected ? 'action.selected' : 'inherit', '&:hover': { bgcolor: 'action.hover' } }}
                         >
                           <TableCell>{ts}</TableCell>
+                          <TableCell>{item.ticker || ov.ticker || ''}</TableCell>
                           <TableCell>{item.label || ''}</TableCell>
                           <TableCell>{typeText}</TableCell>
                           <TableCell>{item.final_bias || ov.final_bias || ''}</TableCell>
@@ -1743,7 +1757,7 @@ const SavedVerdictsControls = ({ ticker, currentResult, scrollAnchorRef }) => {
                     })
                   ) : (
                     <TableRow>
-                      <TableCell colSpan={7} align="center">No saved verdicts yet.</TableCell>
+                      <TableCell colSpan={8} align="center">No saved verdicts yet.</TableCell>
                     </TableRow>
                   )}
                 </TableBody>
@@ -1982,6 +1996,7 @@ const AnalysisPage = () => {
   const [analysisResult, setAnalysisResult] = useStickyState(null, 'analysisResult');
   const [analysisStage, setAnalysisStage] = useState('idle'); // 'idle', 'data_collection', 'guardrail_pause', 'full_analysis'
   const [error, setError] = useState('');
+  const [showMalformedJsonReturn, setShowMalformedJsonReturn] = useState(false);
 
   // NEW: Caution mode state management
   const [cautionModeActive, setCautionModeActive] = useState(false);
@@ -2192,6 +2207,7 @@ const AnalysisPage = () => {
       setQualityAssessment(null);
       setCautionModeActive(false);
     }
+    setShowMalformedJsonReturn(false);
     setError('');
 
     const requestPayload = {
@@ -2245,16 +2261,27 @@ const AnalysisPage = () => {
 
   useEffect(() => {
     if (asyncResult) {
+      if (isMalformedAiJsonResponse(asyncResult)) {
+        setAnalysisResult(null);
+        setQualityAssessment(null);
+        setAnalysisStage('idle');
+        setShowMalformedJsonReturn(true);
+        setError('Note: AI response could not be parsed as JSON.');
+        return;
+      }
+
       const firstItem = Array.isArray(asyncResult) ? asyncResult[0] : asyncResult;
       if (firstItem?.analysis_blocked) {
         setQualityAssessment(firstItem.quality_assessment || null);
         setAnalysisResult(null);
+        setShowMalformedJsonReturn(false);
         setAnalysisStage('guardrail_pause');
         setError(firstItem.message || 'Analysis blocked due to data quality.');
         return;
       }
 
       setAnalysisResult(asyncResult);
+      setShowMalformedJsonReturn(false);
       setQualityAssessment(extractQualityAssessmentFromResult(asyncResult));
       setHistoryReloadVersion(v => v + 1);
     }
@@ -2262,6 +2289,7 @@ const AnalysisPage = () => {
 
   useEffect(() => {
     if (asyncError) {
+      setShowMalformedJsonReturn(false);
       setError(asyncError);
       setQualityAssessment(null);
     }
@@ -2523,7 +2551,27 @@ const AnalysisPage = () => {
           </Grid>
         </Box>
 
-        {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+        {error && (
+          <Alert
+            severity="error"
+            sx={{ mb: 2 }}
+            action={showMalformedJsonReturn ? (
+              <Button
+                color="inherit"
+                size="small"
+                onClick={() => {
+                  setError('');
+                  setShowMalformedJsonReturn(false);
+                  setAnalysisStage('idle');
+                }}
+              >
+                Return
+              </Button>
+            ) : null}
+          >
+            {error}
+          </Alert>
+        )}
         
         {analysisStage === 'guardrail_pause' && qualityAssessment && (
           <Box sx={{ mb: 3 }}>
@@ -2577,43 +2625,8 @@ const AnalysisPage = () => {
                 {taskStatus?.name || 'Analysis in Progress'}
               </Typography>
               <Typography variant="body1">
-                {taskStatus?.message || 'Initializing...'}
+                {taskStatus?.message || 'Analysis is running...'}
               </Typography>
-              
-              <Box sx={{ width: '100%', maxWidth: 400, mt: 2 }}>
-                <LinearProgress variant="determinate" value={taskStatus?.progress || 0} />
-                <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
-                  Overall Progress: {taskStatus?.progress || 0}%
-                </Typography>
-              </Box>
-
-              <Paper variant="outlined" sx={{ width: '100%', maxWidth: 520, p: 2, textAlign: 'left' }}>
-                <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1.5 }}>
-                  Analysis Stages
-                </Typography>
-                <Stack spacing={1}>
-                  {ANALYSIS_PROGRESS_STAGES.map((stage) => {
-                    const stageReached = (taskStatus?.progress || 0) >= stage.threshold;
-                    const isCurrentStage = analysisStage === stage.id;
-                    return (
-                      <Box key={stage.id} sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                        {stageReached ? (
-                          <CheckCircleIcon color={isCurrentStage ? 'primary' : 'success'} fontSize="small" />
-                        ) : (
-                          <HourglassEmptyIcon color="disabled" fontSize="small" />
-                        )}
-                        <Typography
-                          variant="body2"
-                          color={isCurrentStage ? 'primary.main' : (stageReached ? 'text.primary' : 'text.secondary')}
-                          sx={{ fontWeight: isCurrentStage ? 600 : 400 }}
-                        >
-                          {stage.label}
-                        </Typography>
-                      </Box>
-                    );
-                  })}
-                </Stack>
-              </Paper>
 
             </Box>
           </Paper>

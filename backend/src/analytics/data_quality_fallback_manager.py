@@ -396,6 +396,7 @@ class DataQualityFallbackManager:
                 "latest_timestamp": None,
                 "oldest_timestamp": None,
                 "average_age_minutes": None,
+                "option_last_trade_note": None,
             },
         }
 
@@ -454,7 +455,23 @@ class DataQualityFallbackManager:
                 }
                 metrics["coverage"]["strike_count"] = int(total_strikes)
 
-        # Freshness: use first available timestamp-like column.
+        # Freshness: prefer internal snapshot refresh timestamp when available.
+        refresh_col = "Refresh_Date" if "Refresh_Date" in data.columns else None
+        if refresh_col:
+            ts = pd.to_datetime(data[refresh_col], errors="coerce", utc=True).dropna()
+            if not ts.empty:
+                now = pd.Timestamp.utcnow()
+                age_minutes = (now - ts).dt.total_seconds() / 60.0
+                metrics["freshness"] = {
+                    "quote_timestamp_column": refresh_col,
+                    "latest_timestamp": ts.max().isoformat(),
+                    "oldest_timestamp": ts.min().isoformat(),
+                    "average_age_minutes": float(age_minutes.mean()),
+                    "option_last_trade_note": None,
+                }
+
+        # Freshness fallback: use first available quote timestamp-like column.
+        # Keep Last Trade out of freshness calculations; it is informational-only.
         candidate_timestamp_cols = [
             "Quote Time",
             "QuoteTime",
@@ -466,7 +483,7 @@ class DataQualityFallbackManager:
             "updated_at",
         ]
         timestamp_col = next((c for c in candidate_timestamp_cols if c in data.columns), None)
-        if timestamp_col:
+        if metrics["freshness"]["average_age_minutes"] is None and timestamp_col:
             ts = pd.to_datetime(data[timestamp_col], errors="coerce", utc=True).dropna()
             if not ts.empty:
                 now = pd.Timestamp.utcnow()
@@ -476,7 +493,14 @@ class DataQualityFallbackManager:
                     "latest_timestamp": ts.max().isoformat(),
                     "oldest_timestamp": ts.min().isoformat(),
                     "average_age_minutes": float(age_minutes.mean()),
+                    "option_last_trade_note": None,
                 }
+
+        # Option-level note: expose Last Trade as informational only.
+        if "Last Trade" in data.columns:
+            last_trade_vals = data["Last Trade"].dropna()
+            if not last_trade_vals.empty:
+                metrics["freshness"]["option_last_trade_note"] = str(last_trade_vals.iloc[0])
 
         return metrics
 

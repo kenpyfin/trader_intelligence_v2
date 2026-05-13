@@ -3,11 +3,17 @@ import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import { MemoryRouter } from 'react-router-dom';
 import TopStocksByGroup from './TopStocksByGroup';
+import { StockSelectionTaskProvider } from '../context/StockSelectionTaskContext';
 
 jest.mock('axios', () => ({
   get: jest.fn(),
   post: jest.fn(),
 }));
+jest.mock('react-markdown', () => ({
+  __esModule: true,
+  default: ({ children }) => children,
+}));
+jest.mock('remark-gfm', () => () => {});
 const axios = require('axios');
 
 const mockPayload = {
@@ -39,6 +45,7 @@ const mockPayload = {
 
 describe('TopStocksByGroup page', () => {
   beforeEach(() => {
+    localStorage.clear();
     axios.get.mockImplementation((url) => {
       if (url === '/api/stock-selection/strategies') {
         return Promise.resolve({
@@ -79,7 +86,9 @@ describe('TopStocksByGroup page', () => {
   test('renders default clusters view and supports tab switching', async () => {
     render(
       <MemoryRouter>
-        <TopStocksByGroup />
+        <StockSelectionTaskProvider endPollingWhenProviderUnmounts>
+          <TopStocksByGroup />
+        </StockSelectionTaskProvider>
       </MemoryRouter>
     );
     expect(screen.getByText(/Top Stocks By Group/i)).toBeInTheDocument();

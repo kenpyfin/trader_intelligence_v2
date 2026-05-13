@@ -1,11 +1,47 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 
-const formatCurrency = (value) => {
-  if (typeof value !== 'number' || isNaN(value)) {
-    return '0.00';
+const isFiniteNumber = (value) => typeof value === 'number' && Number.isFinite(value);
+
+const formatCurrency = (value, fallback = '--') => {
+  if (!isFiniteNumber(value)) {
+    return fallback;
   }
-  return value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const formatted = value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return `$${formatted}`;
+};
+
+const getPositionUnrealizedPnl = (position) => {
+  const candidates = [
+    position?.unrealizedPNL,
+    position?.unrealizedPnl,
+    position?.unrealized_pnl,
+    position?.unrealizedPnL,
+  ];
+  return candidates.find((value) => isFiniteNumber(value));
+};
+
+const getPositionMarketPrice = (position, contractMultiplier = 1) => {
+  const explicitCandidates = [
+    position?.marketPrice,
+    position?.market_price,
+    position?.lastPrice,
+    position?.last_price,
+    position?.currentPrice,
+    position?.current_price,
+  ];
+  const explicitPrice = explicitCandidates.find((value) => isFiniteNumber(value));
+  if (isFiniteNumber(explicitPrice)) {
+    return explicitPrice;
+  }
+
+  const marketValue = isFiniteNumber(position?.marketValue) ? position.marketValue : null;
+  const quantity = isFiniteNumber(position?.position) ? position.position : null;
+  if (!isFiniteNumber(marketValue) || !isFiniteNumber(quantity) || quantity === 0) {
+    return null;
+  }
+
+  return marketValue / (quantity * contractMultiplier);
 };
 
 const formatDateTime = (value) => {
@@ -64,7 +100,9 @@ const RecentOrders = ({ orders, isLoading }) => {
                 <td style={{ padding: '8px', border: '1px solid #ddd', color: actionColor, fontWeight: 'bold' }}>{order.action}</td>
                 <td style={{ padding: '8px', border: '1px solid #ddd' }}>{order.quantity}</td>
                 <td style={{ padding: '8px', border: '1px solid #ddd', color: statusColor, fontWeight: 'bold' }}>{order.status}</td>
-                <td style={{ padding: '8px', border: '1px solid #ddd' }}>{order.avgFillPrice > 0 ? `$${formatCurrency(order.avgFillPrice)}` : 'N/A'}</td>
+                <td style={{ padding: '8px', border: '1px solid #ddd' }}>
+                  {isFiniteNumber(order.avgFillPrice) && order.avgFillPrice > 0 ? formatCurrency(order.avgFillPrice) : 'N/A'}
+                </td>
               </tr>
             );
           })}
@@ -319,8 +357,10 @@ const PortfolioPage = () => {
   const PortfolioSummary = ({ summary }) => {
     if (!summary) return null;
 
-    const pnlTodayColor = summary.pnl_today >= 0 ? 'green' : 'red';
-    const unrealizedPnlColor = summary.unrealized_pnl >= 0 ? 'green' : 'red';
+    const hasPnlToday = isFiniteNumber(summary.pnl_today);
+    const hasUnrealizedPnl = isFiniteNumber(summary.unrealized_pnl);
+    const pnlTodayColor = hasPnlToday ? (summary.pnl_today >= 0 ? 'green' : 'red') : '#666';
+    const unrealizedPnlColor = hasUnrealizedPnl ? (summary.unrealized_pnl >= 0 ? 'green' : 'red') : '#666';
 
     return (
         <div style={{ border: '1px solid #ddd', borderRadius: '8px', padding: '20px', marginBottom: '24px', background: '#f8f9fa' }}>
@@ -328,29 +368,35 @@ const PortfolioPage = () => {
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '16px', fontSize: '1.1em' }}>
                 <div>
                     <div style={{ color: '#666', fontSize: '0.9em' }}>Total Account Value</div>
-                    <strong style={{ fontSize: '1.2em' }}>${formatCurrency(summary.market_value)}</strong>
+                    <strong style={{ fontSize: '1.2em' }}>{formatCurrency(summary.market_value)}</strong>
                 </div>
                 <div>
                     <div style={{ color: '#666', fontSize: '0.9em' }}>P/L Today</div>
-                    <strong style={{ fontSize: '1.2em', color: pnlTodayColor }}>${formatCurrency(summary.pnl_today)}</strong>
+                    <strong style={{ fontSize: '1.2em', color: pnlTodayColor }}>{formatCurrency(summary.pnl_today)}</strong>
                 </div>
                 <div>
                     <div style={{ color: '#666', fontSize: '0.9em' }}>Unrealized P/L</div>
-                    <strong style={{ fontSize: '1.2em', color: unrealizedPnlColor }}>${formatCurrency(summary.unrealized_pnl)}</strong>
+                    <strong style={{ fontSize: '1.2em', color: unrealizedPnlColor }}>{formatCurrency(summary.unrealized_pnl)}</strong>
                 </div>
                 <div>
                     <div style={{ color: '#666', fontSize: '0.9em' }}>Available Cash</div>
-                    <strong style={{ fontSize: '1.2em' }}>${formatCurrency(summary.available_cash)}</strong>
+                    <strong style={{ fontSize: '1.2em' }}>{formatCurrency(summary.available_cash)}</strong>
                 </div>
             </div>
         </div>
     );
   };
 
-const StrategyCard = ({ symbol, legs, gptGuidance }) => {
+const StrategyCard = ({ symbol, legs, gptGuidance, underlyingSpotPrice }) => {
     const status = closingStatus[symbol];
     const isClosing = status?.inProgress;
     const legTotal = legs.reduce((acc, leg) => acc + leg.position, 0);
+    const validUnrealizedPnl = legs.filter((leg) => isFiniteNumber(leg.unrealizedPNL)).map((leg) => leg.unrealizedPNL);
+    const validMarketValues = legs.filter((leg) => isFiniteNumber(leg.marketValue)).map((leg) => leg.marketValue);
+    const aggregateUnrealizedPnl = validUnrealizedPnl.reduce((acc, value) => acc + value, 0);
+    const aggregateMarketValue = validMarketValues.reduce((acc, value) => acc + value, 0);
+    const hasAggregateUnrealizedPnl = validUnrealizedPnl.length > 0;
+    const aggregatePnlColor = !hasAggregateUnrealizedPnl ? '#666' : (aggregateUnrealizedPnl >= 0 ? 'green' : 'red');
     const guidance = gptGuidance || {};
     const recs = guidance.execution_recommendations || {};
     const entrySignals = Array.isArray(recs.entry_conditions) ? recs.entry_conditions : [];
@@ -364,6 +410,21 @@ const StrategyCard = ({ symbol, legs, gptGuidance }) => {
         <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
             <div>
                 <h3 style={{ marginTop: 0, marginBottom: '5px' }}>{symbol} <span style={{fontSize: '0.8em', color: '#666'}}>({legs.length} Legs)</span></h3>
+                <div style={{ fontSize: '0.95em', color: '#333', marginBottom: '4px' }}>
+                  <strong>Underlying market price (Alpaca):</strong> {formatCurrency(underlyingSpotPrice, '--')}
+                </div>
+                <div style={{ fontSize: '0.9em', color: '#555' }}>
+                  Grouped by underlying symbol (not broker-native strategy IDs)
+                </div>
+                <div style={{ marginTop: '6px', fontSize: '0.95em' }}>
+                  <strong>Strategy Unrealized P/L:</strong>{' '}
+                  <span style={{ color: aggregatePnlColor }}>
+                    {formatCurrency(aggregateUnrealizedPnl, '--')}
+                  </span>
+                  <span style={{ marginLeft: '12px', color: '#555' }}>
+                    Net Market Value: {formatCurrency(aggregateMarketValue, '--')}
+                  </span>
+                </div>
             </div>
             <button 
                 onClick={() => handleCloseStrategy(symbol)} 
@@ -389,17 +450,30 @@ const StrategyCard = ({ symbol, legs, gptGuidance }) => {
                     <th style={{padding: '8px', border: '1px solid #ddd', textAlign: 'left'}}>Strike</th>
                     <th style={{padding: '8px', border: '1px solid #ddd', textAlign: 'left'}}>Expiry</th>
                     <th style={{padding: '8px', border: '1px solid #ddd', textAlign: 'left'}}>Avg Cost</th>
+                    <th style={{padding: '8px', border: '1px solid #ddd', textAlign: 'left'}}>Current Mkt Price</th>
+                    <th style={{padding: '8px', border: '1px solid #ddd', textAlign: 'left'}}>Unrealized P/L</th>
                 </tr>
             </thead>
             <tbody>
                 {legs.map((leg, index) => {
+                    const legUnrealizedPnl = getPositionUnrealizedPnl(leg);
+                    const legPnlColor = !isFiniteNumber(legUnrealizedPnl) ? '#666' : (legUnrealizedPnl >= 0 ? 'green' : 'red');
+                    const legCurrentMarketPrice = getPositionMarketPrice(leg, 100);
                     return (
                         <tr key={index}>
                             <td style={{padding: '8px', border: '1px solid #ddd', color: leg.position > 0 ? 'green' : 'red', fontWeight: 'bold'}}>{leg.position > 0 ? `+${leg.position}` : leg.position}</td>
                             <td style={{padding: '8px', border: '1px solid #ddd'}}>{leg.right === 'C' ? 'Call' : 'Put'}</td>
-                            <td style={{padding: '8px', border: '1px solid #ddd'}}>${leg.strike.toFixed(2)}</td>
+                            <td style={{padding: '8px', border: '1px solid #ddd'}}>{formatCurrency(leg.strike, '--')}</td>
                             <td style={{padding: '8px', border: '1px solid #ddd'}}>{leg.expiry}</td>
-                            <td style={{padding: '8px', border: '1px solid #ddd'}}>${formatCurrency(leg.position !== 0 ? (leg.avgCost / (leg.position * 100)) : 0)}</td>
+                            <td style={{padding: '8px', border: '1px solid #ddd'}}>
+                              {formatCurrency(leg.position !== 0 ? (leg.avgCost / (leg.position * 100)) : 0)}
+                            </td>
+                            <td style={{padding: '8px', border: '1px solid #ddd'}}>
+                              {formatCurrency(legCurrentMarketPrice, '--')}
+                            </td>
+                            <td style={{padding: '8px', border: '1px solid #ddd', color: legPnlColor, fontWeight: 600}}>
+                              {formatCurrency(legUnrealizedPnl, '--')}
+                            </td>
                         </tr>
                     );
                 })}
@@ -542,6 +616,8 @@ const StrategyCard = ({ symbol, legs, gptGuidance }) => {
               <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Symbol</th>
               <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Quantity</th>
               <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Avg Cost/Share</th>
+              <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Current Mkt Price</th>
+              <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Unrealized P/L</th>
               <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Actions</th>
             </tr>
           </thead>
@@ -550,6 +626,9 @@ const StrategyCard = ({ symbol, legs, gptGuidance }) => {
               const status = stockClosingStatus[stock.symbol];
               const isClosing = status?.inProgress;
               const positionColor = stock.position > 0 ? 'green' : stock.position < 0 ? 'red' : 'black';
+              const stockUnrealizedPnl = getPositionUnrealizedPnl(stock);
+              const stockPnlColor = !isFiniteNumber(stockUnrealizedPnl) ? '#666' : (stockUnrealizedPnl >= 0 ? 'green' : 'red');
+              const stockCurrentMarketPrice = getPositionMarketPrice(stock);
               
               return (
                 <tr key={index}>
@@ -558,7 +637,13 @@ const StrategyCard = ({ symbol, legs, gptGuidance }) => {
                     {stock.position > 0 ? `+${stock.position}` : stock.position}
                   </td>
                   <td style={{ padding: '8px', border: '1px solid #ddd' }}>
-                    ${formatCurrency(stock.position !== 0 ? (stock.avgCost / stock.position) : 0)}
+                    {formatCurrency(stock.position !== 0 ? (stock.avgCost / stock.position) : 0)}
+                  </td>
+                  <td style={{ padding: '8px', border: '1px solid #ddd' }}>
+                    {formatCurrency(stockCurrentMarketPrice, '--')}
+                  </td>
+                  <td style={{ padding: '8px', border: '1px solid #ddd', color: stockPnlColor, fontWeight: 600 }}>
+                    {formatCurrency(stockUnrealizedPnl, '--')}
                   </td>
                   <td style={{ padding: '8px', border: '1px solid #ddd' }}>
                     <button 
@@ -601,6 +686,7 @@ const StrategyCard = ({ symbol, legs, gptGuidance }) => {
 
   const positions = !error && portfolioData ? portfolioData.positions : null;
   const optionPositions = positions?.options || {};
+  const underlyingSpotPrices = (!error && portfolioData?.underlying_spot_prices) || {};
   const stockPositions = positions?.stocks || [];
   const hasOptionPositions = Object.keys(optionPositions).length > 0;
   const hasStockPositions = Array.isArray(stockPositions) && stockPositions.length > 0;
@@ -668,7 +754,13 @@ const StrategyCard = ({ symbol, legs, gptGuidance }) => {
                 <h2>Open Option Strategies</h2>
                 <p>This page shows all open option positions in your account, grouped by underlying ticker.</p>
                 {Object.entries(optionPositions).map(([symbol, legs]) => (
-                    <StrategyCard key={symbol} symbol={symbol} legs={legs} gptGuidance={getGuidanceFor(symbol, legs)} />
+                    <StrategyCard
+                      key={symbol}
+                      symbol={symbol}
+                      legs={legs}
+                      gptGuidance={getGuidanceFor(symbol, legs)}
+                      underlyingSpotPrice={underlyingSpotPrices[symbol]}
+                    />
                 ))}
             </div>
           )}

@@ -1,6 +1,7 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
+import { useStockSelectionTask } from '../context/StockSelectionTaskContext';
 import {
   Accordion,
   AccordionDetails,
@@ -98,6 +99,13 @@ function useStickyState(defaultValue, key) {
 
 const TopStocksByGroup = () => {
   const navigate = useNavigate();
+  const {
+    recomputeLoading,
+    recomputeTaskStatus,
+    recomputeError,
+    startStockSelectionRecompute,
+    clearRecomputeError,
+  } = useStockSelectionTask();
   const [activeTab, setActiveTab] = useStickyState('clusters', 'topStocksActiveTab');
   const [mode, setMode] = useStickyState('sell_premium', 'topStocksMode');
   const [strategyId, setStrategyId] = useStickyState('peer_v1', 'topStocksStrategyId');
@@ -108,9 +116,11 @@ const TopStocksByGroup = () => {
   const [strategyDocError, setStrategyDocError] = useState('');
   const [strategyExpanded, setStrategyExpanded] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [running, setRunning] = useState(false);
   const [payload, setPayload] = useState(null);
   const [error, setError] = useState('');
+  const selectionParamsRef = useRef({ activeTab, mode, strategyId });
+  selectionParamsRef.current = { activeTab, mode, strategyId };
+  const wasRecomputeLoadingRef = useRef(false);
 
   const fetchData = async (view, nextMode, nextStrategyId) => {
     setLoading(true);
@@ -135,26 +145,24 @@ const TopStocksByGroup = () => {
     }
   };
 
-  const runRefresh = async () => {
-    setRunning(true);
+  const runRefresh = () => {
     setError('');
-    try {
-      const response = await axios.post('/api/stock-selection/run', {
-        force: true,
-        max_tickers: 800,
-        top_n_per_group: 10,
-        strategy_id: strategyId,
-      });
-      if (response.data?.status !== 'success') {
-        throw new Error(response.data?.message || 'Failed to refresh stock selection snapshot.');
-      }
-      await fetchData(activeTab, mode, strategyId);
-    } catch (err) {
-      setError(err?.response?.data?.detail || err?.message || 'Unable to refresh stock selection snapshot.');
-    } finally {
-      setRunning(false);
-    }
+    clearRecomputeError();
+    void startStockSelectionRecompute({
+      force: true,
+      max_tickers: 800,
+      top_n_per_group: 10,
+      strategy_id: strategyId,
+    });
   };
+
+  useEffect(() => {
+    if (wasRecomputeLoadingRef.current && !recomputeLoading && !recomputeError) {
+      const p = selectionParamsRef.current;
+      void fetchData(p.activeTab, p.mode, p.strategyId);
+    }
+    wasRecomputeLoadingRef.current = recomputeLoading;
+  }, [recomputeLoading, recomputeError]);
 
   useEffect(() => {
     fetchData(activeTab, mode, strategyId);
@@ -255,8 +263,8 @@ const TopStocksByGroup = () => {
                 <MenuItem value="buy_premium">Buy Premium</MenuItem>
               </Select>
             </FormControl>
-            <Button variant="contained" onClick={runRefresh} disabled={running}>
-              {running ? 'Refreshing...' : 'Recompute Snapshot'}
+            <Button variant="contained" onClick={runRefresh} disabled={recomputeLoading}>
+              {recomputeLoading ? 'Refreshing…' : 'Recompute Snapshot'}
             </Button>
             {metadata.generated_at && (
               <Typography variant="body2" color="text.secondary">
@@ -264,9 +272,14 @@ const TopStocksByGroup = () => {
               </Typography>
             )}
           </Box>
-          {metadata.tickers_ranked != null && (
+            {metadata.tickers_ranked != null && (
             <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
               Ranked {metadata.tickers_ranked} / {metadata.tickers_considered} tickers; excluded {metadata.tickers_excluded}.
+            </Typography>
+          )}
+          {recomputeLoading && (
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+              {recomputeTaskStatus?.message || 'Recompute running in the background.'} You can leave this page or refresh; progress appears beside Stock Selection in the header.
             </Typography>
           )}
         </CardContent>
@@ -316,7 +329,18 @@ const TopStocksByGroup = () => {
         <Tab label="Regimes" value="regimes" />
       </Tabs>
 
-      {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+      {(error || recomputeError) && (
+        <Alert
+          severity="error"
+          sx={{ mb: 2 }}
+          onClose={() => {
+            setError('');
+            clearRecomputeError();
+          }}
+        >
+          {error || recomputeError}
+        </Alert>
+      )}
       {loading && (
         <Box sx={{ display: 'flex', justifyContent: 'center', my: 6 }}>
           <CircularProgress />

@@ -80,7 +80,7 @@ async def get_grouped_open_positions():
         "market_value": account_details.get('total_account_value'),
         "unrealized_pnl": account_details.get('unrealized_pnl'),
         "realized_pnl_today": account_details.get('realized_pnl_today'),
-        "available_cash": account_details.get('buying_power'),
+        "available_cash": account_details.get('available_cash') if account_details.get('available_cash') is not None else account_details.get('buying_power'),
         "pnl_today": account_details.get('pnl_today'),
     }
     print(f"DEBUG(PortfolioSvc): Constructed portfolio summary: {portfolio_summary}")
@@ -109,11 +109,28 @@ async def get_grouped_open_positions():
     
     # Convert defaultdict to regular dict for JSON serialization
     grouped_positions_data['options'] = dict(grouped_positions_data['options'])
-    
+
+    # Step 4b: Live underlying stock prices from Alpaca (same path as analysis / IV pipeline).
+    underlying_spot_prices: dict = {}
+    option_underlyings = list(grouped_positions_data["options"].keys())
+    if option_underlyings:
+        try:
+            canon_prices = await asyncio.wait_for(
+                trader.get_stock_market_prices(option_underlyings),
+                timeout=45.0,
+            )
+            underlying_spot_prices = {
+                sym: canon_prices.get(str(sym).strip().upper()) for sym in option_underlyings
+            }
+        except Exception as exc:
+            print(f"WARN: Could not fetch Alpaca market prices for option underlyings: {exc}")
+            underlying_spot_prices = {sym: None for sym in option_underlyings}
+
     # Step 5: Combine and return.
     response_data = {
         "summary": portfolio_summary,
-        "positions": grouped_positions_data
+        "positions": grouped_positions_data,
+        "underlying_spot_prices": underlying_spot_prices,
     }
     return _sanitize_for_json(response_data)
 

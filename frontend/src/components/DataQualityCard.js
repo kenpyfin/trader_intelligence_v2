@@ -157,6 +157,7 @@ const DataQualityCard = ({
   const coverageMetrics = display_metrics?.coverage?.strikes_with_call_put || null;
   const freshnessMetrics = display_metrics?.freshness || null;
   const avgAgeMinutes = freshnessMetrics?.average_age_minutes;
+  const optionLastTradeNote = freshnessMetrics?.option_last_trade_note;
 
   const qualityConfig = QUALITY_LEVELS[overall_quality_level] || QUALITY_LEVELS.failed;
   const IconComponent = qualityConfig.icon;
@@ -291,6 +292,11 @@ const DataQualityCard = ({
               {freshnessMetrics?.latest_timestamp && (
                 <Typography variant="caption" color="text.secondary">
                   Latest observed quote timestamp: {freshnessMetrics.latest_timestamp}
+                </Typography>
+              )}
+              {optionLastTradeNote && (
+                <Typography variant="caption" color="text.secondary" display="block">
+                  Option last trade (informational only): {optionLastTradeNote}
                 </Typography>
               )}
             </Box>
