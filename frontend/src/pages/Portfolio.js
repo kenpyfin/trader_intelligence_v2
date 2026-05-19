@@ -53,6 +53,224 @@ const formatDateTime = (value) => {
   return date.toLocaleString();
 };
 
+/** Greatest common divisor (for normalizing open leg quantities to one strategy unit). */
+const gcdTwo = (a, b) => {
+  let x = Math.abs(Math.trunc(a));
+  let y = Math.abs(Math.trunc(b));
+  while (y) {
+    const t = y;
+    y = x % y;
+    x = t;
+  }
+  return x || 1;
+};
+
+const gcdMany = (nums) => {
+  const list = (nums || []).map((n) => Math.abs(Math.trunc(n))).filter((n) => n > 0);
+  if (list.length === 0) return 1;
+  return list.reduce((g, n) => gcdTwo(g, n));
+};
+
+/** Match backend order_tracking_service._strategy_signature strike formatting (e.g. 150 -> "150.0"). */
+const fmtStrikeForSignature = (strike) => {
+  const n = Number(strike);
+  if (!Number.isFinite(n)) return 'NaN';
+  if (Number.isInteger(n)) return `${n}.0`;
+  return String(n);
+};
+
+/**
+ * Same shape as Mongo `signature` on tracked_orders (see order_tracking_service._strategy_signature).
+ */
+const buildOpenStrategySignature = (ticker, legsArr) => {
+  const activeLegs = (legsArr || []).filter((l) => l.position != null && Number(l.position) !== 0);
+  if (activeLegs.length === 0) return null;
+  const absQtys = activeLegs.map((l) => Math.abs(Math.trunc(Number(l.position))));
+  const g = gcdMany(absQtys);
+  if (!g) return null;
+  const expiries = activeLegs.map((l) => l.expiry).filter(Boolean);
+  if (expiries.length === 0) return null;
+  const counts = expiries.reduce((acc, e) => {
+    acc[e] = (acc[e] || 0) + 1;
+    return acc;
+  }, {});
+  const chosenExp = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
+  const expFlat = String(chosenExp).replace(/-/g, '');
+  const normLegs = activeLegs.map((l) => ({
+    action: Number(l.position) > 0 ? 'BUY' : 'SELL',
+    quantity: Math.abs(Math.trunc(Number(l.position))) / g,
+    strike: Number(l.strike),
+    right: String(l.right || '').toUpperCase().slice(0, 1),
+  }));
+  normLegs.sort((a, b) => {
+    const cr = a.right.localeCompare(b.right);
+    if (cr) return cr;
+    if (a.strike !== b.strike) return a.strike - b.strike;
+    return a.action.localeCompare(b.action);
+  });
+  const parts = normLegs.map((x) => `${x.action}*${Math.trunc(x.quantity)}*${fmtStrikeForSignature(x.strike)}*${x.right}`);
+  return `${String(ticker || '').toUpperCase()}|${expFlat}|${parts.join(';')}`;
+};
+
+const pickEarliestTrackedGuidance = (orders) => {
+  const withGuidance = (orders || []).filter((o) => o && o.gpt_guidance);
+  if (withGuidance.length === 0) return null;
+  const sorted = [...withGuidance].sort((a, b) => (a.placed_at || '').localeCompare(b.placed_at || ''));
+  const o = sorted[0];
+  return { gpt_guidance: o.gpt_guidance, placed_at: o.placed_at };
+};
+
+/** GPT snapshot from the earliest tracked one-button execution matching this open strategy. */
+const getEntryGuidanceFor = (sym, legsArr, trackedOrders) => {
+  const u = String(sym || '').toUpperCase();
+  const sig = buildOpenStrategySignature(sym, legsArr);
+  const forSym = (trackedOrders || []).filter((o) => o.ticker && String(o.ticker).toUpperCase() === u);
+
+  if (sig) {
+    const matches = forSym.filter((o) => o.signature && o.signature === sig);
+    const entry = pickEarliestTrackedGuidance(matches);
+    if (entry) return entry;
+  }
+
+  const expiries = (legsArr || []).map((l) => l.expiry).filter((v) => !!v);
+  let chosenExp = '';
+  if (expiries.length > 0) {
+    const counts = expiries.reduce((acc, e) => {
+      acc[e] = (acc[e] || 0) + 1;
+      return acc;
+    }, {});
+    chosenExp = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
+  }
+  const toIsoExp = (exp) => {
+    if (!exp) return '';
+    const s = String(exp).replace(/-/g, '');
+    if (s.length === 8) {
+      return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
+    }
+    return exp;
+  };
+  const isoExp = toIsoExp(chosenExp);
+  if (isoExp) {
+    const expMatches = forSym.filter((o) => (o.expiration_date || '') === isoExp);
+    const entry = pickEarliestTrackedGuidance(expMatches);
+    if (entry) return entry;
+  }
+
+  return pickEarliestTrackedGuidance(forSym);
+};
+
+const ExecutionGuidanceBody = ({ guidance }) => {
+  const g = guidance || {};
+  const recs = g.execution_recommendations || {};
+  const entrySignals = Array.isArray(recs.entry_conditions) ? recs.entry_conditions : [];
+  const exitSignals = Array.isArray(recs.exit_conditions) ? recs.exit_conditions : [];
+  const alternatives = Array.isArray(recs.alternative_strategies) ? recs.alternative_strategies : [];
+  const ideas = Array.isArray(g.actionable_ideas) ? g.actionable_ideas : [];
+  const risks = Array.isArray(g.risk_factors) ? g.risk_factors : [];
+
+  const hasExecBox =
+    entrySignals.length > 0 ||
+    exitSignals.length > 0 ||
+    recs.stop_loss_guidance ||
+    recs.profit_target_guidance ||
+    alternatives.length > 0;
+
+  return (
+    <>
+      {g.final_bias && (
+        <div style={{ marginBottom: '8px' }}>
+          <strong>AI Bias:</strong>{' '}
+          <span style={{ color: g.final_bias.includes('Bull') ? 'green' : g.final_bias.includes('Bear') ? 'red' : '#555' }}>
+            {g.final_bias}
+          </span>
+        </div>
+      )}
+      {hasExecBox && (
+        <div style={{ background: '#f6f9ff', borderRadius: '6px', padding: '10px', marginBottom: '10px' }}>
+          {entrySignals.length > 0 && (
+            <div style={{ marginBottom: '8px' }}>
+              <strong>📈 Entry Signals:</strong>
+              <ul style={{ margin: '4px 0 0 18px', padding: 0 }}>
+                {entrySignals.map((s, i) => (
+                  <li key={i}>{s}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {exitSignals.length > 0 && (
+            <div style={{ marginBottom: '8px' }}>
+              <strong>📉 Exit Signals:</strong>
+              <ul style={{ margin: '4px 0 0 18px', padding: 0 }}>
+                {exitSignals.map((s, i) => (
+                  <li key={i}>{s}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {recs.stop_loss_guidance && (
+            <div style={{ marginBottom: '6px' }}>
+              <strong>🛡️ Stop Loss:</strong> {recs.stop_loss_guidance}
+            </div>
+          )}
+          {recs.profit_target_guidance && (
+            <div style={{ marginBottom: '6px' }}>
+              <strong>🎯 Profit Target:</strong> {recs.profit_target_guidance}
+            </div>
+          )}
+          {alternatives.length > 0 && (
+            <div>
+              <strong>🔄 Alternative Strategies:</strong>
+              <ul style={{ margin: '4px 0 0 18px', padding: 0 }}>
+                {alternatives.map((alt, idx) => (
+                  <li key={idx}>
+                    {alt.type || 'Strategy'}
+                    {alt.confidence && (
+                      <span
+                        style={{
+                          marginLeft: '5px',
+                          color: alt.confidence === 'High' ? 'green' : alt.confidence === 'Medium' ? 'orange' : '#c0392b',
+                        }}
+                      >
+                        ({alt.confidence})
+                      </span>
+                    )}
+                    {alt.description ? ` - ${alt.description}` : ''}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
+
+      {(ideas.length > 0 || risks.length > 0) && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '12px' }}>
+          {ideas.length > 0 && (
+            <div style={{ background: '#f8fdf6', borderRadius: '6px', padding: '10px' }}>
+              <strong>💡 Key Ideas</strong>
+              <ul style={{ margin: '6px 0 0 18px', padding: 0 }}>
+                {ideas.map((idea, idx) => (
+                  <li key={idx}>{idea}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {risks.length > 0 && (
+            <div style={{ background: '#fff6f6', borderRadius: '6px', padding: '10px' }}>
+              <strong>⚠️ Risk Factors</strong>
+              <ul style={{ margin: '6px 0 0 18px', padding: 0 }}>
+                {risks.map((risk, idx) => (
+                  <li key={idx}>{risk}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
+    </>
+  );
+};
+
 const RecentOrders = ({ orders, isLoading }) => {
   if (isLoading) {
     return (
@@ -112,158 +330,6 @@ const RecentOrders = ({ orders, isLoading }) => {
   );
 };
 
-const TrackedOrders = ({ orders, isLoading }) => {
-  if (isLoading) {
-    return (
-      <div style={{ border: '1px solid #ddd', borderRadius: '8px', padding: '16px', marginBottom: '24px', background: '#f8f9fa' }}>
-        <h2 style={{ marginTop: 0, marginBottom: '16px' }}>One-Button Execution History</h2>
-        <p>Loading execution history...</p>
-      </div>
-    );
-  }
-
-  if (!orders || orders.length === 0) {
-    return (
-      <div style={{ border: '1px solid #ddd', borderRadius: '8px', padding: '16px', marginBottom: '24px', background: '#f8f9fa' }}>
-        <h2 style={{ marginTop: 0, marginBottom: '16px' }}>One-Button Execution History</h2>
-        <p>No tracked executions yet. Run a strategy from the Analysis page to populate this list.</p>
-      </div>
-    );
-  }
-
-  return (
-    <div style={{ border: '1px solid #ddd', borderRadius: '8px', padding: '16px', marginBottom: '24px', background: '#f8f9fa' }}>
-      <h2 style={{ marginTop: 0, marginBottom: '16px' }}>One-Button Execution History</h2>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-        {orders.map((order) => {
-          const guidance = order.gpt_guidance || {};
-          const recs = guidance.execution_recommendations || {};
-          const entrySignals = Array.isArray(recs.entry_conditions) ? recs.entry_conditions : [];
-          const exitSignals = Array.isArray(recs.exit_conditions) ? recs.exit_conditions : [];
-          const ideas = Array.isArray(guidance.actionable_ideas) ? guidance.actionable_ideas : [];
-          const risks = Array.isArray(guidance.risk_factors) ? guidance.risk_factors : [];
-          const alternatives = Array.isArray(recs.alternative_strategies) ? recs.alternative_strategies : [];
-          const legs = Array.isArray(order.legs) ? order.legs : [];
-          const statusColor = order.status && order.status.toLowerCase().includes('filled') ? 'green' : '#555';
-
-          return (
-            <div key={order.id} style={{ border: '1px solid #e0e0e0', borderRadius: '6px', padding: '12px', background: '#fff', boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '10px', flexWrap: 'wrap' }}>
-                <div>
-                  <div style={{ fontSize: '1.05em', fontWeight: 600 }}>
-                    {order.ticker} • Exp {order.expiration_date || 'N/A'}
-                  </div>
-                  <div style={{ fontSize: '0.9em', color: '#666' }}>
-                    Placed {formatDateTime(order.placed_at)} • Size {order.size} • {order.is_credit_spread ? 'Credit Spread' : 'Strategy'}
-                  </div>
-                </div>
-                <div style={{ fontSize: '0.9em', fontWeight: 600, color: statusColor }}>
-                  Status: {order.status || 'Submitted'}
-                </div>
-              </div>
-
-              {legs.length > 0 && (
-                <div style={{ marginTop: '10px', fontSize: '0.9em', color: '#444' }}>
-                  <strong>Legs:</strong>
-                  <ul style={{ margin: '6px 0 0 18px', padding: 0 }}>
-                    {legs.map((leg, idx) => (
-                      <li key={idx}>{leg.action} {leg.quantity} × {leg.right} {parseFloat(leg.strike).toFixed(2)}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-
-              {guidance.final_bias && (
-                <div style={{ marginTop: '10px', fontWeight: 600 }}>
-                  AI Bias: <span style={{ color: guidance.final_bias.includes('Bull') ? 'green' : guidance.final_bias.includes('Bear') ? 'red' : '#555' }}>{guidance.final_bias}</span>
-                </div>
-              )}
-
-              {(entrySignals.length > 0 || exitSignals.length > 0 || recs.stop_loss_guidance || recs.profit_target_guidance || alternatives.length > 0) && (
-                <div style={{ marginTop: '12px', background: '#f6f9ff', borderRadius: '6px', padding: '12px' }}>
-                  <div style={{ fontWeight: 600, marginBottom: '8px' }}>🎯 AI-Powered Execution Guidance</div>
-                  {entrySignals.length > 0 && (
-                    <div style={{ marginBottom: '8px' }}>
-                      <strong>📈 Entry Signals:</strong>
-                      <ul style={{ margin: '4px 0 0 18px', padding: 0 }}>
-                        {entrySignals.map((signal, idx) => (
-                          <li key={idx}>{signal}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                  {exitSignals.length > 0 && (
-                    <div style={{ marginBottom: '8px' }}>
-                      <strong>📉 Exit Signals:</strong>
-                      <ul style={{ margin: '4px 0 0 18px', padding: 0 }}>
-                        {exitSignals.map((signal, idx) => (
-                          <li key={idx}>{signal}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                  {recs.stop_loss_guidance && (
-                    <div style={{ marginBottom: '6px' }}>
-                      <strong>🛡️ Stop Loss:</strong> {recs.stop_loss_guidance}
-                    </div>
-                  )}
-                  {recs.profit_target_guidance && (
-                    <div style={{ marginBottom: '6px' }}>
-                      <strong>🎯 Profit Target:</strong> {recs.profit_target_guidance}
-                    </div>
-                  )}
-                  {alternatives.length > 0 && (
-                    <div>
-                      <strong>🔄 Alternative Strategies:</strong>
-                      <ul style={{ margin: '4px 0 0 18px', padding: 0 }}>
-                        {alternatives.map((alt, idx) => (
-                          <li key={idx}>
-                            {alt.type || 'Strategy'}
-                            {alt.confidence && (
-                              <span style={{ marginLeft: '5px', color: alt.confidence === 'High' ? 'green' : alt.confidence === 'Medium' ? 'orange' : '#c0392b' }}>
-                                ({alt.confidence})
-                              </span>
-                            )}
-                            {alt.description ? ` - ${alt.description}` : ''}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {(ideas.length > 0 || risks.length > 0) && (
-                <div style={{ marginTop: '12px', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '12px' }}>
-                  {ideas.length > 0 && (
-                    <div style={{ background: '#f8fdf6', borderRadius: '6px', padding: '10px' }}>
-                      <strong>💡 Key Ideas</strong>
-                      <ul style={{ margin: '6px 0 0 18px', padding: 0 }}>
-                        {ideas.map((idea, idx) => (
-                          <li key={idx}>{idea}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                  {risks.length > 0 && (
-                    <div style={{ background: '#fff6f6', borderRadius: '6px', padding: '10px' }}>
-                      <strong>⚠️ Risk Factors</strong>
-                      <ul style={{ margin: '6px 0 0 18px', padding: 0 }}>
-                        {risks.map((risk, idx) => (
-                          <li key={idx}>{risk}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-};
 
 const PortfolioPage = () => {
   const [portfolioData, setPortfolioData] = useState(null);
@@ -271,7 +337,6 @@ const PortfolioPage = () => {
   const [loading, setLoading] = useState(true);
   const [loadingOrders, setLoadingOrders] = useState(true);
   const [trackedOrders, setTrackedOrders] = useState([]);
-  const [loadingTrackedOrders, setLoadingTrackedOrders] = useState(true);
   const [error, setError] = useState('');
   const [closingStatus, setClosingStatus] = useState({});
   const [stockClosingStatus, setStockClosingStatus] = useState({});
@@ -301,13 +366,11 @@ const PortfolioPage = () => {
 
     const fetchTrackedOrders = async () => {
       try {
-        const response = await axios.get('/api/portfolio/tracked-orders', { params: { limit: 10 } });
+        const response = await axios.get('/api/portfolio/tracked-orders', { params: { limit: 120 } });
         setTrackedOrders(Array.isArray(response.data) ? response.data : []);
       } catch (err) {
         console.error('Failed to fetch tracked orders:', err.response?.data?.detail || err.message);
         setTrackedOrders([]);
-      } finally {
-        setLoadingTrackedOrders(false);
       }
     };
 
@@ -387,7 +450,7 @@ const PortfolioPage = () => {
     );
   };
 
-const StrategyCard = ({ symbol, legs, gptGuidance, underlyingSpotPrice }) => {
+const StrategyCard = ({ symbol, legs, entryGuidance, underlyingSpotPrice }) => {
     const status = closingStatus[symbol];
     const isClosing = status?.inProgress;
     const legTotal = legs.reduce((acc, leg) => acc + leg.position, 0);
@@ -397,13 +460,7 @@ const StrategyCard = ({ symbol, legs, gptGuidance, underlyingSpotPrice }) => {
     const aggregateMarketValue = validMarketValues.reduce((acc, value) => acc + value, 0);
     const hasAggregateUnrealizedPnl = validUnrealizedPnl.length > 0;
     const aggregatePnlColor = !hasAggregateUnrealizedPnl ? '#666' : (aggregateUnrealizedPnl >= 0 ? 'green' : 'red');
-    const guidance = gptGuidance || {};
-    const recs = guidance.execution_recommendations || {};
-    const entrySignals = Array.isArray(recs.entry_conditions) ? recs.entry_conditions : [];
-    const exitSignals = Array.isArray(recs.exit_conditions) ? recs.exit_conditions : [];
-    const alternatives = Array.isArray(recs.alternative_strategies) ? recs.alternative_strategies : [];
-    const ideas = Array.isArray(guidance.actionable_ideas) ? guidance.actionable_ideas : [];
-    const risks = Array.isArray(guidance.risk_factors) ? guidance.risk_factors : [];
+    const entryG = entryGuidance?.gpt_guidance;
 
     return (
       <div style={{ border: '1px solid #ddd', borderRadius: '8px', padding: '16px', marginBottom: '16px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>
@@ -516,86 +573,13 @@ const StrategyCard = ({ symbol, legs, gptGuidance, underlyingSpotPrice }) => {
             </div>
         )}
 
-        {guidance && (
+        {entryG && (
           <div style={{ marginTop: '12px', borderTop: '1px solid #eee', paddingTop: '12px' }}>
             <div style={{ fontWeight: 600, marginBottom: '8px' }}>🤖 AI Execution Guidance</div>
-            {guidance.final_bias && (
-              <div style={{ marginBottom: '8px' }}>
-                <strong>AI Bias:</strong>{' '}
-                <span style={{ color: guidance.final_bias.includes('Bull') ? 'green' : guidance.final_bias.includes('Bear') ? 'red' : '#555' }}>
-                  {guidance.final_bias}
-                </span>
-              </div>
-            )}
-            {(entrySignals.length > 0 || exitSignals.length > 0 || recs.stop_loss_guidance || recs.profit_target_guidance || alternatives.length > 0) && (
-              <div style={{ background: '#f6f9ff', borderRadius: '6px', padding: '10px', marginBottom: '10px' }}>
-                {entrySignals.length > 0 && (
-                  <div style={{ marginBottom: '8px' }}>
-                    <strong>📈 Entry Signals:</strong>
-                    <ul style={{ margin: '4px 0 0 18px', padding: 0 }}>
-                      {entrySignals.map((s, i) => <li key={i}>{s}</li>)}
-                    </ul>
-                  </div>
-                )}
-                {exitSignals.length > 0 && (
-                  <div style={{ marginBottom: '8px' }}>
-                    <strong>📉 Exit Signals:</strong>
-                    <ul style={{ margin: '4px 0 0 18px', padding: 0 }}>
-                      {exitSignals.map((s, i) => <li key={i}>{s}</li>)}
-                    </ul>
-                  </div>
-                )}
-                {recs.stop_loss_guidance && (
-                  <div style={{ marginBottom: '6px' }}>
-                    <strong>🛡️ Stop Loss:</strong> {recs.stop_loss_guidance}
-                  </div>
-                )}
-                {recs.profit_target_guidance && (
-                  <div style={{ marginBottom: '6px' }}>
-                    <strong>🎯 Profit Target:</strong> {recs.profit_target_guidance}
-                  </div>
-                )}
-                {alternatives.length > 0 && (
-                  <div>
-                    <strong>🔄 Alternative Strategies:</strong>
-                    <ul style={{ margin: '4px 0 0 18px', padding: 0 }}>
-                      {alternatives.map((alt, idx) => (
-                        <li key={idx}>
-                          {alt.type || 'Strategy'}
-                          {alt.confidence && (
-                            <span style={{ marginLeft: '5px', color: alt.confidence === 'High' ? 'green' : alt.confidence === 'Medium' ? 'orange' : '#c0392b' }}>
-                              ({alt.confidence})
-                            </span>
-                          )}
-                          {alt.description ? ` - ${alt.description}` : ''}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {(ideas.length > 0 || risks.length > 0) && (
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '12px' }}>
-                {ideas.length > 0 && (
-                  <div style={{ background: '#f8fdf6', borderRadius: '6px', padding: '10px' }}>
-                    <strong>💡 Key Ideas</strong>
-                    <ul style={{ margin: '6px 0 0 18px', padding: 0 }}>
-                      {ideas.map((idea, idx) => <li key={idx}>{idea}</li>)}
-                    </ul>
-                  </div>
-                )}
-                {risks.length > 0 && (
-                  <div style={{ background: '#fff6f6', borderRadius: '6px', padding: '10px' }}>
-                    <strong>⚠️ Risk Factors</strong>
-                    <ul style={{ margin: '6px 0 0 18px', padding: 0 }}>
-                      {risks.map((risk, idx) => <li key={idx}>{risk}</li>)}
-                    </ul>
-                  </div>
-                )}
-              </div>
-            )}
+            <div style={{ fontSize: '0.85em', color: '#666', marginBottom: '8px' }}>
+              Snapshot from when this position was opened ({formatDateTime(entryGuidance.placed_at)}).
+            </div>
+            <ExecutionGuidanceBody guidance={entryG} />
           </div>
         )}
       </div>
@@ -692,37 +676,6 @@ const StrategyCard = ({ symbol, legs, gptGuidance, underlyingSpotPrice }) => {
   const hasStockPositions = Array.isArray(stockPositions) && stockPositions.length > 0;
   const hasAnyPositions = hasOptionPositions || hasStockPositions;
 
-  // Build a quick lookup of latest guidance per ticker and per (ticker, expiration)
-  const trackedByTicker = {};
-  const trackedByTickerExp = {};
-  (trackedOrders || []).forEach(o => {
-    const keyT = o.ticker;
-    const keyTE = `${o.ticker}|${o.expiration_date || ''}`;
-    if (keyT && (!trackedByTicker[keyT] || (o.placed_at || '') > (trackedByTicker[keyT].placed_at || ''))) {
-      trackedByTicker[keyT] = o;
-    }
-    if (o.ticker && o.expiration_date && (!trackedByTickerExp[keyTE] || (o.placed_at || '') > (trackedByTickerExp[keyTE].placed_at || ''))) {
-      trackedByTickerExp[keyTE] = o;
-    }
-  });
-
-  const getGuidanceFor = (sym, legsArr) => {
-    if (!sym) return null;
-    const expiries = (legsArr || [])
-      .map(l => l.expiry)
-      .filter(v => !!v);
-    // Pick the most common expiry among legs
-    let chosenExp = '';
-    if (expiries.length > 0) {
-      const counts = expiries.reduce((acc, e) => { acc[e] = (acc[e] || 0) + 1; return acc; }, {});
-      chosenExp = Object.entries(counts).sort((a,b) => b[1]-a[1])[0][0];
-    }
-    const byExp = chosenExp ? trackedByTickerExp[`${sym}|${chosenExp}`] : null;
-    const byTicker = trackedByTicker[sym] || null;
-    const pick = byExp || byTicker;
-    return pick ? (pick.gpt_guidance || null) : null;
-  };
-
   return (
     <div>
       {error && (
@@ -758,7 +711,7 @@ const StrategyCard = ({ symbol, legs, gptGuidance, underlyingSpotPrice }) => {
                       key={symbol}
                       symbol={symbol}
                       legs={legs}
-                      gptGuidance={getGuidanceFor(symbol, legs)}
+                      entryGuidance={getEntryGuidanceFor(symbol, legs, trackedOrders)}
                       underlyingSpotPrice={underlyingSpotPrices[symbol]}
                     />
                 ))}

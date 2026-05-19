@@ -763,7 +763,7 @@ def _build_analyst_messages(ticker: str, expiration_date: str, analysis_payload:
     if use_web_search:
         system += " You MUST use web search to find recent catalysts/earnings."
 
-    user_content = f"Analyze {ticker} for expiration {expiration_date}.\n\n"
+    user_content = f"Analyze {ticker} for expiration {expiration_date}.\nToday's date is {date.today().isoformat()}.\n\n"
 
     # Add sections — options_positioning is stripped of greeks_by_strike for the Analyst
     # (the Analyst needs positioning signals, not the full chain; Trader gets full greeks)
@@ -840,7 +840,7 @@ def _build_trader_messages(ticker: str, expiration_date: str, analyst_verdict: D
         "}"
     )
 
-    user_content = f"Construct a strategy for {ticker} (Exp: {expiration_date}).\n\n"
+    user_content = f"Construct a strategy for {ticker} (Exp: {expiration_date}).\nToday's date is {date.today().isoformat()}.\n\n"
     user_content += f"<analyst_verdict>\n{json.dumps(analyst_verdict)}\n</analyst_verdict>\n"
 
     # Smartly truncate options data if too large to prevent token overflow/truncation
@@ -2136,6 +2136,14 @@ def generate_gpt_verdict(
         return final_verdict
 
     # Execute trader agent call with retry logic
+    # Validate DTE (Days To Expiration)
+    target_date = date.fromisoformat(expiration_date)
+    today = date.today()
+    days_to_exp = (target_date - today).days
+    
+    if days_to_exp > 365:
+        return {"error": f"Requested expiration {expiration_date} is too far out (DTE: {days_to_exp}). Max allowed is 365 days."}
+    
     trader_messages = _build_trader_messages(ticker, expiration_date, analyst_result, options_data)
 
     trader_result, trader_metrics, trader_retry_metrics = _openai_chat_completion_with_retry(
