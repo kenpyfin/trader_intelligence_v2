@@ -32,8 +32,11 @@ import {
   Typography,
   Alert,
   AlertTitle,
-  Tooltip
+  Tooltip,
+  Link
 } from '@mui/material';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import {
   ExpandMore as ExpandMoreIcon,
   ExpandLess as ExpandLessIcon,
@@ -1303,11 +1306,298 @@ const StrategyOrder = ({ strategy, strategies = [], ticker, expirationDate, gptV
     );
 };
 
+const webResearchMarkdownSx = {
+  fontSize: '0.875rem',
+  lineHeight: 1.65,
+  color: 'text.primary',
+  '& > *:first-of-type': { mt: 0 },
+  '& > *:last-child': { mb: 0 },
+  '& p': { my: 1 },
+  '& h1, & h2, & h3, & h4': {
+    mt: 2,
+    mb: 0.75,
+    fontWeight: 600,
+    lineHeight: 1.3,
+    color: 'primary.dark',
+  },
+  '& h1': { fontSize: '1.05rem' },
+  '& h2': { fontSize: '1rem' },
+  '& h3, & h4': { fontSize: '0.95rem' },
+  '& ul, & ol': { pl: 2.25, my: 1 },
+  '& ul': { listStyleType: 'disc' },
+  '& ol': { listStyleType: 'decimal' },
+  '& li': { mb: 0.65, pl: 0.25 },
+  '& li::marker': { color: 'primary.main' },
+  '& li > p': { my: 0.25 },
+  '& strong': { fontWeight: 600, color: 'text.primary' },
+  '& em': { color: 'text.secondary' },
+  '& a': { color: 'primary.main', textDecoration: 'none', '&:hover': { textDecoration: 'underline' } },
+  '& blockquote': {
+    borderLeft: '3px solid',
+    borderColor: 'primary.light',
+    pl: 2,
+    ml: 0,
+    my: 1.5,
+    color: 'text.secondary',
+    fontStyle: 'italic',
+    bgcolor: 'action.hover',
+    borderRadius: '0 4px 4px 0',
+    py: 0.5,
+  },
+  '& code': {
+    fontFamily: 'monospace',
+    fontSize: '0.8rem',
+    bgcolor: 'action.hover',
+    px: 0.5,
+    py: 0.25,
+    borderRadius: 0.5,
+  },
+  '& hr': { my: 2, borderColor: 'divider' },
+  '& table': { borderCollapse: 'collapse', width: '100%', my: 1.5, fontSize: '0.8rem' },
+  '& th, & td': { border: '1px solid', borderColor: 'divider', px: 1, py: 0.75, textAlign: 'left' },
+  '& th': { bgcolor: 'action.hover', fontWeight: 600 },
+};
+
+const formatWebResearchFetchedAt = (iso) => {
+  if (!iso) return null;
+  try {
+    return new Date(iso).toLocaleString(undefined, {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    });
+  } catch {
+    return null;
+  }
+};
+
+const sourceLinkLabel = (url) => {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, '');
+    const path = new URL(url).pathname;
+    if (path && path !== '/' && path.length < 48) {
+      return `${host}${path}`;
+    }
+    return host;
+  } catch {
+    return url;
+  }
+};
+
+/** Strip Perplexity inline citation markers like [1] or [1][2] for cleaner reading. */
+const stripInlineCitations = (line) =>
+  line.replace(/\s*\[(\d+)\](?:\[(\d+)\])*/g, '').trim();
+
+/** Normalize plain-text Perplexity output into markdown-friendly content. */
+const normalizeWebResearchSummary = (text) => {
+  if (!text || typeof text !== 'string') return '';
+  let trimmed = text.trim();
+  if (!trimmed) return '';
+
+  if (!/^#|\*\*|\[.*\]\(http|^[-*]\s/m.test(trimmed)) {
+    const rawLines = trimmed.split('\n').map((line) => line.trim()).filter(Boolean);
+    const bulletLike = rawLines.filter((line) => /^[-•*]\s/.test(line) || /^\d+\.\s/.test(line));
+    if (bulletLike.length >= Math.max(2, rawLines.length * 0.5)) {
+      trimmed = rawLines
+        .map((line) => {
+          const cleaned = stripInlineCitations(line);
+          if (/^[-•*]\s/.test(cleaned)) return `- ${cleaned.replace(/^[-•*]\s+/, '')}`;
+          if (/^\d+\.\s/.test(cleaned)) return cleaned;
+          return cleaned;
+        })
+        .join('\n');
+    } else {
+      trimmed = rawLines
+        .map((line) => stripInlineCitations(line))
+        .map((line, i, arr) => {
+          if (/^[A-Z][A-Za-z0-9\s/&-]{2,48}:$/.test(line)) {
+            return `### ${line.slice(0, -1)}`;
+          }
+          if (/^[A-Z][A-Za-z0-9\s/&-]{2,48}:\s/.test(line) && line.length < 72) {
+            const colon = line.indexOf(':');
+            return `**${line.slice(0, colon + 1)}**${line.slice(colon + 1)}`;
+          }
+          if (arr.length > 1 && line.length < 200) return `- ${line}`;
+          return line;
+        })
+        .join('\n\n');
+    }
+  }
+
+  return trimmed
+    .split('\n')
+    .map((line) => stripInlineCitations(line))
+    .join('\n');
+};
+
+const webResearchMarkdownComponents = {
+  h3: ({ children }) => (
+    <Typography
+      component="h3"
+      variant="subtitle2"
+      fontWeight={700}
+      sx={{
+        mt: 2,
+        mb: 0.75,
+        pb: 0.5,
+        color: 'primary.dark',
+        borderBottom: 1,
+        borderColor: 'divider',
+      }}
+    >
+      {children}
+    </Typography>
+  ),
+  li: ({ children }) => (
+    <Box component="li" sx={{ mb: 0.75, '& p': { display: 'inline', margin: 0 } }}>
+      <Typography component="span" variant="body2" sx={{ lineHeight: 1.65 }}>
+        {children}
+      </Typography>
+    </Box>
+  ),
+  p: ({ children }) => (
+    <Typography component="p" variant="body2" sx={{ lineHeight: 1.65, my: 1 }}>
+      {children}
+    </Typography>
+  ),
+};
+
+const WebResearchSummaryBlock = ({ webResearch, sources }) => {
+  const [expanded, setExpanded] = useState(true);
+  const summary = normalizeWebResearchSummary(webResearch?.summary || '');
+  const linkList = (sources && sources.length > 0 ? sources : webResearch?.sources) || [];
+  const fetchedLabel = formatWebResearchFetchedAt(webResearch?.fetched_at);
+
+  if (!summary && linkList.length === 0) return null;
+
+  return (
+    <Box sx={{ mb: 3 }}>
+      <Stack
+        direction="row"
+        alignItems="center"
+        justifyContent="space-between"
+        spacing={1}
+        sx={{ mb: 1 }}
+      >
+        <Stack direction="row" alignItems="center" spacing={1}>
+          <SearchIcon color="primary" fontSize="small" />
+          <Typography variant="subtitle1" fontWeight="bold">
+            Web Research Summary
+          </Typography>
+          {linkList.length > 0 && (
+            <Chip size="small" label={`${linkList.length} sources`} variant="outlined" sx={{ height: 22 }} />
+          )}
+        </Stack>
+        <IconButton
+          size="small"
+          aria-label={expanded ? 'Collapse web research' : 'Expand web research'}
+          onClick={() => setExpanded((v) => !v)}
+        >
+          {expanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+        </IconButton>
+      </Stack>
+
+      <Collapse in={expanded}>
+        <Paper
+          variant="outlined"
+          sx={{
+            overflow: 'hidden',
+            borderColor: 'primary.light',
+            bgcolor: 'background.paper',
+          }}
+        >
+          <Box
+            sx={{
+              px: 2,
+              py: 1.25,
+              bgcolor: (theme) => theme.palette.mode === 'dark' ? 'action.hover' : 'primary.50',
+              borderBottom: 1,
+              borderColor: 'divider',
+            }}
+          >
+            <Stack direction="row" flexWrap="wrap" gap={1} alignItems="center">
+              <Chip
+                size="small"
+                icon={<SearchIcon sx={{ fontSize: '14px !important' }} />}
+                label={webResearch?.provider === 'perplexity' ? 'Perplexity Sonar' : (webResearch?.provider || 'Web search')}
+                color="primary"
+                variant="outlined"
+              />
+              {webResearch?.model && (
+                <Chip size="small" label={webResearch.model} variant="outlined" />
+              )}
+              {fetchedLabel && (
+                <Typography variant="caption" color="text.secondary" sx={{ ml: { xs: 0, sm: 'auto' } }}>
+                  Retrieved {fetchedLabel}
+                </Typography>
+              )}
+            </Stack>
+          </Box>
+
+          {summary && (
+            <Box sx={{ px: 2, py: 2, bgcolor: '#f8fafc' }}>
+              <Box sx={webResearchMarkdownSx}>
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  components={webResearchMarkdownComponents}
+                >
+                  {summary}
+                </ReactMarkdown>
+              </Box>
+            </Box>
+          )}
+
+          {linkList.length > 0 && (
+            <>
+              {summary && <Divider />}
+              <Box sx={{ px: 2, py: 1.5, bgcolor: 'background.default' }}>
+                <Typography variant="caption" color="text.secondary" fontWeight={700} sx={{ display: 'block', mb: 1.25, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                  Sources · {linkList.length}
+                </Typography>
+                <Stack spacing={0.75}>
+                  {linkList.map((source, i) => (
+                    <Tooltip key={`${source}-${i}`} title={source} placement="top-start" enterDelay={400}>
+                      <Link
+                        href={source}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        underline="hover"
+                        variant="body2"
+                        sx={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 0.75,
+                          color: 'primary.main',
+                          fontWeight: 500,
+                          maxWidth: '100%',
+                        }}
+                      >
+                        <OpenInNewIcon sx={{ fontSize: 15, flexShrink: 0 }} />
+                        <Box component="span" sx={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {sourceLinkLabel(source)}
+                        </Box>
+                      </Link>
+                    </Tooltip>
+                  ))}
+                </Stack>
+              </Box>
+            </>
+          )}
+        </Paper>
+      </Collapse>
+    </Box>
+  );
+};
+
 const GptVerdictCard = ({ verdict }) => {
   if (!verdict) return null;
 
   return (
     <AnalysisCard title="GPT-Powered Verdict & Rationale">
+      <WebResearchSummaryBlock
+        webResearch={verdict.web_research}
+        sources={verdict.sources}
+      />
+
       {verdict.key_reasoning_points && verdict.key_reasoning_points.length > 0 && (
         <Box sx={{ mb: 3 }}>
           <Typography variant="subtitle1" gutterBottom fontWeight="bold">Key Analysis Points</Typography>
@@ -1361,26 +1651,6 @@ const GptVerdictCard = ({ verdict }) => {
           </Grid>
         )}
       </Grid>
-
-      {verdict.search_performed && verdict.sources && verdict.sources.length > 0 && (
-        <Box sx={{ mt: 3 }}>
-          <Typography variant="subtitle2" gutterBottom>Sources Consulted</Typography>
-          <List dense disablePadding>
-            {verdict.sources.map((source, i) => (
-              <ListItem key={i} disablePadding>
-                <ListItemText 
-                  primary={
-                    <a href={source} target="_blank" rel="noopener noreferrer" style={{ color: '#1976d2', textDecoration: 'none' }}>
-                      {source}
-                    </a>
-                  } 
-                  primaryTypographyProps={{ variant: 'caption' }}
-                />
-              </ListItem>
-            ))}
-          </List>
-        </Box>
-      )}
     </AnalysisCard>
   );
 };
@@ -1735,7 +2005,7 @@ const SavedVerdictsControls = ({ ticker, currentResult, scrollAnchorRef }) => {
                       const ts = item.created_at?.slice(0, 19).replace('T',' ');
                       const ov = item.overview || {};
                       const typeText = ov.method_label || ((item.analysis_method || '').includes('gpt')
-                        ? (((item.analysis_method || '').includes('web') ? 'GPT Web Verdict' : 'GPT Verdict'))
+                        ? (((item.analysis_method || '').includes('web') ? 'Web Verdict' : 'GPT Verdict'))
                         : 'Model Verdict');
                       const isSelected = selectedId === item.id;
                       return (
@@ -1805,12 +2075,12 @@ const SavedVerdictsControls = ({ ticker, currentResult, scrollAnchorRef }) => {
 const MethodologyExplanation = ({ methodology }) => {
   if (methodology === 'gpt-5-web-verdict') {
     return (
-      <AnalysisCard title="About: GPT-5 Web Verdict Analysis">
+      <AnalysisCard title="About: Web Verdict Analysis">
         <Typography paragraph>
-          The <strong>GPT-5 Web Verdict</strong> methodology enhances the standard GPT Verdict by empowering the AI model with real-time web search capabilities.
+          The <strong>Web Verdict</strong> methodology enhances the standard GPT Verdict with live web research via <strong>Perplexity Sonar</strong>, then synthesizes findings with <strong>Gemini</strong> in the same two-stage Analyst + Trader pipeline.
         </Typography>
         <Typography paragraph>
-          In addition to synthesizing the quantitative data provided by our internal analysis, the model will actively search for the latest news, analyst ratings, and market chatter related to the stock. This allows it to incorporate breaking developments and qualitative insights that are not captured in the raw market data, providing the most up-to-date and contextually-aware verdict possible.
+          Perplexity gathers recent news, earnings catalysts, analyst actions, and sector headlines for the ticker. That context is injected into the Analyst stage alongside our quantitative sub-analyses (technicals, volatility, options positioning). The result is a verdict grounded in both structured market data and up-to-date web intelligence, with source URLs listed when available.
         </Typography>
       </AnalysisCard>
     );
@@ -2449,7 +2719,7 @@ const AnalysisPage = () => {
                 >
                   <MenuItem value="holistic-market-edge">Holistic Market Edge</MenuItem>
                   <MenuItem value="gpt-verdict">GPT Verdict</MenuItem>
-                  <MenuItem value="gpt-5-web-verdict">GPT-5 Web Verdict</MenuItem>
+                  <MenuItem value="gpt-5-web-verdict">Web Verdict</MenuItem>
                 </Select>
               </FormControl>
             </Grid>

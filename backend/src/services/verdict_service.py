@@ -34,7 +34,7 @@ def save_verdict_document(verdict: Dict[str, Any], label: Optional[str] = None) 
     iv_state = 'high' if clean.get('iv_high') else ('low' if clean.get('iv_low') else 'normal')
     if isinstance(analysis_method, str):
         if ('gpt' in analysis_method) and ('web' in analysis_method):
-            method_label = 'GPT Web Verdict'
+            method_label = 'Web Verdict'
         elif 'gpt' in analysis_method:
             method_label = 'GPT Verdict'
         else:
@@ -105,7 +105,7 @@ def list_verdicts(ticker: str, page: int = 1, page_size: int = 25) -> Dict[str, 
         analysis_method = d.get('analysis_method') or data.get('analysis_method')
         if isinstance(analysis_method, str):
             if ('gpt' in analysis_method) and ('web' in analysis_method):
-                method_label = 'GPT Web Verdict'
+                method_label = 'Web Verdict'
             elif 'gpt' in analysis_method:
                 method_label = 'GPT Verdict'
             else:

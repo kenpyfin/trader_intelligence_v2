@@ -15,6 +15,11 @@ from typing import Callable
 from ..quality_config import QualityAssessment, QualityLevel
 from ..strike_normalization import default_normalizer
 from ..enhanced_greeks_validation import default_enhanced_validator
+from .perplexity_research import (
+    PerplexityAPIError,
+    PerplexityConfigError,
+    fetch_web_context,
+)
 
 # Configure structured logging for GPT verdict generation
 logger = logging.getLogger('gpt_verdict')
@@ -684,7 +689,13 @@ def _sanitize_for_json(obj: Any, max_list_len: int = 200) -> Any:
     return str(obj)
 
 
-def _build_analyst_messages(ticker: str, expiration_date: str, analysis_payload: Dict[str, Any], use_web_search: bool = False) -> Dict[str, Any]:
+def _build_analyst_messages(
+    ticker: str,
+    expiration_date: str,
+    analysis_payload: Dict[str, Any],
+    use_web_search: bool = False,
+    web_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """
     Stage 1: The Analyst.
     Focuses on synthesizing data into a market thesis (Bias, Rationale, Risks).
@@ -760,10 +771,19 @@ def _build_analyst_messages(ticker: str, expiration_date: str, analysis_payload:
     # Fix {ticker} placeholder — system is a plain string, not an f-string
     system = system.replace('{ticker}', ticker)
 
-    if use_web_search:
-        system += " You MUST use web search to find recent catalysts/earnings."
+    if use_web_search and web_context:
+        system += (
+            "\n\nWEB RESEARCH (Perplexity):\n"
+            "A <web_research> block is provided with recent news and catalysts from live web search. "
+            "You MUST incorporate material findings from web_research into your rationale and key_reasoning_points. "
+            "When citing news or catalysts, reference URLs from web_research.sources where relevant. "
+            "Do not invent news not supported by web_research or the quantitative data sections."
+        )
 
     user_content = f"Analyze {ticker} for expiration {expiration_date}.\nToday's date is {date.today().isoformat()}.\n\n"
+
+    if use_web_search and web_context:
+        user_content += f"<web_research>\n{json.dumps(web_context)}\n</web_research>\n\n"
 
     # Add sections — options_positioning is stripped of greeks_by_strike for the Analyst
     # (the Analyst needs positioning signals, not the full chain; Trader gets full greeks)
@@ -1151,8 +1171,6 @@ def _openai_chat_completion(
     }
     if system_parts:
         payload["system_instruction"] = {"parts": [{"text": "\n\n".join(system_parts)}]}
-    if use_web_search:
-        payload["tools"] = [{"google_search": {}}]
 
     logger.debug(f"Making Gemini request to {url}", extra={
         "payload_keys": list(payload.keys()),
@@ -1852,9 +1870,29 @@ def generate_gpt_verdict(
         "trader_timeout": timeout_config.trader_timeout
     })
 
+    web_context: Optional[Dict[str, Any]] = None
+    if use_web_search:
+        market_data = analysis_result.get("market_data") or {}
+        days_to_earnings = market_data.get("days_to_earnings")
+        try:
+            web_context = fetch_web_context(
+                ticker,
+                expiration_date,
+                days_to_earnings=days_to_earnings,
+            )
+        except (PerplexityConfigError, PerplexityAPIError) as exc:
+            logger.error("Perplexity web research failed", extra={"error": str(exc)})
+            raise
+
     # Stage 1: Analyst Agent with Retry Logic
     logger.info("Starting Stage 1: Analyst Agent")
-    analyst_messages = _build_analyst_messages(ticker, expiration_date, analysis_result, use_web_search)
+    analyst_messages = _build_analyst_messages(
+        ticker,
+        expiration_date,
+        analysis_result,
+        use_web_search=bool(web_context),
+        web_context=web_context,
+    )
 
     analyst_result, analyst_metrics, analyst_retry_metrics = _openai_chat_completion_with_retry(
         messages=analyst_messages,
@@ -1863,7 +1901,7 @@ def generate_gpt_verdict(
         stage="Analyst",
         retry_config=retry_config,
         timeout_config=timeout_config,
-        use_web_search=use_web_search
+        use_web_search=False,
     )
 
     # Handle analyst response with retry information
@@ -2257,6 +2295,11 @@ def generate_gpt_verdict(
         "total_retry_time": analyst_retry_metrics.total_retry_time + trader_retry_metrics.total_retry_time,
         "circuit_breaker_events": analyst_retry_metrics.circuit_breaker_triggered or trader_retry_metrics.circuit_breaker_triggered
     }
+
+    if web_context:
+        final_verdict["search_performed"] = True
+        final_verdict["sources"] = web_context.get("sources") or []
+        final_verdict["web_research"] = web_context
 
     return final_verdict
 

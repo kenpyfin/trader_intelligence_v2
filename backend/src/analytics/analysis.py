@@ -1,3 +1,4 @@
+import os
 import pandas as pd
 import numpy as np
 import math
@@ -7,6 +8,7 @@ from src.my_libs_py3.fmp import FMPClient
 from src.my_libs_py3.db import connect_mongo
 from src.analytics.treasury_curve import build_treasury_curve
 from .methodologies.gpt_verdict import generate_gpt_verdict
+from .methodologies.perplexity_research import PerplexityConfigError, PerplexityAPIError
 from .strike_normalization import default_normalizer
 from .greeks_repair import default_greeks_validator
 
@@ -940,6 +942,19 @@ def validate_greeks_input_parameters(S_current, vol_term_structure, r_input, div
 
 
 def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, rate_source: str = 'etf', analysis_method: str = 'holistic-market-edge', override_price: float = None, gpt_model: str = 'gemini-2.5-flash'):
+    use_web = 'web' in (analysis_method or '')
+    if use_web and not os.getenv("PERPLEXITY_API_KEY", "").strip():
+        return {
+            "status": "error",
+            "message": (
+                "Web Verdict requires PERPLEXITY_API_KEY. "
+                "Set it in your environment or .env file to enable web research."
+            ),
+            "ticker": ticker,
+            "expiration_date": expiration_date.isoformat() if hasattr(expiration_date, "isoformat") else expiration_date,
+            "analysis_method": analysis_method,
+        }
+
     fmp = FMPClient()
     price_fetcher = PriceDataFetcher()
 
@@ -1653,9 +1668,31 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
 
     if (('gpt' in analysis_method) and ('verdict' in analysis_method)) or ('gpt-verdict' in analysis_method):
         print(f"DEBUG: Running GPT Verdict analysis for {ticker} (method: {analysis_method})")
-        use_web = 'web' in analysis_method
         # Pass the sub-analyses to the AI
-        gpt_verdict = generate_gpt_verdict(ticker, expiration_date.isoformat(), analysis_result_package, model=gpt_model or 'gemini-2.5-flash', use_web_search=use_web)
+        try:
+            gpt_verdict = generate_gpt_verdict(
+                ticker,
+                expiration_date.isoformat(),
+                analysis_result_package,
+                model=gpt_model or 'gemini-2.5-flash',
+                use_web_search=use_web,
+            )
+        except PerplexityConfigError as exc:
+            return {
+                "status": "error",
+                "message": str(exc),
+                "ticker": ticker,
+                "expiration_date": expiration_date.isoformat(),
+                "analysis_method": analysis_method,
+            }
+        except PerplexityAPIError as exc:
+            return {
+                "status": "error",
+                "message": f"Web research failed: {exc}",
+                "ticker": ticker,
+                "expiration_date": expiration_date.isoformat(),
+                "analysis_method": analysis_method,
+            }
         print(f"DEBUG: GPT Verdict response received: {gpt_verdict}")
 
         # Populate the package with AI results
