@@ -2077,10 +2077,10 @@ const MethodologyExplanation = ({ methodology }) => {
     return (
       <AnalysisCard title="About: Web Verdict Analysis">
         <Typography paragraph>
-          The <strong>Web Verdict</strong> methodology enhances the standard GPT Verdict with live web research via <strong>Perplexity Sonar</strong>, then synthesizes findings with <strong>Gemini</strong> in the same two-stage Analyst + Trader pipeline.
+          The <strong>Web Verdict</strong> methodology runs entirely on <strong>Perplexity Sonar</strong>: live web research, then the same two-stage Analyst + Trader pipeline used by GPT Verdict.
         </Typography>
         <Typography paragraph>
-          Perplexity gathers recent news, earnings catalysts, analyst actions, and sector headlines for the ticker. That context is injected into the Analyst stage alongside our quantitative sub-analyses (technicals, volatility, options positioning). The result is a verdict grounded in both structured market data and up-to-date web intelligence, with source URLs listed when available.
+          Perplexity gathers recent news, earnings catalysts, analyst actions, and sector headlines, then synthesizes them with our quantitative sub-analyses (technicals, volatility, options positioning). Only <strong>PERPLEXITY_API_KEY</strong> is required—no Gemini key for this mode. Source URLs are listed when available.
         </Typography>
       </AnalysisCard>
     );
@@ -2272,10 +2272,15 @@ const AnalysisPage = () => {
   const [cautionModeActive, setCautionModeActive] = useState(false);
   const [qualityAssessment, setQualityAssessment] = useState(null);
   
-  // GPT Model selection state
+  // GPT / Perplexity model selection state
   const [availableModels, setAvailableModels] = useState([]);
   const [selectedModel, setSelectedModel] = useStickyState('gemini-2.5-flash', 'selectedGptModel');
   const [fetchingModels, setFetchingModels] = useState(false);
+  const [perplexityModels, setPerplexityModels] = useState([]);
+  const [selectedPerplexityModel, setSelectedPerplexityModel] = useStickyState('sonar', 'selectedPerplexityModel');
+  const [fetchingPerplexityModels, setFetchingPerplexityModels] = useState(false);
+  const isWebVerdictMethod = analysisMethod === 'gpt-5-web-verdict';
+  const verdictModel = isWebVerdictMethod ? selectedPerplexityModel : selectedModel;
   const HISTORY_PAGE_SIZE = 5;
   const HISTORY_SCOPE_ALL = 'all';
   const HISTORY_SCOPE_CURRENT = 'current';
@@ -2436,9 +2441,36 @@ const AnalysisPage = () => {
     }
   };
 
-  // Load GPT models when analysis method is GPT-based
+  const fetchPerplexityModels = async () => {
+    setFetchingPerplexityModels(true);
+    try {
+      const response = await axios.get('/api/perplexity-models');
+      if (response.data.status === 'success') {
+        setPerplexityModels(response.data.models);
+        if (!response.data.models.some((m) => m.id === selectedPerplexityModel)) {
+          setSelectedPerplexityModel(response.data.default || 'sonar');
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch Perplexity models:', error);
+      setPerplexityModels([
+        { id: 'sonar', name: 'Sonar (Fallback)' },
+        { id: 'sonar-pro', name: 'Sonar Pro (Fallback)' },
+      ]);
+    } finally {
+      setFetchingPerplexityModels(false);
+    }
+  };
+
+  // Load models when analysis method is GPT-based
   useEffect(() => {
-    if (analysisMethod.includes('gpt') && availableModels.length === 0) {
+    if (analysisMethod === 'gpt-5-web-verdict' && perplexityModels.length === 0) {
+      fetchPerplexityModels();
+    } else if (
+      analysisMethod.includes('gpt')
+      && analysisMethod !== 'gpt-5-web-verdict'
+      && availableModels.length === 0
+    ) {
       fetchGptModels();
     }
   }, [analysisMethod]);
@@ -2609,7 +2641,7 @@ const AnalysisPage = () => {
         expiration: selectedExpiration,
         riskFreeRate,
         analysisMethod,
-        gptModel: selectedModel,
+        gptModel: verdictModel,
       });
     } catch (error) {
       console.error('Error in handleAnalyze:', error);
@@ -2642,8 +2674,9 @@ const AnalysisPage = () => {
     const nextRateCandidate = payload.risk_free_rate ?? entry.risk_free_rate ?? riskFreeRate;
     const nextRate = Number(nextRateCandidate);
     const needsGptModel = (nextMethod || '').includes('gpt');
+    const isWebHistory = nextMethod === 'gpt-5-web-verdict';
     const nextModel = needsGptModel
-      ? (payload.gpt_model || entry.gpt_model || selectedModel)
+      ? (payload.gpt_model || entry.gpt_model || (isWebHistory ? selectedPerplexityModel : selectedModel))
       : selectedModel;
 
     let normalizedExpiration = rawExpiration.trim();
@@ -2661,7 +2694,11 @@ const AnalysisPage = () => {
     });
 
     if (needsGptModel && nextModel) {
-      setSelectedModel(nextModel);
+      if (isWebHistory) {
+        setSelectedPerplexityModel(nextModel);
+      } else {
+        setSelectedModel(nextModel);
+      }
     }
 
     await executeAnalysis({
@@ -2724,8 +2761,47 @@ const AnalysisPage = () => {
               </FormControl>
             </Grid>
             
-            {/* Show GPT model selector only for GPT-based methodologies */}
-            {analysisMethod.includes('gpt') && (
+            {/* Perplexity model selector for Web Verdict */}
+            {isWebVerdictMethod && (
+              <Grid item xs={12} sm={6} md={3}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                  <FormControl fullWidth size="small">
+                    <InputLabel>Perplexity Model</InputLabel>
+                    <Select
+                      value={selectedPerplexityModel}
+                      label="Perplexity Model"
+                      onChange={(e) => setSelectedPerplexityModel(e.target.value)}
+                      disabled={fetchingPerplexityModels}
+                    >
+                      {fetchingPerplexityModels ? (
+                        <MenuItem disabled>Loading models...</MenuItem>
+                      ) : Array.isArray(perplexityModels) && perplexityModels.length > 0 ? (
+                        perplexityModels.map((model) => (
+                          <MenuItem key={model.id} value={model.id}>
+                            {model.name}
+                          </MenuItem>
+                        ))
+                      ) : (
+                        <MenuItem disabled>No models available</MenuItem>
+                      )}
+                    </Select>
+                  </FormControl>
+                  <Tooltip title="Refresh models list">
+                    <IconButton onClick={fetchPerplexityModels} disabled={fetchingPerplexityModels} size="small">
+                      <RefreshIcon />
+                    </IconButton>
+                  </Tooltip>
+                </Box>
+                {perplexityModels.some((m) => m.name.includes('Fallback')) && (
+                  <Typography variant="caption" color="warning.main">
+                    ⚠️ Using fallback models
+                  </Typography>
+                )}
+              </Grid>
+            )}
+
+            {/* Gemini model selector for GPT Verdict only */}
+            {analysisMethod === 'gpt-verdict' && (
               <Grid item xs={12} sm={6} md={3}>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                   <FormControl fullWidth size="small">
@@ -2860,7 +2936,7 @@ const AnalysisPage = () => {
                   expiration: selectedExpiration,
                   riskFreeRate,
                   analysisMethod,
-                  gptModel: selectedModel,
+                  gptModel: verdictModel,
                   cautionMode: true
                 })}
               >
@@ -2911,7 +2987,7 @@ const AnalysisPage = () => {
               selectedExpiration={selectedExpiration}
               riskFreeRate={riskFreeRate}
               analysisMethod={analysisMethod}
-              selectedModel={selectedModel}
+              selectedModel={verdictModel}
             />
           </>
         )}

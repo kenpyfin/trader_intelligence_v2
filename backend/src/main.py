@@ -439,6 +439,23 @@ async def fetch_expirations(ticker: str):
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
 
+@app.get("/api/perplexity-models")
+@app.get("/perplexity-models")  # Alias for Docker/proxy compatibility
+async def get_available_perplexity_models():
+    """Static list of Perplexity Sonar models for Web Verdict analysis."""
+    from .analytics.methodologies.perplexity_research import (
+        list_perplexity_models,
+        resolve_perplexity_model,
+    )
+
+    default_model = resolve_perplexity_model(os.getenv("PERPLEXITY_MODEL", "sonar"))
+    return {
+        "status": "success",
+        "models": list_perplexity_models(),
+        "default": default_model,
+    }
+
+
 @app.get("/api/gpt-models")
 @app.get("/gpt-models")  # Alias for Docker/proxy compatibility
 async def get_available_gpt_models():

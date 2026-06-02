@@ -19,6 +19,8 @@ from .perplexity_research import (
     PerplexityAPIError,
     PerplexityConfigError,
     fetch_web_context,
+    perplexity_chat_completion,
+    resolve_perplexity_model,
 )
 
 # Configure structured logging for GPT verdict generation
@@ -60,6 +62,12 @@ def _resolve_gemini_model(model: str) -> str:
         return DEFAULT_GEMINI_MODEL
 
     return normalized
+
+
+def _resolve_perplexity_model(model: str) -> str:
+    """Alias for perplexity model resolution used in Web Verdict mode."""
+    return resolve_perplexity_model(model)
+
 
 class FailureCategory(Enum):
     """Categorizes different types of failures for better diagnostics."""
@@ -908,7 +916,8 @@ def _openai_chat_completion_with_retry(
     stage: str = "unknown",
     retry_config: Optional[RetryConfig] = None,
     timeout_config: Optional[TimeoutConfig] = None,
-    use_web_search: bool = False
+    use_web_search: bool = False,
+    llm_provider: str = "gemini",
 ) -> Tuple[Dict[str, Any], APICallMetrics, RetryMetrics]:
     """
     Enhanced API call with retry logic, circuit breaker, and separate timeouts.
@@ -964,7 +973,13 @@ def _openai_chat_completion_with_retry(
 
             # Make the API call
             result, api_metrics = _openai_chat_completion(
-                messages, model, temperature, timeout, stage, use_web_search
+                messages,
+                model,
+                temperature,
+                timeout,
+                stage,
+                use_web_search,
+                llm_provider,
             )
 
             if result is not None:
@@ -1090,192 +1105,287 @@ def _openai_chat_completion(
     temperature: float = 0.2,
     timeout: int = None,
     stage: str = "unknown",
-    use_web_search: bool = False
+    use_web_search: bool = False,
+    llm_provider: str = "gemini",
 ) -> Tuple[Dict[str, Any], APICallMetrics]:
     """
-    Gemini completion call with comprehensive error handling and diagnostics.
-    Honors GEMINI_API_KEY from environment.
+    LLM completion for Analyst/Trader stages (Gemini or Perplexity Sonar).
 
     Returns:
         Tuple of (response_dict, metrics)
     """
-    # Initialize metrics tracking
+    provider = (llm_provider or "gemini").lower()
+    if provider == "perplexity":
+        resolved_model = _resolve_perplexity_model(model)
+    else:
+        resolved_model = _resolve_gemini_model(model)
+
+    default_timeout = int(os.getenv("GPT_VERDICT_TIMEOUT", "180"))
+    if provider == "perplexity":
+        default_timeout = int(
+            os.getenv(
+                "PERPLEXITY_VERDICT_TIMEOUT",
+                os.getenv("GPT_VERDICT_TIMEOUT", "180"),
+            )
+        )
+
     metrics = APICallMetrics(
         stage=stage,
-        model=model,
+        model=resolved_model,
         temperature=temperature,
-        timeout=timeout or int(os.getenv("GPT_VERDICT_TIMEOUT", "180")),
-        start_time=time.time()
+        timeout=timeout or default_timeout,
+        start_time=time.time(),
     )
 
-    key = os.getenv("GEMINI_API_KEY")
-    resolved_model = _resolve_gemini_model(model)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{resolved_model}:generateContent"
+    if timeout is None:
+        timeout = metrics.timeout
 
-    logger.info(f"Starting {stage} API call", extra={
-        "requested_model": model,
-        "resolved_model": resolved_model,
-        "temperature": temperature,
-        "timeout": metrics.timeout,
-        "message_count": len(messages),
-        "provider": "gemini",
-        "use_web_search": use_web_search
-    })
-
-    if not key:
-        metrics.failure_category = FailureCategory.AUTHENTICATION_ERROR
-        metrics.error_message = "GEMINI_API_KEY not set"
-        logger.error("Authentication failed: GEMINI_API_KEY not set")
-        raise RuntimeError("GEMINI_API_KEY not set")
-
-    # Calculate request size for monitoring
     try:
         request_content = json.dumps(messages)
-        metrics.request_size = len(request_content.encode('utf-8'))
+        metrics.request_size = len(request_content.encode("utf-8"))
         logger.debug(f"Request payload size: {metrics.request_size} bytes")
     except Exception as e:
         logger.warning(f"Failed to calculate request size: {e}")
 
-    # Use environment variable for timeout, default to 180 seconds (3 minutes)
-    if timeout is None:
-        timeout = metrics.timeout
-
-    system_parts = []
-    conversation_parts = []
-    for msg in messages:
-        role = (msg or {}).get("role")
-        text = str((msg or {}).get("content", "")).strip()
-        if not text:
-            continue
-        if role == "system":
-            system_parts.append(text)
-        else:
-            conversation_parts.append(f"{role or 'user'}:\n{text}")
-
-    conversation_prompt = "\n\n".join(conversation_parts).strip()
-    if not conversation_prompt:
-        conversation_prompt = "Provide the requested response in valid JSON."
-
-    payload = {
-        "contents": [
-            {
-                "role": "user",
-                "parts": [{"text": conversation_prompt}]
-            }
-        ],
-        "generationConfig": {
+    logger.info(
+        f"Starting {stage} API call",
+        extra={
+            "requested_model": model,
+            "resolved_model": resolved_model,
             "temperature": temperature,
-            "maxOutputTokens": 4096,
-            "responseMimeType": "application/json"
-        }
-    }
-    if system_parts:
-        payload["system_instruction"] = {"parts": [{"text": "\n\n".join(system_parts)}]}
+            "timeout": metrics.timeout,
+            "message_count": len(messages),
+            "provider": provider,
+            "use_web_search": use_web_search,
+        },
+    )
 
-    logger.debug(f"Making Gemini request to {url}", extra={
-        "payload_keys": list(payload.keys()),
-        "resolved_model": resolved_model
-    })
+    content = None
 
-    try:
-        resp = requests.post(url, params={"key": key}, json=payload, timeout=timeout)
-        metrics.end_time = time.time()
-        metrics.status_code = resp.status_code
-
-        if hasattr(resp, 'content'):
-            metrics.response_size = len(resp.content)
-            logger.debug(f"Response size: {metrics.response_size} bytes")
-
-        logger.info(f"Gemini API response received", extra={
-            "status_code": resp.status_code,
-            "duration": metrics.duration
-        })
-
-        resp.raise_for_status()
-    except requests.exceptions.Timeout as e:
-        metrics.end_time = time.time()
-        metrics.failure_category = FailureCategory.API_TIMEOUT
-        metrics.error_message = f"API timeout after {timeout}s"
-        logger.error(f"API timeout for {stage}", extra={
-            "timeout": timeout,
-            "duration": metrics.duration,
-            "error": str(e)
-        })
-        return None, metrics
-    except requests.exceptions.HTTPError as e:
-        metrics.end_time = time.time()
-        status_code = getattr(resp, "status_code", 0)
-        if status_code in (401, 403):
+    if provider == "perplexity":
+        try:
+            content, status_code, response_size = perplexity_chat_completion(
+                messages,
+                model=resolved_model,
+                temperature=temperature,
+                timeout=timeout,
+                stage=stage,
+                max_tokens=4096,
+            )
+            metrics.end_time = time.time()
+            metrics.status_code = status_code
+            metrics.response_size = response_size
+            metrics.success = True
+            logger.info(
+                f"{stage} Perplexity API call completed successfully",
+                extra={
+                    "duration": metrics.duration,
+                    "response_length": len(content),
+                },
+            )
+        except PerplexityConfigError as e:
+            metrics.end_time = time.time()
             metrics.failure_category = FailureCategory.AUTHENTICATION_ERROR
-        elif status_code == 429:
-            metrics.failure_category = FailureCategory.RATE_LIMIT_ERROR
-        else:
+            metrics.error_message = str(e)
+            logger.error(f"Perplexity auth failed for {stage}", extra={"error": str(e)})
+            raise
+        except PerplexityAPIError as e:
+            metrics.end_time = time.time()
+            err = str(e).lower()
+            if "401" in err or "403" in err:
+                metrics.failure_category = FailureCategory.AUTHENTICATION_ERROR
+            elif "429" in err:
+                metrics.failure_category = FailureCategory.RATE_LIMIT_ERROR
+            elif "timed out" in err:
+                metrics.failure_category = FailureCategory.API_TIMEOUT
+            else:
+                metrics.failure_category = FailureCategory.API_ERROR
+            metrics.error_message = str(e)
+            logger.error(f"Perplexity API error for {stage}", extra={"error": str(e)})
+            return None, metrics
+
+        if not content:
+            metrics.failure_category = FailureCategory.EMPTY_RESPONSE
+            metrics.error_message = "Empty content from Perplexity"
+            return None, metrics
+    else:
+        key = os.getenv("GEMINI_API_KEY")
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{resolved_model}:generateContent"
+
+        if not key:
+            metrics.failure_category = FailureCategory.AUTHENTICATION_ERROR
+            metrics.error_message = "GEMINI_API_KEY not set"
+            logger.error("Authentication failed: GEMINI_API_KEY not set")
+            raise RuntimeError("GEMINI_API_KEY not set")
+
+        system_parts = []
+        conversation_parts = []
+        for msg in messages:
+            role = (msg or {}).get("role")
+            text = str((msg or {}).get("content", "")).strip()
+            if not text:
+                continue
+            if role == "system":
+                system_parts.append(text)
+            else:
+                conversation_parts.append(f"{role or 'user'}:\n{text}")
+
+        conversation_prompt = "\n\n".join(conversation_parts).strip()
+        if not conversation_prompt:
+            conversation_prompt = "Provide the requested response in valid JSON."
+
+        payload = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": conversation_prompt}],
+                }
+            ],
+            "generationConfig": {
+                "temperature": temperature,
+                "maxOutputTokens": 4096,
+                "responseMimeType": "application/json",
+            },
+        }
+        if system_parts:
+            payload["system_instruction"] = {"parts": [{"text": "\n\n".join(system_parts)}]}
+
+        logger.debug(
+            f"Making Gemini request to {url}",
+            extra={
+                "payload_keys": list(payload.keys()),
+                "resolved_model": resolved_model,
+            },
+        )
+
+        try:
+            resp = requests.post(url, params={"key": key}, json=payload, timeout=timeout)
+            metrics.end_time = time.time()
+            metrics.status_code = resp.status_code
+
+            if hasattr(resp, "content"):
+                metrics.response_size = len(resp.content)
+                logger.debug(f"Response size: {metrics.response_size} bytes")
+
+            logger.info(
+                f"Gemini API response received",
+                extra={
+                    "status_code": resp.status_code,
+                    "duration": metrics.duration,
+                },
+            )
+
+            resp.raise_for_status()
+        except requests.exceptions.Timeout as e:
+            metrics.end_time = time.time()
+            metrics.failure_category = FailureCategory.API_TIMEOUT
+            metrics.error_message = f"API timeout after {timeout}s"
+            logger.error(
+                f"API timeout for {stage}",
+                extra={
+                    "timeout": timeout,
+                    "duration": metrics.duration,
+                    "error": str(e),
+                },
+            )
+            return None, metrics
+        except requests.exceptions.HTTPError as e:
+            metrics.end_time = time.time()
+            status_code = getattr(resp, "status_code", 0)
+            if status_code in (401, 403):
+                metrics.failure_category = FailureCategory.AUTHENTICATION_ERROR
+            elif status_code == 429:
+                metrics.failure_category = FailureCategory.RATE_LIMIT_ERROR
+            else:
+                metrics.failure_category = FailureCategory.API_ERROR
+            error_snippet = resp.text[:500] if hasattr(resp, "text") else str(e)
+            metrics.error_message = f"HTTP {status_code}: {error_snippet}"
+            logger.error(
+                f"HTTP error for {stage}",
+                extra={
+                    "status_code": status_code,
+                    "error": str(e),
+                    "response_text": error_snippet,
+                },
+            )
+            return None, metrics
+        except requests.exceptions.ConnectionError as e:
+            metrics.end_time = time.time()
+            metrics.failure_category = FailureCategory.NETWORK_ERROR
+            metrics.error_message = f"Connection error: {str(e)}"
+            logger.error(f"Network error for {stage}", extra={"error": str(e)})
+            return None, metrics
+        except Exception as e:
+            metrics.end_time = time.time()
             metrics.failure_category = FailureCategory.API_ERROR
-        error_snippet = resp.text[:500] if hasattr(resp, "text") else str(e)
-        metrics.error_message = f"HTTP {status_code}: {error_snippet}"
-        logger.error(f"HTTP error for {stage}", extra={
-            "status_code": status_code,
-            "error": str(e),
-            "response_text": error_snippet
-        })
-        return None, metrics
-    except requests.exceptions.ConnectionError as e:
-        metrics.end_time = time.time()
-        metrics.failure_category = FailureCategory.NETWORK_ERROR
-        metrics.error_message = f"Connection error: {str(e)}"
-        logger.error(f"Network error for {stage}", extra={"error": str(e)})
-        return None, metrics
-    except Exception as e:
-        metrics.end_time = time.time()
-        metrics.failure_category = FailureCategory.API_ERROR
-        metrics.error_message = f"Unexpected error: {str(e)}"
-        logger.error(f"Unexpected Gemini API error for {stage}", extra={
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        })
-        return None, metrics
+            metrics.error_message = f"Unexpected error: {str(e)}"
+            logger.error(
+                f"Unexpected Gemini API error for {stage}",
+                extra={
+                    "error": str(e),
+                    "traceback": traceback.format_exc(),
+                },
+            )
+            return None, metrics
 
-    try:
-        data = resp.json()
-    except json.JSONDecodeError as e:
-        metrics.failure_category = FailureCategory.MALFORMED_RESPONSE
-        metrics.error_message = f"Invalid JSON response: {str(e)}"
-        logger.error(f"Invalid JSON response for {stage}", extra={
-            "error": str(e),
-            "response_text": resp.text[:500] if hasattr(resp, 'text') else "No response text"
-        })
-        return None, metrics
+        try:
+            data = resp.json()
+        except json.JSONDecodeError as e:
+            metrics.failure_category = FailureCategory.MALFORMED_RESPONSE
+            metrics.error_message = f"Invalid JSON response: {str(e)}"
+            logger.error(
+                f"Invalid JSON response for {stage}",
+                extra={
+                    "error": str(e),
+                    "response_text": resp.text[:500] if hasattr(resp, "text") else "No response text",
+                },
+            )
+            return None, metrics
 
-    logger.debug("Gemini response parsed successfully", extra={
-        "response_keys": list(data.keys()) if isinstance(data, dict) else []
-    })
+        logger.debug(
+            "Gemini response parsed successfully",
+            extra={
+                "response_keys": list(data.keys()) if isinstance(data, dict) else [],
+            },
+        )
 
-    candidates = data.get("candidates", []) if isinstance(data, dict) else []
-    if not candidates:
-        metrics.failure_category = FailureCategory.EMPTY_RESPONSE
-        metrics.error_message = f"No candidates in Gemini response: {str(data)[:300]}"
-        logger.error(f"Empty candidates in response for {stage}", extra={"response_data": data})
-        return None, metrics
+        candidates = data.get("candidates", []) if isinstance(data, dict) else []
+        if not candidates:
+            metrics.failure_category = FailureCategory.EMPTY_RESPONSE
+            metrics.error_message = f"No candidates in Gemini response: {str(data)[:300]}"
+            logger.error(
+                f"Empty candidates in response for {stage}",
+                extra={"response_data": data},
+            )
+            return None, metrics
 
-    parts = ((candidates[0] or {}).get("content") or {}).get("parts", [])
-    content_parts = []
-    for part in parts:
-        if isinstance(part, dict) and part.get("text"):
-            content_parts.append(part["text"])
-    content = "\n".join(content_parts).strip()
+        parts = ((candidates[0] or {}).get("content") or {}).get("parts", [])
+        content_parts = []
+        for part in parts:
+            if isinstance(part, dict) and part.get("text"):
+                content_parts.append(part["text"])
+        content = "\n".join(content_parts).strip()
 
-    if not content:
-        metrics.failure_category = FailureCategory.EMPTY_RESPONSE
-        metrics.error_message = f"Empty content in Gemini response (finish_reason={candidates[0].get('finishReason')})"
-        logger.error(f"Empty content extracted for {stage}", extra={"candidate": candidates[0]})
-        return None, metrics
+        if not content:
+            metrics.failure_category = FailureCategory.EMPTY_RESPONSE
+            metrics.error_message = (
+                f"Empty content in Gemini response (finish_reason={candidates[0].get('finishReason')})"
+            )
+            logger.error(
+                f"Empty content extracted for {stage}",
+                extra={"candidate": candidates[0]},
+            )
+            return None, metrics
 
-    metrics.success = True
-    logger.info(f"{stage} API call completed successfully", extra={
-        "duration": metrics.duration,
-        "response_length": len(content)
-    })
-    
+        metrics.success = True
+        logger.info(
+            f"{stage} API call completed successfully",
+            extra={
+                "duration": metrics.duration,
+                "response_length": len(content),
+            },
+        )
+
     def _extract_json_from_response(text: str, stage: str = "unknown") -> Tuple[dict, JSONParsingDiagnostics]:
         """
         Extract JSON from potentially malformed response text with comprehensive diagnostics.
@@ -1762,7 +1872,7 @@ def _openai_chat_completion(
 
         # Attach model info so downstream save includes it
         if isinstance(parsed_json, dict):
-            parsed_json.setdefault('model', model)
+            parsed_json.setdefault('model', metrics.model)
 
         if missing_critical_fields:
             logger.error(f"{stage} response is missing CRITICAL fields: {missing_critical_fields}", extra={
@@ -1859,11 +1969,17 @@ def generate_gpt_verdict(
             trader_timeout=int(os.getenv("GPT_TRADER_TIMEOUT", "240"))     # 4 minutes
         )
 
+    llm_provider = "perplexity" if use_web_search else "gemini"
+    effective_model = (
+        _resolve_perplexity_model(model) if use_web_search else model
+    )
+
     session_start = time.time()
     logger.info(f"Starting GPT verdict generation with retry support", extra={
         "ticker": ticker,
         "expiration_date": expiration_date,
-        "model": model,
+        "model": effective_model,
+        "llm_provider": llm_provider,
         "use_web_search": use_web_search,
         "retry_max_attempts": retry_config.max_attempts,
         "analyst_timeout": timeout_config.analyst_timeout,
@@ -1879,6 +1995,7 @@ def generate_gpt_verdict(
                 ticker,
                 expiration_date,
                 days_to_earnings=days_to_earnings,
+                model=effective_model,
             )
         except (PerplexityConfigError, PerplexityAPIError) as exc:
             logger.error("Perplexity web research failed", extra={"error": str(exc)})
@@ -1896,12 +2013,13 @@ def generate_gpt_verdict(
 
     analyst_result, analyst_metrics, analyst_retry_metrics = _openai_chat_completion_with_retry(
         messages=analyst_messages,
-        model=model,
+        model=effective_model,
         temperature=0.3,
         stage="Analyst",
         retry_config=retry_config,
         timeout_config=timeout_config,
         use_web_search=False,
+        llm_provider=llm_provider,
     )
 
     # Handle analyst response with retry information
@@ -2186,12 +2304,13 @@ def generate_gpt_verdict(
 
     trader_result, trader_metrics, trader_retry_metrics = _openai_chat_completion_with_retry(
         messages=trader_messages,
-        model=model,
+        model=effective_model,
         temperature=0.1,
         stage="Trader",
         retry_config=retry_config,
         timeout_config=timeout_config,
-        use_web_search=False
+        use_web_search=False,
+        llm_provider=llm_provider,
     )
 
     # Handle trader response with retry information
@@ -2300,6 +2419,10 @@ def generate_gpt_verdict(
         final_verdict["search_performed"] = True
         final_verdict["sources"] = web_context.get("sources") or []
         final_verdict["web_research"] = web_context
+
+    if llm_provider == "perplexity":
+        final_verdict["provider"] = "perplexity"
+        final_verdict.setdefault("model", effective_model)
 
     return final_verdict
 
