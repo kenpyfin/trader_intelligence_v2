@@ -159,6 +159,35 @@ const getEntryGuidanceFor = (sym, legsArr, trackedOrders) => {
   return pickEarliestTrackedGuidance(forSym);
 };
 
+/** Conditions from backend exit_timing evaluation ({ text, status, reason }). */
+const getMetTimingConditions = (conditions) =>
+  (Array.isArray(conditions) ? conditions : []).filter((c) => c && c.status === 'met');
+
+const ExitTimingConditionsList = ({ conditions, title = 'Why close now' }) => {
+  const met = getMetTimingConditions(conditions);
+  if (met.length === 0) return null;
+
+  return (
+    <div style={{ marginTop: '8px' }}>
+      <div style={{ fontWeight: 600, marginBottom: '4px', fontSize: '0.9em' }}>
+        {title}:
+      </div>
+      <ul style={{ margin: 0, paddingLeft: '18px', listStyle: 'disc' }}>
+        {met.map((c, i) => (
+          <li key={i} style={{ marginBottom: '6px' }}>
+            <div>{c.text}</div>
+            {c.reason ? (
+              <div style={{ fontSize: '0.85em', color: '#78350f', marginTop: '2px', fontStyle: 'italic' }}>
+                {c.reason}
+              </div>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+};
+
 const ExecutionGuidanceBody = ({ guidance }) => {
   const g = guidance || {};
   const recs = g.execution_recommendations || {};
@@ -268,6 +297,57 @@ const ExecutionGuidanceBody = ({ guidance }) => {
         </div>
       )}
     </>
+  );
+};
+
+const ActionHintsBanner = ({ hints }) => {
+  const closeNow = (hints && Array.isArray(hints.close_now) ? hints.close_now : []) || [];
+  if (closeNow.length === 0) return null;
+
+  return (
+    <div
+      style={{
+        border: '1px solid #ff9800',
+        background: '#fff3e0',
+        color: '#7c2d12',
+        padding: '16px',
+        borderRadius: '8px',
+        marginBottom: '24px',
+      }}
+    >
+      <div style={{ fontSize: '1.1em', fontWeight: 700, marginBottom: '6px' }}>
+        ⚠️ Close-Now Suggestions
+      </div>
+      <div style={{ fontSize: '0.95em', color: '#9a3412', marginBottom: '10px' }}>
+        Based on your snapshot exit conditions, these open option strategies look ready to close.
+      </div>
+      <ul style={{ margin: 0, paddingLeft: '18px' }}>
+        {closeNow.map((h) => {
+          const met = getMetTimingConditions(h.conditions);
+          return (
+            <li key={h.symbol} style={{ marginBottom: '10px' }}>
+              <a
+                href={`#strategy-${h.symbol}`}
+                style={{ color: '#9a3412', fontWeight: 700, textDecoration: 'underline' }}
+              >
+                {h.symbol}
+              </a>
+              {met.length > 0 ? (
+                <ul style={{ margin: '6px 0 0 0', paddingLeft: '18px', fontSize: '0.92em' }}>
+                  {met.map((c, i) => (
+                    <li key={i} style={{ marginBottom: '4px' }}>
+                      {c.text}
+                    </li>
+                  ))}
+                </ul>
+              ) : h.summary ? (
+                <span> — {h.summary}</span>
+              ) : null}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
   );
 };
 
@@ -450,7 +530,7 @@ const PortfolioPage = () => {
     );
   };
 
-const StrategyCard = ({ symbol, legs, entryGuidance, underlyingSpotPrice }) => {
+const StrategyCard = ({ symbol, legs, entryGuidance, underlyingSpotPrice, closeNowHint }) => {
     const status = closingStatus[symbol];
     const isClosing = status?.inProgress;
     const legTotal = legs.reduce((acc, leg) => acc + leg.position, 0);
@@ -463,7 +543,10 @@ const StrategyCard = ({ symbol, legs, entryGuidance, underlyingSpotPrice }) => {
     const entryG = entryGuidance?.gpt_guidance;
 
     return (
-      <div style={{ border: '1px solid #ddd', borderRadius: '8px', padding: '16px', marginBottom: '16px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>
+      <div
+        id={`strategy-${symbol}`}
+        style={{ border: '1px solid #ddd', borderRadius: '8px', padding: '16px', marginBottom: '16px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}
+      >
         <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
             <div>
                 <h3 style={{ marginTop: 0, marginBottom: '5px' }}>{symbol} <span style={{fontSize: '0.8em', color: '#666'}}>({legs.length} Legs)</span></h3>
@@ -473,6 +556,25 @@ const StrategyCard = ({ symbol, legs, entryGuidance, underlyingSpotPrice }) => {
                 <div style={{ fontSize: '0.9em', color: '#555' }}>
                   Grouped by underlying symbol (not broker-native strategy IDs)
                 </div>
+                {closeNowHint && (
+                  <div
+                    style={{
+                      marginTop: '10px',
+                      padding: '8px 10px',
+                      background: '#fff7ed',
+                      border: '1px solid #fed7aa',
+                      borderRadius: '6px',
+                      color: '#9a3412',
+                      fontSize: '0.95em',
+                    }}
+                  >
+                    <strong>Exit timing:</strong> {closeNowHint.label || 'Close now'}
+                    <ExitTimingConditionsList conditions={closeNowHint.conditions} />
+                    {getMetTimingConditions(closeNowHint.conditions).length === 0 && closeNowHint.summary ? (
+                      <div style={{ marginTop: '6px', fontSize: '0.9em' }}>{closeNowHint.summary}</div>
+                    ) : null}
+                  </div>
+                )}
                 <div style={{ marginTop: '6px', fontSize: '0.95em' }}>
                   <strong>Strategy Unrealized P/L:</strong>{' '}
                   <span style={{ color: aggregatePnlColor }}>
@@ -676,6 +778,12 @@ const StrategyCard = ({ symbol, legs, entryGuidance, underlyingSpotPrice }) => {
   const hasStockPositions = Array.isArray(stockPositions) && stockPositions.length > 0;
   const hasAnyPositions = hasOptionPositions || hasStockPositions;
 
+  const actionHints = portfolioData?.action_hints || {};
+  const closeNowBySymbol = (actionHints.close_now || []).reduce((acc, h) => {
+    if (h && h.symbol) acc[h.symbol] = h;
+    return acc;
+  }, {});
+
   return (
     <div>
       {error && (
@@ -695,6 +803,8 @@ const StrategyCard = ({ symbol, legs, entryGuidance, underlyingSpotPrice }) => {
       <PortfolioSummary summary={portfolioData?.summary} />
       <RecentOrders orders={recentOrders} isLoading={loadingOrders} />
 
+      {hasOptionPositions && <ActionHintsBanner hints={actionHints} />}
+
       {error ? (
         <div style={{ border: '1px solid #ddd', borderRadius: '8px', padding: '16px', marginTop: '24px', background: '#fdfdfd' }}>
           <strong>Broker positions are currently unavailable.</strong>
@@ -713,6 +823,7 @@ const StrategyCard = ({ symbol, legs, entryGuidance, underlyingSpotPrice }) => {
                       legs={legs}
                       entryGuidance={getEntryGuidanceFor(symbol, legs, trackedOrders)}
                       underlyingSpotPrice={underlyingSpotPrices[symbol]}
+                      closeNowHint={closeNowBySymbol[symbol]}
                     />
                 ))}
             </div>

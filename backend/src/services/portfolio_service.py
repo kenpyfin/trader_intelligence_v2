@@ -2,9 +2,16 @@ from collections import defaultdict
 import asyncio
 import pandas as pd
 import numpy as np
+from datetime import datetime, date
 
 from ..models.portfolio_models import CloseStrategyRequest, CloseStockPositionRequest
 from .connection_manager import connection_manager
+from .order_tracking_service import list_tracked_orders
+from ..analytics.execution_signal_evaluator import (
+    build_exit_context_from_portfolio,
+    evaluate_exit_timing,
+)
+from .strategy_signature import strategy_signature
 
 def _sanitize_for_json(item):
     """
@@ -127,10 +134,185 @@ async def get_grouped_open_positions():
             underlying_spot_prices = {sym: None for sym in option_underlyings}
 
     # Step 5: Combine and return.
+    # --- Step 5b: Evaluate close-now action hints for open option strategies ---
+    action_hints = {
+        "close_now": [],
+        "evaluated_at": datetime.utcnow().isoformat(),
+    }
+
+    try:
+        tracked_orders = list_tracked_orders(limit=120)
+
+        def _gcd_many(nums):
+            import math
+            cleaned = [abs(int(n)) for n in (nums or []) if n is not None]
+            cleaned = [n for n in cleaned if n > 0]
+            if not cleaned:
+                return 1
+            g = cleaned[0]
+            for n in cleaned[1:]:
+                g = math.gcd(g, n)
+                if g == 1:
+                    break
+            return g or 1
+
+        def _dte_from_expiry(expiry: str) -> int:
+            if not expiry:
+                return 0
+            s = str(expiry).replace("-", "")
+            if len(s) != 8 or not s.isdigit():
+                return 0
+            try:
+                exp_date = datetime.strptime(s, "%Y%m%d").date()
+                return max(0, (exp_date - date.today()).days)
+            except Exception:
+                return 0
+
+        def _estimate_initial_credit_received(legs):
+            # Approximate net premium received for the whole open position.
+            # Uses broker avgCost and the sign of `position`:
+            #   - long leg (position > 0) is debit: subtract its avgCost
+            #   - short leg (position < 0) is credit: add its avgCost
+            credit = 0.0
+            for l in legs or []:
+                qty = l.get("position")
+                avg = l.get("avgCost")
+                try:
+                    qty_f = float(qty)
+                    avg_f = float(avg)
+                except Exception:
+                    continue
+                if qty_f == 0 or avg_f is None:
+                    continue
+                if qty_f < 0:
+                    credit += abs(qty_f) * avg_f
+                else:
+                    credit -= abs(qty_f) * avg_f
+            # Options multiplier approximation: 100x
+            return credit * 100.0
+
+        def _build_open_signature_symbol_legs(legs):
+            active_legs = [l for l in (legs or []) if l.get("position") is not None and float(l.get("position")) != 0.0]
+            if not active_legs:
+                return None
+
+            qtys = [abs(int(float(l.get("position")))) for l in active_legs]
+            g = _gcd_many(qtys)
+
+            expiries = [l.get("expiry") for l in active_legs if l.get("expiry")]
+            if not expiries:
+                return None
+            counts = defaultdict(int)
+            for e in expiries:
+                counts[str(e)] += 1
+            chosen_exp = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[0][0]
+
+            norm_legs = []
+            for l in active_legs:
+                pos = float(l.get("position"))
+                action = "BUY" if pos > 0 else "SELL"
+                qty_ratio = abs(int(pos)) // g
+                try:
+                    strike = float(l.get("strike"))
+                except Exception:
+                    strike = None
+                right = str(l.get("right", "")).upper()[:1]
+                if strike is None:
+                    continue
+                norm_legs.append(
+                    {
+                        "action": action,
+                        "quantity": int(qty_ratio),
+                        "strike": strike,
+                        "right": right,
+                    }
+                )
+            if not norm_legs:
+                return None
+            # Pass chosen expiry exactly as stored in signature (YYYYMMDD)
+            exp_flat = str(chosen_exp).replace("-", "")
+            return {
+                "expiration_date": exp_flat,
+                "legs": norm_legs,
+            }
+
+        option_positions = grouped_positions_data.get("options") or {}
+        for sym, legs in option_positions.items():
+            sig_parts = _build_open_signature_symbol_legs(legs)
+            if not sig_parts:
+                continue
+
+            sig = strategy_signature(sym, sig_parts["expiration_date"], sig_parts["legs"])
+            matches = [o for o in tracked_orders if o.get("signature") == sig]
+            if not matches:
+                continue
+
+            # Earliest tracked guidance snapshot
+            matches_sorted = sorted(matches, key=lambda o: (o.get("placed_at") or ""))
+            matched = matches_sorted[0]
+
+            gpt_guidance = matched.get("gpt_guidance") or {}
+            recs = gpt_guidance.get("execution_recommendations") or {}
+            exit_conditions = recs.get("exit_conditions") or []
+            conditions_for_eval = list(exit_conditions) if isinstance(exit_conditions, list) else []
+
+            # If exit_conditions are missing, fold in the guidance strings.
+            if not conditions_for_eval:
+                if isinstance(recs.get("stop_loss_guidance"), str):
+                    conditions_for_eval.append(recs.get("stop_loss_guidance"))
+                if isinstance(recs.get("profit_target_guidance"), str):
+                    conditions_for_eval.append(recs.get("profit_target_guidance"))
+
+            legs_list = legs or []
+            aggregate_unrealized_pnl = sum(float(l.get("unrealizedPNL") or 0) for l in legs_list)
+            aggregate_market_value = sum(float(l.get("marketValue") or 0) for l in legs_list)
+
+            # DTE is derived from the options expiry in open positions.
+            dte = _dte_from_expiry(sig_parts["expiration_date"])
+            underlying_price = None
+            if sym and sym in underlying_spot_prices:
+                underlying_price = underlying_spot_prices.get(sym)
+
+            strategy_is_credit = matched.get("is_credit_spread")
+            initial_credit_received = None
+            if isinstance(strategy_is_credit, bool) and strategy_is_credit:
+                initial_credit_received = _estimate_initial_credit_received(legs_list)
+                if initial_credit_received <= 0:
+                    initial_credit_received = None
+
+            ctx = build_exit_context_from_portfolio(
+                symbol=sym,
+                legs=legs_list,
+                underlying_price=underlying_price,
+                aggregate_unrealized_pnl=aggregate_unrealized_pnl,
+                aggregate_market_value=aggregate_market_value,
+                dte=dte,
+                days_to_earnings=None,
+                strategy_is_credit_spread=strategy_is_credit,
+                initial_credit_received=initial_credit_received,
+            )
+
+            exit_timing = evaluate_exit_timing(conditions_for_eval, ctx)
+
+            if exit_timing.get("status") == "close_now":
+                action_hints["close_now"].append(
+                    {
+                        "symbol": sym,
+                        "label": exit_timing.get("label"),
+                        "summary": exit_timing.get("summary"),
+                        "conditions": exit_timing.get("conditions") or [],
+                    }
+                )
+
+    except Exception as e:
+        # Best-effort hints; never break portfolio page.
+        print(f"WARN(PortfolioSvc): action hints evaluation failed: {e}")
+
     response_data = {
         "summary": portfolio_summary,
         "positions": grouped_positions_data,
         "underlying_spot_prices": underlying_spot_prices,
+        "action_hints": action_hints,
     }
     return _sanitize_for_json(response_data)
 

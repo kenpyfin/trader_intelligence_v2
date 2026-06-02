@@ -614,6 +614,7 @@ const StrategyOrder = ({ strategy, strategies = [], ticker, expirationDate, gptV
     const [isOrdering, setIsOrdering] = useState({});
     const [orderStatus, setOrderStatus] = useState({});    
     const [showGptInsights, setShowGptInsights] = useState(false);
+    const [showEntryTimingDetails, setShowEntryTimingDetails] = useState({});
 
     // Consolidate strategies for execution from either GPT verdict or standard analysis
     let allStrategies = [];
@@ -891,6 +892,15 @@ const StrategyOrder = ({ strategy, strategies = [], ticker, expirationDate, gptV
             'Low': 'error'
         }[confidence] || 'default';
 
+        const entryTiming = gptVerdict?.execution_recommendations?.entry_timing;
+        const entrySeverity = entryTiming?.status === 'enter_now' ? 'success' : entryTiming?.status === 'wait' ? 'warning' : 'info';
+        const entryLabel =
+          entryTiming?.status === 'enter_now'
+            ? 'Good time to enter'
+            : entryTiming?.status === 'wait'
+              ? 'Wait — entry conditions not met'
+              : 'Review entry conditions manually';
+
         return (
             <Card key={index} variant="outlined" sx={{ mb: 2 }}>
                 <CardContent>
@@ -898,6 +908,42 @@ const StrategyOrder = ({ strategy, strategies = [], ticker, expirationDate, gptV
                         <Typography variant="h6">{strategy.name || strategy.type}</Typography>
                         <Chip label={`${confidence} Confidence`} color={confidenceColor} size="small" variant="outlined" />
                     </Box>
+
+                    {entryTiming && (
+                        <Box sx={{ mb: 2 }}>
+                            <Alert severity={entrySeverity} sx={{ mb: 1 }}>
+                                <AlertTitle>{entryTiming.status === 'enter_now' ? 'Timing: Enter Now' : entryTiming.status === 'wait' ? 'Timing: Wait' : 'Timing: Review'}</AlertTitle>
+                                {entryLabel}
+                            </Alert>
+                            {(Array.isArray(entryTiming.conditions) && entryTiming.conditions.length > 0) && (
+                                <>
+                                    <Button
+                                        size="small"
+                                        variant="text"
+                                        onClick={() =>
+                                            setShowEntryTimingDetails((prev) => ({ ...prev, [index]: !prev[index] }))
+                                        }
+                                        sx={{ mb: 1 }}
+                                    >
+                                        {showEntryTimingDetails[index] ? 'Hide' : 'Show'} entry condition details
+                                    </Button>
+                                    <Collapse in={!!showEntryTimingDetails[index]}>
+                                        <List dense disablePadding>
+                                            {entryTiming.conditions.map((c, i) => (
+                                                <ListItem key={i} disablePadding sx={{ mb: 0.5 }}>
+                                                    <ListItemText
+                                                        primaryTypographyProps={{ variant: 'caption', fontWeight: 600 }}
+                                                        primary={`${c.status === 'met' ? '✓' : c.status === 'unmet' ? '!' : '?'} ${c.text}`}
+                                                        secondary={c.reason}
+                                                    />
+                                                </ListItem>
+                                            ))}
+                                        </List>
+                                    </Collapse>
+                                </>
+                            )}
+                        </Box>
+                    )}
 
                     <Typography variant="subtitle2" gutterBottom>Strategy Legs:</Typography>
                     <List dense disablePadding sx={{ mb: 2, bgcolor: '#f5f5f5', borderRadius: 1 }}>

@@ -11,6 +11,7 @@ from .methodologies.gpt_verdict import generate_gpt_verdict
 from .methodologies.perplexity_research import PerplexityConfigError, PerplexityAPIError
 from .strike_normalization import default_normalizer
 from .greeks_repair import default_greeks_validator
+from .execution_signal_evaluator import build_entry_context, evaluate_entry_timing
 
 # This file is a migration of the analysis logic from option_trade.py.
 # All Streamlit-specific code (st.*) has been removed.
@@ -1699,6 +1700,22 @@ def run_analysis(ticker: str, expiration_date: date, r_current: float = 0.05, ra
         analysis_result_package['final_bias'] = gpt_verdict.get('final_bias', 'Neutral')
         analysis_result_package['final_conclusion_html'] = gpt_verdict.get('summary_html', '<p>Failed to retrieve AI summary.</p>')
         analysis_result_package['gpt_verdict'] = gpt_verdict
+
+        # Evaluate whether entry conditions indicate the right timing to enter.
+        # (Only meaningful for GPT/Web verdict runs where entry_conditions are present.)
+        try:
+            recs = (gpt_verdict.get('execution_recommendations') or {})
+            entry_conditions = recs.get('entry_conditions') or []
+            if isinstance(entry_conditions, list) and entry_conditions:
+                entry_ctx = build_entry_context(analysis_result_package)
+                entry_timing = evaluate_entry_timing(
+                    entry_conditions,
+                    entry_ctx,
+                )
+                analysis_result_package['gpt_verdict'].setdefault('execution_recommendations', {})['entry_timing'] = entry_timing
+        except Exception as _e:
+            # Timing hints are best-effort; do not fail the whole analysis.
+            pass
         
         # Generate recommended strategy based on the GPT bias and guidance hints
         primary_hint = (gpt_verdict.get('execution_recommendations') or {}).get('primary_strategy')
