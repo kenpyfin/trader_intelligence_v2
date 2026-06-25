@@ -8,8 +8,13 @@ from ..models.portfolio_models import CloseStrategyRequest, CloseStockPositionRe
 from .connection_manager import connection_manager
 from .order_tracking_service import list_tracked_orders
 from ..analytics.execution_signal_evaluator import (
+    aggregate_exit_timing,
     build_exit_context_from_portfolio,
-    evaluate_exit_timing,
+)
+from ..analytics.exit_signal_agent import pending_agent_evaluations
+from .exit_signal_eval_service import (
+    get_cached_evaluation,
+    timing_from_cached_evaluations,
 )
 from .strategy_signature import strategy_signature
 
@@ -137,8 +142,12 @@ async def get_grouped_open_positions():
     # --- Step 5b: Evaluate close-now action hints for open option strategies ---
     action_hints = {
         "close_now": [],
-        "evaluated_at": datetime.utcnow().isoformat(),
+        "exit_eval_source": "agent",
+        "agent_cache_evaluated_at": None,
+        "exit_eval_refresh_pending": False,
+        "strategy_exit_evals": {},
     }
+    pending_exit_refresh_jobs = []
 
     try:
         tracked_orders = list_tracked_orders(limit=120)
@@ -292,7 +301,54 @@ async def get_grouped_open_positions():
                 initial_credit_received=initial_credit_received,
             )
 
-            exit_timing = evaluate_exit_timing(conditions_for_eval, ctx)
+            cached = get_cached_evaluation(sig, conditions_for_eval)
+            cache_fresh = bool(cached and not cached.get("_stale"))
+            cache_evaluated_at = cached.get("evaluated_at") if cached else None
+            cached_evaluations = (cached.get("evaluations") if cached else None) or []
+
+            refresh_job = {
+                "signature": sig,
+                "symbol": sym,
+                "conditions": conditions_for_eval,
+                "underlying_price": underlying_price,
+                "aggregate_unrealized_pnl": aggregate_unrealized_pnl,
+                "aggregate_market_value": aggregate_market_value,
+                "dte": dte,
+                "strategy_is_credit_spread": strategy_is_credit,
+                "initial_credit_received": initial_credit_received,
+                "legs": legs_list,
+            }
+
+            if cached_evaluations and cache_fresh:
+                exit_timing = timing_from_cached_evaluations(
+                    conditions_for_eval,
+                    cached_evaluations,
+                )
+                action_hints["exit_eval_source"] = "agent_cache"
+                action_hints["agent_cache_evaluated_at"] = cache_evaluated_at
+            elif cached_evaluations:
+                exit_timing = timing_from_cached_evaluations(
+                    conditions_for_eval,
+                    cached_evaluations,
+                )
+                action_hints["exit_eval_source"] = "cache_stale"
+                if not action_hints.get("agent_cache_evaluated_at"):
+                    action_hints["agent_cache_evaluated_at"] = cache_evaluated_at
+                pending_exit_refresh_jobs.append(refresh_job)
+            else:
+                exit_timing = aggregate_exit_timing(
+                    pending_agent_evaluations(conditions_for_eval)
+                )
+                action_hints["exit_eval_source"] = "agent_pending"
+                pending_exit_refresh_jobs.append(refresh_job)
+
+            action_hints["strategy_exit_evals"][sym] = {
+                "label": exit_timing.get("label"),
+                "summary": exit_timing.get("summary"),
+                "conditions": exit_timing.get("conditions") or [],
+                "evaluated_at": cache_evaluated_at,
+                "aggregate_status": exit_timing.get("status"),
+            }
 
             if exit_timing.get("status") == "close_now":
                 action_hints["close_now"].append(
@@ -301,12 +357,22 @@ async def get_grouped_open_positions():
                         "label": exit_timing.get("label"),
                         "summary": exit_timing.get("summary"),
                         "conditions": exit_timing.get("conditions") or [],
+                        "evaluated_at": cache_evaluated_at,
                     }
                 )
 
     except Exception as e:
         # Best-effort hints; never break portfolio page.
         print(f"WARN(PortfolioSvc): action hints evaluation failed: {e}")
+
+    if pending_exit_refresh_jobs:
+        action_hints["exit_eval_refresh_pending"] = True
+        try:
+            from .exit_signal_eval_service import refresh_jobs_sync
+
+            asyncio.create_task(asyncio.to_thread(refresh_jobs_sync, pending_exit_refresh_jobs))
+        except Exception as refresh_exc:
+            print(f"WARN(PortfolioSvc): could not schedule exit eval refresh: {refresh_exc}")
 
     response_data = {
         "summary": portfolio_summary,

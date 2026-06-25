@@ -392,6 +392,27 @@ def evaluate_exit_timing(conditions: List[str], context: Dict[str, Any]) -> Timi
     return evaluate_conditions(conditions, context, mode="exit")
 
 
+def aggregate_exit_timing(evals: List[ConditionEval]) -> TimingResult:
+    """Aggregate per-condition exit evaluations (OR logic for close_now)."""
+    return _aggregate_timing(evals, mode="exit")
+
+
+def evaluate_exit_timing_hybrid(
+    conditions: List[str],
+    context: Dict[str, Any],
+    agent_evaluations: Optional[List[Dict[str, Any]]] = None,
+) -> TimingResult:
+    """
+    Regex-first exit evaluation; agent cache fills in unknown conditions.
+    """
+    from src.services.exit_signal_eval_service import merge_regex_and_agent_evaluations
+
+    texts = [c for c in (conditions or []) if isinstance(c, str) and c.strip()]
+    merged = merge_regex_and_agent_evaluations(texts, context, agent_evaluations)
+    result = aggregate_exit_timing(merged)
+    return result
+
+
 def _eval_max_profit_condition(text: str, ctx: Dict[str, Any]) -> Optional[bool]:
     """
     Example text:

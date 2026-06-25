@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -25,6 +25,16 @@ from ..my_libs_py3.db import connect_mongo
 MODEL_VERSION = "peer-v1.0"
 SNAPSHOT_COLLECTION = "stock_selection_snapshots"
 FRESHNESS_TARGET_MINUTES = 24 * 60
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _ensure_utc_aware(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _safe_float(value: Any) -> Optional[float]:
@@ -182,8 +192,9 @@ def _load_fundamentals(max_tickers: int) -> pd.DataFrame:
     return df
 
 
-def _price_metrics_for_ticker(ticker: str, lookback: int = 90) -> Optional[Dict[str, Any]]:
-    conn = connect_mongo("stocks_daily")
+def _price_metrics_for_ticker(ticker: str, lookback: int = 90, conn=None) -> Optional[Dict[str, Any]]:
+    if conn is None:
+        conn = connect_mongo("stocks_daily")
     coll = conn.db[ticker]
     docs = list(coll.find({}, {"_id": 0, "Close": 1, "Volume": 1, "TimeStamp": 1}).sort("TimeStamp", -1).limit(lookback))
     if len(docs) < 30:
@@ -224,8 +235,9 @@ def _price_metrics_for_ticker(ticker: str, lookback: int = 90) -> Optional[Dict[
 
 def _load_daily_metrics(tickers: pd.Series) -> pd.DataFrame:
     rows = []
+    conn = connect_mongo("stocks_daily")
     for ticker in tickers:
-        metric = _price_metrics_for_ticker(ticker)
+        metric = _price_metrics_for_ticker(ticker, conn=conn)
         if metric is not None:
             rows.append(metric)
     return pd.DataFrame(rows)
@@ -420,7 +432,7 @@ def run_selection_snapshot(
     strategy_id: str = DEFAULT_STRATEGY_ID,
 ) -> Dict[str, Any]:
     strategy = get_strategy(strategy_id)
-    generated_at = datetime.utcnow()
+    generated_at = _utc_now()
     fundamentals = _load_fundamentals(max_tickers=max_tickers)
     if fundamentals.empty:
         return {"status": "error", "message": "No fundamentals available for snapshot generation."}
@@ -549,7 +561,7 @@ def get_health(strategy_id: str = DEFAULT_STRATEGY_ID) -> Dict[str, Any]:
             "freshness_target_minutes": FRESHNESS_TARGET_MINUTES,
             "details": {"reason": "invalid_generated_at"},
         }
-    age_minutes = int((datetime.utcnow() - generated_at).total_seconds() // 60)
+    age_minutes = int((_utc_now() - _ensure_utc_aware(generated_at)).total_seconds() // 60)
     status = "healthy" if age_minutes <= FRESHNESS_TARGET_MINUTES else "stale"
     return {
         "status": status,

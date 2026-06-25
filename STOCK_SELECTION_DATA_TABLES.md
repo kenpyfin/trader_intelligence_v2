@@ -31,7 +31,7 @@ This is enough to build a robust first version of stock selection based on trend
 | `stocks_10minute` | 29,865 | `AAPL`, `MSFT`, `SPY` | Intraday momentum/liquidity checks |
 | `iv_history` | 5,916 | `AAPL`, `NVDA`, `TSLA` | IV rank / vol regime context |
 | `all_symbol` | 27 | `screenerModel`, `cantrade`, `momentum` | Fundamental ranking inputs |
-| `trader_intelligence` | 3 | `analysis_history`, `verdicts`, `tracked_orders` | Derived signals/history (secondary) |
+| `trader_intelligence` | 4 | `analysis_history`, `verdicts`, `tracked_orders`, `company_deep_dive` | Derived signals/history (secondary) |
 | `trade_log` | 218 | per-ticker collections | Trading logs (not selection core) |
 | `pair_trade_log` | 473 | `TICKER1_TICKER2` collections | Pair-trade logs (not selection core) |
 
@@ -360,6 +360,20 @@ Use this section as the source of truth for field semantics when implementing se
 
 **Selection value**
 - Low for initial screener; useful for post-selection execution analytics.
+
+### `trader_intelligence.company_deep_dive`
+
+**Observed fields**
+- `cache_key` (ticker uppercase), `ticker`,
+- `markdown`, `sources`, `web_search_performed`,
+- `model`, `version`, `generated_at`.
+
+**Usage**
+- Cached AI company introduction deep dive in [`backend/src/services/company_intel_service.py`](backend/src/services/company_intel_service.py).
+- TTL default: 30 days (`COMPANY_DEEP_DIVE_TTL_DAYS`).
+
+**Selection value**
+- Low for screener math; useful as qualitative context on Analysis page.
 
 ---
 

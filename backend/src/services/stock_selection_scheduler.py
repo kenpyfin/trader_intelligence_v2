@@ -1,7 +1,9 @@
 """
-Thin scheduler entrypoints for stock selection snapshot refresh.
+Optional manual/cron entrypoints for stock selection snapshot refresh.
 
-These functions are intended for cron/Airflow style invocation.
+Daily refresh is normally triggered on user login: the frontend checks
+`/api/stock-selection/health` and runs `run_selection_snapshot_if_stale`
+when the latest snapshot timestamp is older than the freshness target.
 """
 
 from .stock_selection_service import run_selection_snapshot

@@ -12,6 +12,7 @@ services:
     # The backend container shares the host's network.
     # It will be accessible on localhost at the port specified in the .env file.
     network_mode: "host"
+    restart: unless-stopped
     volumes:
       # Mount the source code for hot-reloading during development
       - ./backend/src:/app/src
@@ -40,5 +41,6 @@ services:
       # This allows the frontend container to resolve 'host.docker.internal'
       # to the host machine's IP address, enabling it to reach the backend service.
       - "host.docker.internal:host-gateway"
+    restart: unless-stopped
     depends_on:
       - backend

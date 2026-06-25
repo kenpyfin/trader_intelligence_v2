@@ -181,3 +181,42 @@ class FMPClient:
         except Exception:
             # Gracefully handle missing endpoint or HTTP/rate-limit errors
             return pd.DataFrame()
+
+    def company_profile(self, ticker: str) -> dict:
+        """Return company profile dict for a ticker (FMP /profile endpoint)."""
+        url = f"{self.url_root_v3}profile/{ticker.upper()}?apikey={self.api_key}"
+        try:
+            data = self.fetch_url_with_rate_limit(url)
+        except Exception:
+            return {}
+        if isinstance(data, list) and data:
+            return data[0] if isinstance(data[0], dict) else {}
+        if isinstance(data, dict) and data and not any(k.lower().startswith("error") for k in data.keys()):
+            return data
+        return {}
+
+    def key_metrics_ttm(self, ticker: str) -> dict:
+        """Return trailing-twelve-month key metrics for a ticker."""
+        url = f"{self.url_root_v3}key-metrics-ttm/{ticker.upper()}?apikey={self.api_key}"
+        try:
+            data = self.fetch_url_with_rate_limit(url)
+        except Exception:
+            return {}
+        if isinstance(data, list) and data:
+            return data[0] if isinstance(data[0], dict) else {}
+        if isinstance(data, dict) and data and not any(k.lower().startswith("error") for k in data.keys()):
+            return data
+        return {}
+
+    def ratios_ttm(self, ticker: str) -> dict:
+        """Return trailing-twelve-month financial ratios for a ticker."""
+        url = f"{self.url_root_v3}ratios-ttm/{ticker.upper()}?apikey={self.api_key}"
+        try:
+            data = self.fetch_url_with_rate_limit(url)
+        except Exception:
+            return {}
+        if isinstance(data, list) and data:
+            return data[0] if isinstance(data[0], dict) else {}
+        if isinstance(data, dict) and data and not any(k.lower().startswith("error") for k in data.keys()):
+            return data
+        return {}

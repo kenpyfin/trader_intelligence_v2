@@ -1,4 +1,5 @@
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -95,4 +96,52 @@ def test_get_strategy_document_peer_v1_loads_markdown():
     assert result["status"] == "success"
     assert "peer_v1" in result["markdown"]
     assert "sell_premium" in result["markdown"]
+
+
+class _FakeSnapshotCollection:
+    def __init__(self, doc):
+        self._doc = doc
+
+    def find_one(self, *_args, **_kwargs):
+        return self._doc
+
+
+def test_get_health_handles_timezone_aware_generated_at(monkeypatch):
+    generated_at = datetime.now(timezone.utc) - timedelta(hours=2)
+    doc = {
+        "generated_at": generated_at,
+        "strategy_id": "peer_v1",
+        "as_of": "2026-06-03",
+        "model_version": "peer-v1.0",
+    }
+    monkeypatch.setattr(
+        stock_selection_service,
+        "_snapshot_collection",
+        lambda: _FakeSnapshotCollection(doc),
+    )
+
+    result = stock_selection_service.get_health(strategy_id="peer_v1")
+
+    assert result["status"] == "healthy"
+    assert result["age_minutes"] == 120
+
+
+def test_get_health_handles_naive_generated_at(monkeypatch):
+    generated_at = datetime.utcnow() - timedelta(hours=30)
+    doc = {
+        "generated_at": generated_at,
+        "strategy_id": "peer_v1",
+        "as_of": "2026-06-02",
+        "model_version": "peer-v1.0",
+    }
+    monkeypatch.setattr(
+        stock_selection_service,
+        "_snapshot_collection",
+        lambda: _FakeSnapshotCollection(doc),
+    )
+
+    result = stock_selection_service.get_health(strategy_id="peer_v1")
+
+    assert result["status"] == "stale"
+    assert result["age_minutes"] >= 1800
 

@@ -14,13 +14,17 @@ from .services.analysis_history_service import (
     clear_history_for_ticker,
 )
 from .services.macro_service import get_macro_futures_data, calculate_market_implied_risk_free_rate
-from .services import broker_service, analysis_service
+from .services import broker_service, analysis_service, company_intel_service
 from .routers import portfolio, stock_selection
 from .my_libs_py3.my_data import PriceDataFetcher
-from .analytics.treasury_curve import build_treasury_curve
-from .my_libs_py3.fmp import FMPClient
 from .analytics.methodologies.gpt_verdict import generate_gpt_verdict
 from .services.verdict_service import save_verdict_document, list_verdicts, get_verdict_by_id
+from .services.risk_free_rate_history_service import list_risk_free_rate_history
+from .services.risk_free_rate_scheduler_service import (
+    get_health as get_risk_free_rate_health,
+    get_latest_daily_rate,
+    run_daily_risk_free_rate_if_stale,
+)
 from .services.task_manager import task_manager
 import numpy as np
 import math
@@ -192,46 +196,6 @@ def get_macro_data():
         # Return an error payload instead of a 500 to let the frontend render a friendly message
         return {"error": f"An unexpected error occurred while fetching macro data: {e}"}
 
-@app.get("/yield-curve")
-@app.get("/api/yield-curve")
-async def get_yield_curve(source: str = "treasury", tickers: str = "SPY, QQQ, IWM"):
-    try:
-        standard = [
-            ("1M", 1/12), ("3M", 3/12), ("6M", 6/12), ("1Y", 1.0), ("2Y", 2.0),
-            ("3Y", 3.0), ("5Y", 5.0), ("7Y", 7.0), ("10Y", 10.0), ("20Y", 20.0), ("30Y", 30.0)
-        ]
-        if source.lower() == "treasury":
-            curve = build_treasury_curve(FMPClient())
-            # If FMP yields are unavailable, fall back to a flat curve using ETF-implied rate
-            if not curve.get("terms"):
-                ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
-                rate, logs = await calculate_market_implied_risk_free_rate(ticker_list)
-                if rate is not None:
-                    out = [{"tenor": t, "rate": float(rate)} for t, _ in standard]
-                    return {
-                        "source": "treasury",
-                        "as_of": curve.get("as_of"),
-                        "curve": out,
-                        "logs": logs,
-                        "note": "FMP treasury yields unavailable; using ETF-implied flat curve."
-                    }
-                # As a last resort, keep the internal default rate function (likely 4.5%)
-            rate_fn = curve["rate_fn"]
-            out = [{"tenor": t, "rate": float(rate_fn(T))} for t, T in standard]
-            return {"source": "treasury", "as_of": curve["as_of"], "curve": out}
-        elif source.lower() == "etf":
-            ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
-            rate, logs = await calculate_market_implied_risk_free_rate(ticker_list)
-            if rate is None:
-                return {"source": "etf", "curve": [], "logs": logs, "error": "Could not compute implied rate"}
-            out = [{"tenor": t, "rate": float(rate)} for t, _ in standard]
-            return {"source": "etf", "curve": out, "logs": logs}
-        else:
-            raise HTTPException(status_code=400, detail="Invalid source. Use 'treasury' or 'etf'.")
-    except Exception as e:
-        print(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Failed to build yield curve: {e}")
-
 @app.post("/calculate-risk-free-rate")
 @app.post("/api/calculate-risk-free-rate")  # Alias for nginx proxy compatibility
 async def get_risk_free_rate(request: RiskFreeRateRequest):
@@ -245,6 +209,57 @@ async def get_risk_free_rate(request: RiskFreeRateRequest):
     except Exception as e:
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
+
+@app.get("/risk-free-rate/history")
+@app.get("/api/risk-free-rate/history")
+async def get_risk_free_rate_history(ticker: str = "", limit: int = 200, days: int = 365):
+    """Return historical risk-free rates used in past analyses."""
+    try:
+        loop = asyncio.get_running_loop()
+        data = await loop.run_in_executor(
+            None,
+            lambda: list_risk_free_rate_history(ticker=ticker, limit=limit, days=days),
+        )
+        return data
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to fetch risk-free rate history: {e}")
+
+
+@app.get("/risk-free-rate/health")
+@app.get("/api/risk-free-rate/health")
+async def get_daily_risk_free_rate_health():
+    """Return whether today's market-implied risk-free rate has been calculated."""
+    try:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, get_risk_free_rate_health)
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to fetch risk-free rate health: {e}")
+
+
+@app.get("/risk-free-rate/latest")
+@app.get("/api/risk-free-rate/latest")
+async def get_latest_risk_free_rate():
+    """Return the most recently calculated daily risk-free rate."""
+    try:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, get_latest_daily_rate)
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to fetch latest risk-free rate: {e}")
+
+
+@app.post("/risk-free-rate/run/async")
+@app.post("/api/risk-free-rate/run/async")
+async def run_daily_risk_free_rate_async():
+    """Calculate today's risk-free rate in the background if missing (trading days only)."""
+    try:
+        task_id = task_manager.submit("RiskFreeRate", run_daily_risk_free_rate_if_stale)
+        return {"task_id": task_id, "status_url": f"/api/tasks/{task_id}"}
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to queue risk-free rate calculation: {e}")
 
 @app.post("/analysis/verdicts")
 @app.post("/api/analysis/verdicts")
@@ -292,6 +307,37 @@ async def get_saved_verdict(doc_id: str):
     except Exception as e:
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to fetch verdict: {e}")
+
+@app.get("/analysis/company/fundamentals/{ticker}")
+@app.get("/api/analysis/company/fundamentals/{ticker}")
+async def company_fundamentals(ticker: str):
+    """Fetch company fundamentals from Mongo screener + Finviz."""
+    try:
+        loop = asyncio.get_running_loop()
+        data = await loop.run_in_executor(
+            None,
+            lambda: company_intel_service.get_fundamentals(ticker.upper()),
+        )
+        return {"status": "success", "fundamentals": data}
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to fetch fundamentals: {e}")
+
+
+@app.get("/analysis/company/deep-dive/{ticker}")
+@app.get("/api/analysis/company/deep-dive/{ticker}")
+async def company_deep_dive(ticker: str, force: bool = False):
+    """Return cached company deep dive or generate from Finviz + Mongo via Gemini."""
+    try:
+        loop = asyncio.get_running_loop()
+        data = await loop.run_in_executor(
+            None,
+            lambda: company_intel_service.get_or_create_deep_dive(ticker.upper(), force=force),
+        )
+        return {"status": "success", "deep_dive": data}
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to fetch company deep dive: {e}")
 
 @app.post("/analysis/stock-gpt")
 async def analyze_stock_with_gpt(request: AnalysisRequest):

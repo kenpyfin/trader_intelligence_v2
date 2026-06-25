@@ -25,6 +25,7 @@ import PortfolioPage from './pages/Portfolio';
 import YieldCurvePage from './pages/YieldCurve';
 import TopStocksByGroupPage from './pages/TopStocksByGroup';
 import { StockSelectionTaskProvider, useStockSelectionTask } from './context/StockSelectionTaskContext';
+import { RiskFreeRateTaskProvider } from './context/RiskFreeRateTaskContext';
 
 const theme = createTheme({
   palette: {
@@ -147,16 +148,18 @@ const App = () => {
       <CssBaseline />
       <Router>
         <StockSelectionTaskProvider>
-          <Navigation />
-          <Container maxWidth="xl" sx={{ mt: 4, mb: 4 }}>
-            <Routes>
-              <Route path="/" element={<AnalysisPage />} />
-              <Route path="/portfolio" element={<PortfolioPage />} />
-              <Route path="/rates" element={<YieldCurvePage />} />
-              <Route path="/stock-selection" element={<TopStocksByGroupPage />} />
-            </Routes>
-          </Container>
-          <ScrollToTopButton />
+          <RiskFreeRateTaskProvider>
+            <Navigation />
+            <Container maxWidth="xl" sx={{ mt: 4, mb: 4 }}>
+              <Routes>
+                <Route path="/" element={<AnalysisPage />} />
+                <Route path="/portfolio" element={<PortfolioPage />} />
+                <Route path="/rates" element={<YieldCurvePage />} />
+                <Route path="/stock-selection" element={<TopStocksByGroupPage />} />
+              </Routes>
+            </Container>
+            <ScrollToTopButton />
+          </RiskFreeRateTaskProvider>
         </StockSelectionTaskProvider>
       </Router>
     </ThemeProvider>

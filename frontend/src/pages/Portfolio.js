@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
+import { useTaskPolling } from '../hooks/useTaskPolling';
 
 const isFiniteNumber = (value) => typeof value === 'number' && Number.isFinite(value);
 
@@ -163,6 +164,80 @@ const getEntryGuidanceFor = (sym, legsArr, trackedOrders) => {
 const getMetTimingConditions = (conditions) =>
   (Array.isArray(conditions) ? conditions : []).filter((c) => c && c.status === 'met');
 
+const statusColor = (status) => {
+  if (status === 'met') return '#b45309';
+  if (status === 'unmet') return '#166534';
+  return '#6b7280';
+};
+
+const ConditionEvalDetail = ({ c, showStatus = false }) => (
+  <>
+    <div>
+      {showStatus && c.status ? (
+        <span style={{ fontWeight: 600, color: statusColor(c.status), marginRight: '6px' }}>
+          [{c.status}]
+        </span>
+      ) : null}
+      {c.text}
+    </div>
+    {c.reason ? (
+      <div style={{ fontSize: '0.85em', color: '#78350f', marginTop: '2px', fontStyle: 'italic' }}>
+        {c.reason}
+      </div>
+    ) : null}
+    {Array.isArray(c.tool_trace) && c.tool_trace.length > 0 ? (
+      <details style={{ fontSize: '0.8em', color: '#92400e', marginTop: '4px' }}>
+        <summary style={{ cursor: 'pointer' }}>Agent tool trace ({c.tool_trace.length})</summary>
+        <ul style={{ margin: '4px 0 0 0', paddingLeft: '16px' }}>
+          {c.tool_trace.map((step, idx) => (
+            <li key={idx} style={{ marginBottom: '4px' }}>
+              <strong>{step.tool}</strong>
+              {step.args ? ` ${JSON.stringify(step.args)}` : ''}
+              {step.result ? ` → ${JSON.stringify(step.result).slice(0, 200)}` : ''}
+            </li>
+          ))}
+        </ul>
+      </details>
+    ) : Array.isArray(c.tools_used) && c.tools_used.length > 0 ? (
+      <div style={{ fontSize: '0.8em', color: '#92400e', marginTop: '2px' }}>
+        Tools: {c.tools_used.join(', ')}
+      </div>
+    ) : null}
+  </>
+);
+
+const ExitSignalsAgentPanel = ({ exitEval }) => {
+  if (!exitEval || !Array.isArray(exitEval.conditions) || exitEval.conditions.length === 0) return null;
+  return (
+    <div
+      style={{
+        marginTop: '10px',
+        padding: '10px',
+        background: '#f0f9ff',
+        border: '1px solid #bae6fd',
+        borderRadius: '6px',
+        fontSize: '0.92em',
+      }}
+    >
+      <strong>Exit conditions (agent)</strong>
+      {exitEval.evaluated_at ? (
+        <span style={{ color: '#0369a1', marginLeft: '8px', fontSize: '0.88em' }}>
+          evaluated {new Date(exitEval.evaluated_at).toLocaleString()}
+        </span>
+      ) : (
+        <span style={{ color: '#6b7280', marginLeft: '8px', fontSize: '0.88em' }}>evaluation pending…</span>
+      )}
+      <ul style={{ margin: '8px 0 0 0', paddingLeft: '18px' }}>
+        {exitEval.conditions.map((c, i) => (
+          <li key={i} style={{ marginBottom: '8px' }}>
+            <ConditionEvalDetail c={c} showStatus />
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+};
+
 const ExitTimingConditionsList = ({ conditions, title = 'Why close now' }) => {
   const met = getMetTimingConditions(conditions);
   if (met.length === 0) return null;
@@ -175,12 +250,7 @@ const ExitTimingConditionsList = ({ conditions, title = 'Why close now' }) => {
       <ul style={{ margin: 0, paddingLeft: '18px', listStyle: 'disc' }}>
         {met.map((c, i) => (
           <li key={i} style={{ marginBottom: '6px' }}>
-            <div>{c.text}</div>
-            {c.reason ? (
-              <div style={{ fontSize: '0.85em', color: '#78350f', marginTop: '2px', fontStyle: 'italic' }}>
-                {c.reason}
-              </div>
-            ) : null}
+            <ConditionEvalDetail c={c} />
           </li>
         ))}
       </ul>
@@ -320,6 +390,16 @@ const ActionHintsBanner = ({ hints }) => {
       </div>
       <div style={{ fontSize: '0.95em', color: '#9a3412', marginBottom: '10px' }}>
         Based on your snapshot exit conditions, these open option strategies look ready to close.
+        {hints.agent_cache_evaluated_at ? (
+          <span style={{ display: 'block', fontSize: '0.88em', marginTop: '4px' }}>
+            Agent evaluation cached at {new Date(hints.agent_cache_evaluated_at).toLocaleString()}
+            {hints.exit_eval_source === 'cache_stale' ? ' (stale — refreshing in background)' : ''}
+          </span>
+        ) : hints.exit_eval_refresh_pending ? (
+          <span style={{ display: 'block', fontSize: '0.88em', marginTop: '4px' }}>
+            Agent evaluation in progress… reload in a minute for results.
+          </span>
+        ) : null}
       </div>
       <ul style={{ margin: 0, paddingLeft: '18px' }}>
         {closeNow.map((h) => {
@@ -336,7 +416,7 @@ const ActionHintsBanner = ({ hints }) => {
                 <ul style={{ margin: '6px 0 0 0', paddingLeft: '18px', fontSize: '0.92em' }}>
                   {met.map((c, i) => (
                     <li key={i} style={{ marginBottom: '4px' }}>
-                      {c.text}
+                      <ConditionEvalDetail c={c} />
                     </li>
                   ))}
                 </ul>
@@ -421,16 +501,32 @@ const PortfolioPage = () => {
   const [closingStatus, setClosingStatus] = useState({});
   const [stockClosingStatus, setStockClosingStatus] = useState({});
 
+  const fetchOpenPositions = useCallback(async () => {
+    try {
+      const response = await axios.get('/api/portfolio/open-positions');
+      setPortfolioData(response.data);
+      return response.data;
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Failed to fetch open positions.');
+      return null;
+    }
+  }, []);
+
+  const {
+    startTask: startExitEvalRefresh,
+    loading: exitEvalRefreshing,
+    taskStatus: exitEvalTaskStatus,
+    error: exitEvalError,
+    result: exitEvalResult,
+  } = useTaskPolling(2000, {
+    persistedTaskStorageKey: 'portfolio_exit_eval_task',
+    stopOnUnmount: false,
+  });
+
   useEffect(() => {
-    const fetchOpenPositions = async () => {
-      try {
-        const response = await axios.get('/api/portfolio/open-positions');
-        setPortfolioData(response.data);
-      } catch (err) {
-        setError(err.response?.data?.detail || 'Failed to fetch open positions.');
-      } finally {
-        setLoading(false);
-      }
+    const load = async () => {
+      await fetchOpenPositions();
+      setLoading(false);
     };
 
     const fetchRecentOrders = async () => {
@@ -454,10 +550,19 @@ const PortfolioPage = () => {
       }
     };
 
-    fetchOpenPositions();
+    load();
     fetchRecentOrders();
     fetchTrackedOrders();
-  }, []);
+  }, [fetchOpenPositions]);
+
+  useEffect(() => {
+    if (!exitEvalResult) return;
+    fetchOpenPositions();
+  }, [exitEvalResult, fetchOpenPositions]);
+
+  const handleRefreshExitEvals = () => {
+    startExitEvalRefresh('/api/portfolio/refresh-exit-evals', {}, 'Exit Signal Evaluation');
+  };
 
   const handleCloseStrategy = async (symbol) => {
     setClosingStatus(prev => ({ ...prev, [symbol]: { inProgress: true } }));
@@ -465,7 +570,7 @@ const PortfolioPage = () => {
     const legsToClose = portfolioData.positions.options[symbol].map(leg => ({
         symbol: leg.symbol,
         secType: 'OPT',
-        expiry_date: leg.expiry?.replace(/-/g, ''),
+        expiry: leg.expiry,
         strike: leg.strike,
         right: leg.right,
         exchange: leg.exchange,
@@ -530,7 +635,7 @@ const PortfolioPage = () => {
     );
   };
 
-const StrategyCard = ({ symbol, legs, entryGuidance, underlyingSpotPrice, closeNowHint }) => {
+const StrategyCard = ({ symbol, legs, entryGuidance, underlyingSpotPrice, closeNowHint, exitEval }) => {
     const status = closingStatus[symbol];
     const isClosing = status?.inProgress;
     const legTotal = legs.reduce((acc, leg) => acc + leg.position, 0);
@@ -575,6 +680,7 @@ const StrategyCard = ({ symbol, legs, entryGuidance, underlyingSpotPrice, closeN
                     ) : null}
                   </div>
                 )}
+                <ExitSignalsAgentPanel exitEval={exitEval} />
                 <div style={{ marginTop: '6px', fontSize: '0.95em' }}>
                   <strong>Strategy Unrealized P/L:</strong>{' '}
                   <span style={{ color: aggregatePnlColor }}>
@@ -783,6 +889,9 @@ const StrategyCard = ({ symbol, legs, entryGuidance, underlyingSpotPrice, closeN
     if (h && h.symbol) acc[h.symbol] = h;
     return acc;
   }, {});
+  const exitEvalBySymbol = actionHints.strategy_exit_evals || {};
+  const exitEvalPending = Boolean(actionHints.exit_eval_refresh_pending);
+  const exitEvalBusy = exitEvalRefreshing || exitEvalPending;
 
   return (
     <div>
@@ -814,8 +923,44 @@ const StrategyCard = ({ symbol, legs, entryGuidance, underlyingSpotPrice, closeN
         <>
           {hasOptionPositions && (
             <div style={{marginTop: '24px'}}>
-                <h2>Open Option Strategies</h2>
-                <p>This page shows all open option positions in your account, grouped by underlying ticker.</p>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '16px', flexWrap: 'wrap', marginBottom: '8px' }}>
+                  <div>
+                    <h2 style={{ margin: 0 }}>Open Option Strategies</h2>
+                    <p style={{ margin: '8px 0 0 0' }}>
+                      This page shows all open option positions in your account, grouped by underlying ticker.
+                    </p>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '6px' }}>
+                    <button
+                      type="button"
+                      onClick={handleRefreshExitEvals}
+                      disabled={exitEvalBusy}
+                      style={{
+                        backgroundColor: exitEvalBusy ? '#d1d5db' : '#2563eb',
+                        color: 'white',
+                        border: 'none',
+                        padding: '8px 14px',
+                        borderRadius: '6px',
+                        cursor: exitEvalBusy ? 'not-allowed' : 'pointer',
+                        fontWeight: 600,
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {exitEvalBusy ? 'Re-evaluating exit conditions…' : 'Re-evaluate exit conditions'}
+                    </button>
+                    {exitEvalRefreshing && exitEvalTaskStatus?.message ? (
+                      <span style={{ fontSize: '0.85em', color: '#6b7280' }}>{exitEvalTaskStatus.message}</span>
+                    ) : null}
+                    {exitEvalError ? (
+                      <span style={{ fontSize: '0.85em', color: '#b91c1c' }}>{exitEvalError}</span>
+                    ) : null}
+                    {!exitEvalRefreshing && exitEvalResult ? (
+                      <span style={{ fontSize: '0.85em', color: '#166534' }}>
+                        Updated {exitEvalResult.refreshed ?? 0} strateg{exitEvalResult.refreshed === 1 ? 'y' : 'ies'}.
+                      </span>
+                    ) : null}
+                  </div>
+                </div>
                 {Object.entries(optionPositions).map(([symbol, legs]) => (
                     <StrategyCard
                       key={symbol}
@@ -824,6 +969,7 @@ const StrategyCard = ({ symbol, legs, entryGuidance, underlyingSpotPrice, closeN
                       entryGuidance={getEntryGuidanceFor(symbol, legs, trackedOrders)}
                       underlyingSpotPrice={underlyingSpotPrices[symbol]}
                       closeNowHint={closeNowBySymbol[symbol]}
+                      exitEval={exitEvalBySymbol[symbol]}
                     />
                 ))}
             </div>

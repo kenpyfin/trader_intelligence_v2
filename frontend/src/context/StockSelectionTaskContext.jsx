@@ -1,7 +1,14 @@
-import React, { createContext, useCallback, useContext, useMemo } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef } from 'react';
+import axios from 'axios';
 import { useTaskPolling } from '../hooks/useTaskPolling';
 
 const STOCK_SELECTION_TASK_STORAGE_KEY = 'stock_selection_active_task';
+const DEFAULT_AUTO_REFRESH_PAYLOAD = {
+  force: false,
+  max_tickers: 800,
+  top_n_per_group: 10,
+  strategy_id: 'peer_v1',
+};
 
 const StockSelectionTaskContext = createContext(null);
 
@@ -20,6 +27,36 @@ export const StockSelectionTaskProvider = ({ children, endPollingWhenProviderUnm
     (payload) => startTask('/api/stock-selection/run/async', payload, 'Stock Selection'),
     [startTask]
   );
+  const startStockSelectionRecomputeRef = useRef(startStockSelectionRecompute);
+  startStockSelectionRecomputeRef.current = startStockSelectionRecompute;
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const refreshIfStaleOnLogin = async () => {
+      try {
+        const persistedTask = localStorage.getItem(STOCK_SELECTION_TASK_STORAGE_KEY);
+        if (persistedTask) {
+          return;
+        }
+
+        const healthResponse = await axios.get('/api/stock-selection/health');
+        if (cancelled || healthResponse?.data?.status === 'healthy') {
+          return;
+        }
+
+        await startStockSelectionRecomputeRef.current(DEFAULT_AUTO_REFRESH_PAYLOAD);
+      } catch (_error) {
+        // Best effort on app load; user can manually refresh from Stock Selection page.
+      }
+    };
+
+    void refreshIfStaleOnLogin();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const value = useMemo(
     () => ({

@@ -46,7 +46,7 @@ fi
 
 # 2. Stop and remove the old containers, networks, and volumes.
 echo "🧹 Stopping and removing old containers..."
-docker-compose down
+docker compose down
 
 # 4. Clean up any unused Docker images.
 echo "🗑️  Cleaning up dangling images..."
@@ -57,9 +57,9 @@ docker system prune -af
 #    The '-d' flag runs the containers in the background.
 echo "🏗️  Building and restarting Docker services (default backend: ib_async)..."
 if [[ "$DETACHED" -eq 1 ]]; then
-  docker-compose up --build -d
+  docker compose up --build -d
 else
-  docker-compose up --build
+  docker compose up --build
 fi
 
 
