@@ -22,6 +22,7 @@ from src.models.analysis_models import (
     ValidationMode
 )
 from src.services import analysis_service, analysis_history_service
+from src.services.risk_free_rate_scheduler_service import is_us_market_hours
 
 # Import validation components
 from src.services.validated_analysis_service import ValidatedAnalysisService
@@ -423,6 +424,13 @@ async def calculate_market_rate(request: RiskFreeRateRequest):
     Calculates a market-implied risk-free rate from liquid ETF option chains.
     """
     try:
+        if not is_us_market_hours():
+            return {
+                "risk_free_rate": None,
+                "logs": ["Skipped: US equity market is closed."],
+                "skipped": True,
+                "reason": "outside_market_hours",
+            }
         # Convert string date from request to date object for the service
         expiration_date = datetime.strptime(request.expiration_date, '%Y%m%d').date()
         

@@ -1,5 +1,4 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef } from 'react';
-import axios from 'axios';
+import React, { createContext, useCallback, useContext, useMemo } from 'react';
 import { useTaskPolling } from '../hooks/useTaskPolling';
 
 const STOCK_SELECTION_TASK_STORAGE_KEY = 'stock_selection_active_task';
@@ -16,6 +15,7 @@ const StockSelectionTaskContext = createContext(null);
  * @param {{ children: React.ReactNode, endPollingWhenProviderUnmounts?: boolean }} props
  * When `endPollingWhenProviderUnmounts` is true (e.g. tests), polling stops when the provider unmounts.
  * Default false so recomputation continues while navigating the app.
+ * Daily refresh is handled by the backend background scheduler.
  */
 export const StockSelectionTaskProvider = ({ children, endPollingWhenProviderUnmounts = false }) => {
   const { startTask, loading, taskStatus, error, result, setError } = useTaskPolling(2000, {
@@ -24,39 +24,10 @@ export const StockSelectionTaskProvider = ({ children, endPollingWhenProviderUnm
   });
 
   const startStockSelectionRecompute = useCallback(
-    (payload) => startTask('/api/stock-selection/run/async', payload, 'Stock Selection'),
+    (payload = DEFAULT_AUTO_REFRESH_PAYLOAD) =>
+      startTask('/api/stock-selection/run/async', payload, 'Stock Selection'),
     [startTask]
   );
-  const startStockSelectionRecomputeRef = useRef(startStockSelectionRecompute);
-  startStockSelectionRecomputeRef.current = startStockSelectionRecompute;
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const refreshIfStaleOnLogin = async () => {
-      try {
-        const persistedTask = localStorage.getItem(STOCK_SELECTION_TASK_STORAGE_KEY);
-        if (persistedTask) {
-          return;
-        }
-
-        const healthResponse = await axios.get('/api/stock-selection/health');
-        if (cancelled || healthResponse?.data?.status === 'healthy') {
-          return;
-        }
-
-        await startStockSelectionRecomputeRef.current(DEFAULT_AUTO_REFRESH_PAYLOAD);
-      } catch (_error) {
-        // Best effort on app load; user can manually refresh from Stock Selection page.
-      }
-    };
-
-    void refreshIfStaleOnLogin();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   const value = useMemo(
     () => ({

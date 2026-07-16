@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import traceback
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import date, timedelta
 
 from .models.analysis_models import AnalysisRequest, RiskFreeRateRequest, SaveVerdictRequest
@@ -23,9 +24,14 @@ from .services.risk_free_rate_history_service import list_risk_free_rate_history
 from .services.risk_free_rate_scheduler_service import (
     get_health as get_risk_free_rate_health,
     get_latest_daily_rate,
+    is_us_market_hours,
     run_daily_risk_free_rate_if_stale,
 )
 from .services.task_manager import task_manager
+from .services.background_scheduler_service import (
+    start_background_scheduler,
+    stop_background_scheduler,
+)
 import numpy as np
 import math
 import os
@@ -47,10 +53,20 @@ def get_fallback_config() -> FallbackStrategyConfig:
     return _global_fallback_config
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await start_background_scheduler()
+    try:
+        yield
+    finally:
+        await stop_background_scheduler()
+
+
 app = FastAPI(
     title="Trader Intelligence API",
     description="API for stock and option analysis.",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 # Configure CORS middleware to allow cross-origin requests from the frontend
@@ -201,6 +217,13 @@ def get_macro_data():
 async def get_risk_free_rate(request: RiskFreeRateRequest):
     """Calculates the market-implied risk-free rate from a basket of ETFs."""
     try:
+        if not is_us_market_hours():
+            return {
+                "risk_free_rate": None,
+                "logs": ["Skipped: US equity market is closed."],
+                "skipped": True,
+                "reason": "outside_market_hours",
+            }
         # The service now calculates the rate across multiple standard expiries automatically.
         rate, logs = await calculate_market_implied_risk_free_rate(
             tickers=request.tickers
@@ -253,7 +276,7 @@ async def get_latest_risk_free_rate():
 @app.post("/risk-free-rate/run/async")
 @app.post("/api/risk-free-rate/run/async")
 async def run_daily_risk_free_rate_async():
-    """Calculate today's risk-free rate in the background if missing (trading days only)."""
+    """Calculate today's risk-free rate in the background if missing (trading days and market hours only)."""
     try:
         task_id = task_manager.submit("RiskFreeRate", run_daily_risk_free_rate_if_stale)
         return {"task_id": task_id, "status_url": f"/api/tasks/{task_id}"}

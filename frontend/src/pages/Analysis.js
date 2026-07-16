@@ -3140,13 +3140,6 @@ const AnalysisPage = () => {
     return (payload.ticker || entry.ticker || '').trim().toUpperCase();
   };
 
-  const handlePortTickerToVerdictHistory = (entry) => {
-    const normalizedTicker = normalizeHistoryEntryTicker(entry);
-    if (!normalizedTicker) return;
-    setTicker(normalizedTicker);
-    verdictHistorySectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  };
-
   const loadSavedAnalysis = useCallback((payload, meta = {}) => {
     const resultList = Array.isArray(payload) ? payload : (payload ? [payload] : []);
     if (resultList.length === 0) return;
@@ -3206,6 +3199,18 @@ const AnalysisPage = () => {
     setTicker,
     setRiskFreeRate,
   ]);
+
+  const handleOpenHistoryEntry = useCallback((entry) => {
+    if (!entry) return;
+    loadSavedAnalysis(entry.analysis_result || entry.primary_verdict, {
+      source: 'history',
+      analysisMethod: entry.analysis_method || (entry.request_payload || {}).analysis_method,
+      gptModel: entry.gpt_model || (entry.request_payload || {}).gpt_model,
+      expirationRaw: entry.expiration_date_raw || entry.expiration_date,
+      createdAt: entry.created_at,
+      riskFreeRate: entry.risk_free_rate ?? (entry.request_payload || {}).risk_free_rate,
+    });
+  }, [loadSavedAnalysis]);
 
   const rerunAnalysis = useCallback(async (meta = {}) => {
     const normalizedTicker = String(meta.ticker || ticker || '').trim().toUpperCase();
@@ -3644,30 +3649,13 @@ const AnalysisPage = () => {
                 {historyItems.map((entry) => (
                   <Paper key={entry.id} variant="outlined" sx={{ mb: 1 }}>
                     <ListItem
-                      onClick={() => handlePortTickerToVerdictHistory(entry)}
+                      onClick={() => handleOpenHistoryEntry(entry)}
                       sx={{
                         cursor: 'pointer',
                         '&:hover': { bgcolor: 'action.hover' },
                       }}
                       secondaryAction={
                         <Box>
-                          <Button
-                            size="small"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              loadSavedAnalysis(entry.analysis_result || entry.primary_verdict, {
-                                source: 'history',
-                                analysisMethod: entry.analysis_method || (entry.request_payload || {}).analysis_method,
-                                gptModel: entry.gpt_model || (entry.request_payload || {}).gpt_model,
-                                expirationRaw: entry.expiration_date_raw || entry.expiration_date,
-                                createdAt: entry.created_at,
-                                riskFreeRate: entry.risk_free_rate ?? (entry.request_payload || {}).risk_free_rate,
-                              });
-                            }}
-                            sx={{ mr: 1 }}
-                          >
-                            View
-                          </Button>
                           <Button
                             size="small"
                             onClick={(e) => {
