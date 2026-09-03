@@ -1,15 +1,37 @@
 """Time-series of risk-free rates used in past analyses."""
 import datetime
 import math
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pymongo
 
 from ..my_libs_py3.db import connect_mongo
 from .risk_free_rate_scheduler_service import (
     MACRO_METRICS_COLLECTION,
-    is_us_market_hours_for_timestamp,
+    is_us_regular_session_hours_local,
 )
+
+_HISTORY_PROJECTION = {
+    'created_at': 1,
+    'risk_free_rate': 1,
+    'ticker': 1,
+    'analysis_method': 1,
+}
+_VERDICT_PROJECTION = {
+    'created_at': 1,
+    'risk_free_rate': 1,
+    'ticker': 1,
+    'analysis_method': 1,
+    'data.risk_free_rate': 1,
+    'data.market_data.risk_free_rate': 1,
+}
+_METRICS_PROJECTION = {
+    'created_at': 1,
+    'risk_free_rate': 1,
+    'as_of': 1,
+    'tickers': 1,
+    'source': 1,
+}
 
 
 def _to_float(value: Any) -> Optional[float]:
@@ -55,7 +77,7 @@ def _filter_market_hours_points(points: List[Dict[str, Any]]) -> List[Dict[str, 
         created = _parse_created_at(row.get('created_at'))
         if created is None:
             continue
-        if is_us_market_hours_for_timestamp(created):
+        if is_us_regular_session_hours_local(created):
             filtered.append(row)
     return filtered
 
@@ -73,16 +95,26 @@ def _dedupe_latest_per_day(points: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     return sorted(by_day.values(), key=lambda item: item.get('created_at') or '')
 
 
+def _recent_docs(collection, query: Dict[str, Any], projection: Dict[str, int], limit: int) -> Iterable[Dict[str, Any]]:
+    return (
+        collection.find(query, projection)
+        .sort('created_at', pymongo.DESCENDING)
+        .limit(limit)
+    )
+
+
 def list_risk_free_rate_history(
     ticker: str = '',
     limit: int = 200,
     days: int = 365,
 ) -> Dict[str, Any]:
     """
-    Return ascending time-series points of risk-free rates used in analyses.
+    Return ascending time-series points of risk-free rates.
 
-    Primary source: analysis_history (one row per completed run).
-    Supplement: verdicts with explicit risk_free_rate (manual saves).
+    Default (no ticker): daily snapshots from macro_metrics only — small documents,
+    one series for the Rates page.
+
+    Ticker filter: analysis_history and verdicts for that symbol (slim projections).
     """
     conn = connect_mongo('trader_intelligence')
     history_col = conn.db['analysis_history']
@@ -101,89 +133,53 @@ def list_risk_free_rate_history(
     since = datetime.datetime.utcnow() - datetime.timedelta(days=days)
     normalized_ticker = (ticker or '').strip().upper()
 
-    history_query: Dict[str, Any] = {
-        'created_at': {'$gte': since},
-        'risk_free_rate': {'$ne': None},
-    }
-    if normalized_ticker:
-        history_query['ticker'] = normalized_ticker
-
     points: List[Dict[str, Any]] = []
     seen_keys = set()
 
-    cursor = (
-        history_col.find(history_query, {
-            'created_at': 1,
-            'risk_free_rate': 1,
-            'ticker': 1,
-            'analysis_method': 1,
-        })
-        .sort('created_at', pymongo.ASCENDING)
-        .limit(limit)
-    )
-    for doc in cursor:
-        rate = _to_float(doc.get('risk_free_rate'))
-        created = doc.get('created_at')
-        if rate is None or not isinstance(created, datetime.datetime):
-            continue
-        key = (created.replace(microsecond=0).isoformat(), doc.get('ticker'), rate)
-        seen_keys.add(key)
-        points.append({
-            'created_at': created.isoformat(),
-            'risk_free_rate': rate,
-            'ticker': doc.get('ticker'),
-            'analysis_method': doc.get('analysis_method'),
-            'source': 'analysis_run',
-        })
-
-    verdict_query: Dict[str, Any] = {
-        'created_at': {'$gte': since},
-    }
     if normalized_ticker:
-        verdict_query['ticker'] = normalized_ticker
-
-    verdict_cursor = (
-        verdict_col.find(verdict_query, {
-            'created_at': 1,
-            'risk_free_rate': 1,
-            'ticker': 1,
-            'analysis_method': 1,
-            'data': 1,
-        })
-        .sort('created_at', pymongo.ASCENDING)
-        .limit(limit)
-    )
-    for doc in verdict_cursor:
-        rate = _to_float(doc.get('risk_free_rate')) or _extract_rate_from_verdict_data(doc.get('data') or {})
-        created = doc.get('created_at')
-        if rate is None or not isinstance(created, datetime.datetime):
-            continue
-        key = (created.replace(microsecond=0).isoformat(), doc.get('ticker'), rate)
-        if key in seen_keys:
-            continue
-        seen_keys.add(key)
-        points.append({
-            'created_at': created.isoformat(),
-            'risk_free_rate': rate,
-            'ticker': doc.get('ticker'),
-            'analysis_method': doc.get('analysis_method'),
-            'source': 'verdict_save',
-        })
-
-    if not normalized_ticker:
-        metrics_query: Dict[str, Any] = {'created_at': {'$gte': since}}
-        metrics_cursor = (
-            metrics_col.find(metrics_query, {
-                'created_at': 1,
-                'risk_free_rate': 1,
-                'as_of': 1,
-                'tickers': 1,
-                'source': 1,
+        history_query: Dict[str, Any] = {
+            'created_at': {'$gte': since},
+            'risk_free_rate': {'$ne': None},
+            'ticker': normalized_ticker,
+        }
+        for doc in _recent_docs(history_col, history_query, _HISTORY_PROJECTION, limit):
+            rate = _to_float(doc.get('risk_free_rate'))
+            created = doc.get('created_at')
+            if rate is None or not isinstance(created, datetime.datetime):
+                continue
+            key = (created.replace(microsecond=0).isoformat(), doc.get('ticker'), rate)
+            seen_keys.add(key)
+            points.append({
+                'created_at': created.isoformat(),
+                'risk_free_rate': rate,
+                'ticker': doc.get('ticker'),
+                'analysis_method': doc.get('analysis_method'),
+                'source': 'analysis_run',
             })
-            .sort('created_at', pymongo.ASCENDING)
-            .limit(limit)
-        )
-        for doc in metrics_cursor:
+
+        verdict_query: Dict[str, Any] = {
+            'created_at': {'$gte': since},
+            'ticker': normalized_ticker,
+        }
+        for doc in _recent_docs(verdict_col, verdict_query, _VERDICT_PROJECTION, limit):
+            rate = _to_float(doc.get('risk_free_rate')) or _extract_rate_from_verdict_data(doc.get('data') or {})
+            created = doc.get('created_at')
+            if rate is None or not isinstance(created, datetime.datetime):
+                continue
+            key = (created.replace(microsecond=0).isoformat(), doc.get('ticker'), rate)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            points.append({
+                'created_at': created.isoformat(),
+                'risk_free_rate': rate,
+                'ticker': doc.get('ticker'),
+                'analysis_method': doc.get('analysis_method'),
+                'source': 'verdict_save',
+            })
+    else:
+        metrics_query: Dict[str, Any] = {'created_at': {'$gte': since}}
+        for doc in _recent_docs(metrics_col, metrics_query, _METRICS_PROJECTION, limit):
             rate = _to_float(doc.get('risk_free_rate'))
             created = doc.get('created_at')
             if rate is None or not isinstance(created, datetime.datetime):

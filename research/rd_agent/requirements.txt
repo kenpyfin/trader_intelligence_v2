@@ -1,0 +1,2 @@
+rdagent==0.8.0
+pydantic-ai==1.0.0

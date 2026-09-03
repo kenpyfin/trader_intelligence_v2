@@ -1,6 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
-import Plot from 'react-plotly.js';
 import {
   Box,
   Button,
@@ -15,6 +14,10 @@ import {
   Alert,
 } from '@mui/material';
 
+const Plot = lazy(() => import('react-plotly.js'));
+
+const TICKER_DEBOUNCE_MS = 400;
+
 const formatRatePercent = (value) => {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return '—';
@@ -26,16 +29,23 @@ const RiskFreeRateHistoryChart = () => {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [tickerInput, setTickerInput] = useState('');
   const [tickerFilter, setTickerFilter] = useState('');
   const [days, setDays] = useState(365);
+
+  useEffect(() => {
+    const handle = setTimeout(() => {
+      setTickerFilter(tickerInput.trim().toUpperCase());
+    }, TICKER_DEBOUNCE_MS);
+    return () => clearTimeout(handle);
+  }, [tickerInput]);
 
   const fetchHistory = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
-      const params = { limit: 500, days };
-      const normalizedTicker = tickerFilter.trim().toUpperCase();
-      if (normalizedTicker) params.ticker = normalizedTicker;
+      const params = { limit: Math.min(1000, Math.max(days + 50, 400)), days };
+      if (tickerFilter) params.ticker = tickerFilter;
 
       const response = await axios.get('/api/risk-free-rate/history', { params });
       setItems(Array.isArray(response.data?.items) ? response.data.items : []);
@@ -74,6 +84,8 @@ const RiskFreeRateHistoryChart = () => {
     return { x, y, text, sorted };
   }, [items]);
 
+  const showInitialSpinner = loading && items.length === 0 && !error;
+
   return (
     <Paper variant="outlined" sx={{ p: 2, mt: 3 }}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 2, flexWrap: 'wrap', mb: 2 }}>
@@ -87,8 +99,8 @@ const RiskFreeRateHistoryChart = () => {
           <TextField
             label="Ticker filter"
             size="small"
-            value={tickerFilter}
-            onChange={(e) => setTickerFilter(e.target.value.toUpperCase())}
+            value={tickerInput}
+            onChange={(e) => setTickerInput(e.target.value.toUpperCase())}
             placeholder="All tickers"
             sx={{ width: 140 }}
           />
@@ -108,12 +120,13 @@ const RiskFreeRateHistoryChart = () => {
           <Button variant="outlined" size="small" onClick={fetchHistory} disabled={loading}>
             Refresh
           </Button>
+          {loading && items.length > 0 && <CircularProgress size={20} />}
         </Box>
       </Box>
 
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
 
-      {loading ? (
+      {showInitialSpinner ? (
         <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
           <CircularProgress size={28} />
         </Box>
@@ -123,35 +136,43 @@ const RiskFreeRateHistoryChart = () => {
         </Typography>
       ) : (
         <>
-          <Plot
-            data={[
-              {
-                x: plotData.x,
-                y: plotData.y,
-                text: plotData.text,
-                type: 'scatter',
-                mode: 'lines+markers',
-                name: 'Risk-free rate',
-                line: { color: '#1976d2', width: 2 },
-                marker: { size: 6 },
-                hovertemplate: '%{text}<br>%{x}<extra></extra>',
-              },
-            ]}
-            layout={{
-              autosize: true,
-              height: 360,
-              margin: { l: 48, r: 16, t: 16, b: 48 },
-              xaxis: { title: 'Date', type: 'date' },
-              yaxis: { title: 'Rate (%)', tickformat: '.3f' },
-              paper_bgcolor: 'rgba(0,0,0,0)',
-              plot_bgcolor: 'rgba(0,0,0,0)',
-            }}
-            config={{ responsive: true, displayModeBar: false }}
-            style={{ width: '100%' }}
-          />
+          <Suspense
+            fallback={(
+              <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
+                <CircularProgress size={28} />
+              </Box>
+            )}
+          >
+            <Plot
+              data={[
+                {
+                  x: plotData.x,
+                  y: plotData.y,
+                  text: plotData.text,
+                  type: 'scatter',
+                  mode: 'lines+markers',
+                  name: 'Risk-free rate',
+                  line: { color: '#1976d2', width: 2 },
+                  marker: { size: 6 },
+                  hovertemplate: '%{text}<br>%{x}<extra></extra>',
+                },
+              ]}
+              layout={{
+                autosize: true,
+                height: 360,
+                margin: { l: 48, r: 16, t: 16, b: 48 },
+                xaxis: { title: 'Date', type: 'date' },
+                yaxis: { title: 'Rate (%)', tickformat: '.3f' },
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                plot_bgcolor: 'rgba(0,0,0,0)',
+              }}
+              config={{ responsive: true, displayModeBar: false }}
+              style={{ width: '100%' }}
+            />
+          </Suspense>
           <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>
             {plotData.sorted.length} data point{plotData.sorted.length === 1 ? '' : 's'}
-            {tickerFilter.trim() ? ` for ${tickerFilter.trim().toUpperCase()}` : ''}
+            {tickerFilter ? ` for ${tickerFilter}` : ''}
             {' · '}
             Latest: {formatRatePercent(plotData.sorted[plotData.sorted.length - 1]?.risk_free_rate)}
           </Typography>

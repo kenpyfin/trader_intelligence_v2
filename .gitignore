@@ -59,3 +59,7 @@ backend/venv/*
 backend/src/__pycache__/*
 backend/src/my_libs_py3/.ipynb_checkpoints/*
 frontend/build/*
+
+.cursor/*
+.claude/*
+

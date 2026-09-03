@@ -3422,6 +3422,11 @@ const AnalysisPage = () => {
                     value={selectedExpiration}
                     label="Expiration Date"
                     onChange={e => setSelectedExpiration(e.target.value)}
+                    MenuProps={{
+                      PaperProps: {
+                        sx: { maxHeight: 280 },
+                      },
+                    }}
                   >
                     {expirations.map(exp => (
                       <MenuItem key={exp} value={exp}>

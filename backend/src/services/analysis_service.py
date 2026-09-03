@@ -24,17 +24,15 @@ from src.my_libs_py3.db import mongo
 
 async def get_option_expirations(ticker: str):
     """
-    Fetches the next 10 available option expiration dates for a given ticker.
+    Fetches all available option expiration dates for a given ticker,
+    sorted ascending as YYYYMMDD strings.
     """
     trader = await connection_manager.get_trader()
     # This will require a new method in IBTrader
     expirations = await trader.get_option_expirations(ticker)
-    
-    # The dates from IB are strings 'YYYYMMDD'. Sorting them is correct.
-    sorted_expirations = sorted(expirations)
-    
-    # Return up to the next 10 dates
-    return sorted_expirations[:10]
+
+    # Dates from the broker are strings 'YYYYMMDD'. Deduplicate and sort.
+    return sorted(set(expirations))
 
 
 # A custom JSON encoder to handle numpy types, useful for FastAPI's response model

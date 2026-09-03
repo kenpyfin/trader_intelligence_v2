@@ -1,0 +1,6 @@
+.env
+*.pyc
+__pycache__/
+.prompt_cache/
+log/
+git_ignore_folder/

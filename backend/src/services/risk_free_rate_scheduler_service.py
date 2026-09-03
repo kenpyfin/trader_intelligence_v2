@@ -105,6 +105,21 @@ def is_us_market_hours_for_timestamp(timestamp: datetime.datetime) -> bool:
     return is_us_market_hours(timestamp.astimezone(US_EASTERN))
 
 
+def is_us_regular_session_hours_local(timestamp: datetime.datetime) -> bool:
+    """Weekday 9:30–16:00 US/Eastern with no remote calendar lookups.
+
+    Used for historical filtering where Alpaca-per-timestamp would dominate latency.
+    Naive datetimes are treated as UTC.
+    """
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=datetime.timezone.utc)
+    eastern = timestamp.astimezone(US_EASTERN)
+    if eastern.weekday() >= 5:
+        return False
+    clock = eastern.time().replace(tzinfo=None)
+    return DEFAULT_MARKET_OPEN <= clock < DEFAULT_MARKET_CLOSE
+
+
 def _alpaca_calendar_has_session(check_date: datetime.date) -> bool:
     key = os.getenv("APCA_API_KEY_ID")
     secret = os.getenv("APCA_API_SECRET_KEY")
