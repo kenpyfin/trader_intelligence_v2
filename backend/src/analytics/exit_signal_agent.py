@@ -22,6 +22,8 @@ from src.analytics.exit_signal_tools import (
     execute_tool,
 )
 from src.analytics.methodologies.gpt_verdict import _resolve_gemini_model
+from src.services.prompt_config_service import get_prompt_text, render_prompt
+from src.services.prompt_defaults import PROMPT_BY_ID
 
 logger = logging.getLogger(__name__)
 
@@ -29,36 +31,8 @@ DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_DEFAULT_MODEL", "gemini-2.5-flash")
 BASE_MAX_TOOL_TURNS = int(os.getenv("EXIT_SIGNAL_AGENT_MAX_TURNS", "12"))
 
 
-SYSTEM_PROMPT = """You are an exit-condition evaluator for options strategies.
-
-You receive a ticker and a numbered list of exit conditions for ONE open strategy.
-Evaluate EVERY condition in a single session.
-
-Process:
-1. Read all conditions. Plan which market facts you need (may overlap across conditions).
-2. Call tools to gather facts. Reuse data across conditions — do not repeat identical tool calls unnecessarily.
-3. Judge each condition from tool outputs only. Never invent prices or indicators.
-4. Return JSON with an "evaluations" array — one object per input condition, same order and exact condition text.
-
-Each evaluation object:
-- text: copy the condition string exactly as given
-- status: met | unmet | unknown
-- reason: cite numbers from tools; explain your judgment
-- tools_used: tool names you relied on for this condition (subset of session tools)
-
-Top-level JSON shape:
-{
-  "evaluations": [ { "text": "...", "status": "...", "reason": "...", "tools_used": [] }, ... ],
-  "tool_trace_summary": "optional one-line session summary"
-}
-
-Guidance (use judgment, not keyword rules):
-- "Near" / "approaches" a cited $ level: compare spot to that $ level, not only a rolling high.
-- Rolling recent high ≠ a specific $ price written in the condition.
-- If data is missing for a condition, status is unknown and say what was missing.
-
-You do NOT recommend new trades. You only judge these exit conditions.
-"""
+# Built-in default; live edits are read via get_prompt_text("exit_signal.system").
+SYSTEM_PROMPT = PROMPT_BY_ID["exit_signal.system"].default_text
 
 
 def _max_turns_for_conditions(count: int) -> int:
@@ -102,7 +76,7 @@ def _gemini_generate(
 
     payload: Dict[str, Any] = {
         "contents": contents,
-        "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+        "systemInstruction": {"parts": [{"text": get_prompt_text("exit_signal.system")}]},
         "generationConfig": {
             "temperature": temperature,
             "maxOutputTokens": 4096,
@@ -355,23 +329,21 @@ def _build_user_prompt(
         except TypeError:
             ctx_block = ""
 
-    return (
-        f"Ticker: {ticker}\n"
-        f"Exit conditions to evaluate ({len(condition_texts)} total):\n{numbered}\n"
-        f"{ctx_block}\n"
-        "Call tools as needed for all conditions, then respond with JSON containing "
-        '"evaluations" (one entry per condition, same order).'
+    return render_prompt(
+        "exit_signal.user",
+        ticker=ticker,
+        condition_count=len(condition_texts),
+        numbered_conditions=numbered,
+        portfolio_context=ctx_block,
     )
 
 
 def _build_completion_prompt(condition_texts: List[str]) -> str:
     numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(condition_texts))
-    return (
-        f"Your previous JSON was incomplete. Evaluate ALL {len(condition_texts)} exit conditions below "
-        "using tool outputs already gathered in this session.\n"
-        f"{numbered}\n\n"
-        "Respond with JSON only: an evaluations array with exactly one object per condition above, "
-        "same order, exact condition text copied into each text field."
+    return render_prompt(
+        "exit_signal.completion",
+        condition_count=len(condition_texts),
+        numbered_conditions=numbered,
     )
 
 

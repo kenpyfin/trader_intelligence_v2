@@ -24,6 +24,7 @@ import AnalysisPage from './pages/Analysis';
 import PortfolioPage from './pages/Portfolio';
 import YieldCurvePage from './pages/YieldCurve';
 import TopStocksByGroupPage from './pages/TopStocksByGroup';
+import PromptConfigPage from './pages/PromptConfig';
 import { StockSelectionTaskProvider, useStockSelectionTask } from './context/StockSelectionTaskContext';
 import { RiskFreeRateTaskProvider } from './context/RiskFreeRateTaskContext';
 
@@ -73,7 +74,7 @@ const Navigation = () => {
         <Typography variant="h6" component="div" sx={{ flexGrow: 1, fontWeight: 'bold' }}>
           Trader Intelligence
         </Typography>
-        <Box sx={{ display: 'flex', gap: 2 }}>
+        <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
           <Button component={NavLink} to="/" sx={getButtonStyle('/')}>
             Analysis
           </Button>
@@ -92,6 +93,9 @@ const Navigation = () => {
                 </Tooltip>
               )}
             </Box>
+          </Button>
+          <Button component={NavLink} to="/config" sx={getButtonStyle('/config')}>
+            Config
           </Button>
         </Box>
       </Toolbar>
@@ -156,6 +160,7 @@ const App = () => {
                 <Route path="/portfolio" element={<PortfolioPage />} />
                 <Route path="/rates" element={<YieldCurvePage />} />
                 <Route path="/stock-selection" element={<TopStocksByGroupPage />} />
+                <Route path="/config" element={<PromptConfigPage />} />
               </Routes>
             </Container>
             <ScrollToTopButton />

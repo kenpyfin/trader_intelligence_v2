@@ -7,6 +7,7 @@ import {
   Card,
   CardContent,
   CardHeader,
+  Checkbox,
   Chip,
   CircularProgress,
   Collapse,
@@ -2273,7 +2274,7 @@ const ResultsDisplay = ({ analysisResult, setCautionModeActive, executeAnalysis,
   );
 };
 
-const SavedVerdictsControls = ({ ticker, currentResult, currentRiskFreeRate, scrollAnchorRef, onOpenFull, onRerun }) => {
+const SavedVerdictsControls = ({ ticker, currentResult, currentRiskFreeRate, scrollAnchorRef, onOpenFull, onRerun, availableModels = [], defaultModel = 'gemini-2.5-flash' }) => {
   const [saving, setSaving] = useState(false);
   const [saveLabel, setSaveLabel] = useState('');
   const [saveMsg, setSaveMsg] = useState('');
@@ -2286,6 +2287,15 @@ const SavedVerdictsControls = ({ ticker, currentResult, currentRiskFreeRate, scr
   const [hasMore, setHasMore] = useState(false);
   const [selectedId, setSelectedId] = useState('');
   const [selectedDoc, setSelectedDoc] = useState(null);
+
+  const [selectedForResolve, setSelectedForResolve] = useState(() => new Set());
+  const [resolveModel, setResolveModel] = useState(defaultModel || 'gemini-2.5-flash');
+  const [resolving, setResolving] = useState(false);
+  const [resolveResult, setResolveResult] = useState(null);
+  const [resolveError, setResolveError] = useState('');
+  const [resolutions, setResolutions] = useState([]);
+  const [resolutionsLoading, setResolutionsLoading] = useState(false);
+  const [selectedResolution, setSelectedResolution] = useState(null);
 
   // Use the provided ticker; currentResult is optional (used for manual save and compare)
 
@@ -2306,12 +2316,38 @@ const SavedVerdictsControls = ({ ticker, currentResult, currentRiskFreeRate, scr
     }
   };
 
+  const loadResolutions = async () => {
+    if (!ticker) return;
+    setResolutionsLoading(true);
+    try {
+      const resp = await axios.get(`/api/analysis/conflict-resolutions/${encodeURIComponent(ticker)}`);
+      setResolutions(resp.data?.items || []);
+    } catch (e) {
+      console.error('Failed to load conflict resolutions', e);
+      setResolutions([]);
+    } finally {
+      setResolutionsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (defaultModel) setResolveModel(defaultModel);
+  }, [defaultModel]);
+
   useEffect(() => {
     setSavedList([]);
     setSelectedDoc(null);
     setSelectedId('');
+    setSelectedForResolve(new Set());
+    setResolveResult(null);
+    setResolveError('');
+    setSelectedResolution(null);
+    setResolutions([]);
     setPage(1);
-    if (ticker) loadList();
+    if (ticker) {
+      loadList();
+      loadResolutions();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ticker]);
 
@@ -2376,9 +2412,85 @@ const SavedVerdictsControls = ({ ticker, currentResult, currentRiskFreeRate, scr
     }
   };
 
+  const toggleResolve = (id) => {
+    setSelectedForResolve((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleResolve = async () => {
+    if (!ticker || selectedForResolve.size < 2) {
+      setResolveError('ValueError: Need at least 2 saved verdicts to resolve.');
+      return;
+    }
+    setResolving(true);
+    setResolveError('');
+    setSelectedResolution(null);
+    try {
+      const resp = await axios.post('/api/analysis/conflict-resolve', {
+        ticker,
+        verdict_ids: Array.from(selectedForResolve),
+        model: resolveModel,
+      });
+      setResolveResult(resp.data);
+      setSelectedForResolve(new Set());
+      await loadResolutions();
+    } catch (e) {
+      const detail = e.response?.data?.detail;
+      let message = '';
+      if (typeof detail === 'string') {
+        message = detail;
+      } else if (Array.isArray(detail)) {
+        message = detail.map((d) => (typeof d === 'string' ? d : d?.msg || JSON.stringify(d))).join('; ');
+      } else if (detail != null) {
+        message = String(detail);
+      } else {
+        message = e.message || 'Conflict resolve failed';
+      }
+      const isValueError = e.response?.status === 400 || /valueerror/i.test(message);
+      setResolveError(isValueError && !/^ValueError:/i.test(message) ? `ValueError: ${message}` : message);
+      setResolveResult(null);
+    } finally {
+      setResolving(false);
+    }
+  };
+
+  const handleOpenResolution = async (id) => {
+    if (!id) return;
+    setSelectedResolution(id);
+    try {
+      const resp = await axios.get(`/api/analysis/conflict-resolutions/id/${encodeURIComponent(id)}`);
+      setResolveResult(resp.data?.item || null);
+      setResolveError('');
+    } catch (e) {
+      console.error('Failed to fetch conflict resolution', e);
+      setResolveError(e.response?.data?.detail || e.message || 'Failed to load resolution');
+    }
+  };
+
   const currentBias = currentResult?.final_bias || '';
   const previousBias = selectedDoc?.final_bias || '';
   const biasChanged = previousBias && currentBias && previousBias !== currentBias;
+  const displayResult = resolveResult;
+  const agreementPoints = displayResult?.agreement_points || [];
+  const disagreementPoints = displayResult?.disagreement_points || [];
+  const resolutionSources = Array.isArray(displayResult?.sources) ? displayResult.sources : [];
+
+  const formatSourceTimestamp = (value) => {
+    if (!value || typeof value !== 'string') return '';
+    return value.slice(0, 19).replace('T', ' ');
+  };
+
+  const describeSourceMethod = (method) => {
+    const text = method || '';
+    if (text.includes('gpt') && text.includes('web')) return 'Web Verdict';
+    if (text.includes('gpt')) return 'GPT Verdict';
+    if (text) return 'Model Verdict';
+    return 'Verdict';
+  };
 
   return (
     <Box ref={scrollAnchorRef}>
@@ -2415,6 +2527,7 @@ const SavedVerdictsControls = ({ ticker, currentResult, currentRiskFreeRate, scr
               <Table size="small" stickyHeader>
                 <TableHead>
                   <TableRow>
+                    <TableCell padding="checkbox" />
                     <TableCell>Saved At</TableCell>
                     <TableCell>Ticker</TableCell>
                     <TableCell>Label</TableCell>
@@ -2441,6 +2554,13 @@ const SavedVerdictsControls = ({ ticker, currentResult, currentRiskFreeRate, scr
                           onClick={() => handleSelect(item.id)}
                           sx={{ cursor: 'pointer', bgcolor: isSelected ? 'action.selected' : 'inherit', '&:hover': { bgcolor: 'action.hover' } }}
                         >
+                          <TableCell padding="checkbox" onClick={(e) => e.stopPropagation()}>
+                            <Checkbox
+                              size="small"
+                              checked={selectedForResolve.has(item.id)}
+                              onChange={() => toggleResolve(item.id)}
+                            />
+                          </TableCell>
                           <TableCell>{ts}</TableCell>
                           <TableCell>{item.ticker || ov.ticker || ''}</TableCell>
                           <TableCell>{item.label || ''}</TableCell>
@@ -2457,7 +2577,7 @@ const SavedVerdictsControls = ({ ticker, currentResult, currentRiskFreeRate, scr
                     })
                   ) : (
                     <TableRow>
-                      <TableCell colSpan={9} align="center">No saved verdicts yet.</TableCell>
+                      <TableCell colSpan={10} align="center">No saved verdicts yet.</TableCell>
                     </TableRow>
                   )}
                 </TableBody>
@@ -2479,6 +2599,63 @@ const SavedVerdictsControls = ({ ticker, currentResult, currentRiskFreeRate, scr
               </Select>
             </FormControl>
           </Box>
+
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mt: 2, flexWrap: 'wrap' }}>
+            <FormControl size="small" sx={{ minWidth: 200 }}>
+              <InputLabel>Resolve Model</InputLabel>
+              <Select
+                value={resolveModel}
+                label="Resolve Model"
+                onChange={(e) => setResolveModel(e.target.value)}
+              >
+                {(availableModels || []).length > 0 ? (
+                  availableModels.map((model) => (
+                    <MenuItem key={model.id} value={model.id}>
+                      {model.name || model.id}
+                    </MenuItem>
+                  ))
+                ) : (
+                  <MenuItem value={resolveModel}>{resolveModel}</MenuItem>
+                )}
+              </Select>
+            </FormControl>
+            <Button
+              variant="contained"
+              color="secondary"
+              disabled={resolving || !ticker}
+              onClick={handleResolve}
+            >
+              {resolving ? 'Resolving...' : 'Resolve Conflict'}
+            </Button>
+            <Typography
+              variant="caption"
+              sx={{
+                color: selectedForResolve.size < 2 ? 'error.main' : 'text.secondary',
+                fontWeight: selectedForResolve.size < 2 ? 600 : 400,
+              }}
+            >
+              Select 2+ verdicts ({selectedForResolve.size} selected)
+            </Typography>
+          </Box>
+          {resolveError && (
+            <Alert
+              severity="error"
+              variant="filled"
+              sx={{
+                mt: 2,
+                bgcolor: 'error.main',
+                color: 'error.contrastText',
+                '& .MuiAlert-icon': { color: 'error.contrastText' },
+              }}
+            >
+              <AlertTitle sx={{ color: 'error.contrastText', fontWeight: 700 }}>
+                {/^ValueError:/i.test(resolveError) ? 'ValueError' : 'Resolve failed'}
+              </AlertTitle>
+              <Typography component="span" sx={{ color: 'error.contrastText' }}>
+                {resolveError.replace(/^ValueError:\s*/i, '')}
+              </Typography>
+            </Alert>
+          )}
 
           {selectedDoc && (
             <Paper variant="outlined" sx={{ mt: 2, p: 2, bgcolor: '#f9f9f9' }}>
@@ -2528,6 +2705,176 @@ const SavedVerdictsControls = ({ ticker, currentResult, currentRiskFreeRate, scr
               </Box>
             </Paper>
           )}
+
+          {displayResult && (
+            <Paper variant="outlined" sx={{ mt: 2, p: 2 }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1, flexWrap: 'wrap' }}>
+                <Typography variant="subtitle1">Conflict Resolution</Typography>
+                {displayResult.final_bias && (
+                  <Chip label={displayResult.final_bias} size="small" color="primary" />
+                )}
+                {displayResult.confidence_level && (
+                  <Chip label={`${displayResult.confidence_level} confidence`} size="small" variant="outlined" />
+                )}
+                {displayResult.model && (
+                  <Typography variant="caption" color="text.secondary">Model: {displayResult.model}</Typography>
+                )}
+              </Box>
+
+              {resolutionSources.length > 0 && (
+                <Box sx={{ mb: 2 }}>
+                  <Typography variant="subtitle2" gutterBottom>
+                    Source History ({resolutionSources.length})
+                  </Typography>
+                  <TableContainer component={Paper} variant="outlined">
+                    <Table size="small">
+                      <TableHead>
+                        <TableRow>
+                          <TableCell>Saved At</TableCell>
+                          <TableCell>Label</TableCell>
+                          <TableCell>Type</TableCell>
+                          <TableCell>Bias</TableCell>
+                          <TableCell>Expiration</TableCell>
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {resolutionSources.map((source, idx) => (
+                          <TableRow
+                            key={source.id || `source-${idx}`}
+                            hover={!!source.id}
+                            sx={{ cursor: source.id ? 'pointer' : 'default' }}
+                            onClick={() => {
+                              if (source.id) handleSelect(source.id);
+                            }}
+                          >
+                            <TableCell>{formatSourceTimestamp(source.created_at) || '—'}</TableCell>
+                            <TableCell>{source.label || '—'}</TableCell>
+                            <TableCell>{describeSourceMethod(source.analysis_method)}</TableCell>
+                            <TableCell>
+                              {source.final_bias ? (
+                                <Chip label={source.final_bias} size="small" sx={{ height: 20, fontSize: '0.7rem' }} />
+                              ) : '—'}
+                            </TableCell>
+                            <TableCell>{source.expiration_date || '—'}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </TableContainer>
+                  <Typography variant="caption" color="text.secondary">
+                    Click a source row to open that saved verdict.
+                  </Typography>
+                </Box>
+              )}
+
+              {displayResult.conflict_summary && (
+                <Typography variant="body2" sx={{ mb: 1 }}>{displayResult.conflict_summary}</Typography>
+              )}
+              {agreementPoints.length > 0 && (
+                <Box sx={{ mb: 1 }}>
+                  <Typography variant="subtitle2">Agreements</Typography>
+                  <List dense disablePadding>
+                    {agreementPoints.map((point, idx) => (
+                      <ListItem key={`agree-${idx}`} sx={{ py: 0 }}>
+                        <ListItemText primary={point} />
+                      </ListItem>
+                    ))}
+                  </List>
+                </Box>
+              )}
+              {disagreementPoints.length > 0 && (
+                <Box sx={{ mb: 1 }}>
+                  <Typography variant="subtitle2">Disagreements</Typography>
+                  <List dense disablePadding>
+                    {disagreementPoints.map((point, idx) => (
+                      <ListItem key={`disagree-${idx}`} sx={{ py: 0 }}>
+                        <ListItemText primary={point} />
+                      </ListItem>
+                    ))}
+                  </List>
+                </Box>
+              )}
+              <Box
+                dangerouslySetInnerHTML={{
+                  __html: displayResult.summary_html || '<p>No resolution summary.</p>',
+                }}
+              />
+            </Paper>
+          )}
+
+          <Box sx={{ mt: 3 }}>
+            <Typography variant="subtitle1" gutterBottom>Conflict Resolutions</Typography>
+            {resolutionsLoading ? (
+              <CircularProgress size={24} />
+            ) : resolutions.length === 0 ? (
+              <Typography variant="body2" color="text.secondary">
+                No conflict resolutions yet. Select 2+ verdicts and resolve to create one.
+              </Typography>
+            ) : (
+              <List>
+                {resolutions.map((item) => (
+                  <Paper
+                    key={item.id}
+                    variant="outlined"
+                    sx={{
+                      mb: 1,
+                      bgcolor: selectedResolution === item.id ? 'action.selected' : 'inherit',
+                    }}
+                  >
+                    <ListItem
+                      button
+                      onClick={() => handleOpenResolution(item.id)}
+                      sx={{ cursor: 'pointer' }}
+                    >
+                      <ListItemText
+                        primary={
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+                            <Typography variant="subtitle2">
+                              {item.created_at?.slice(0, 19).replace('T', ' ') || 'Unknown time'}
+                            </Typography>
+                            {item.final_bias && (
+                              <Chip label={item.final_bias} size="small" sx={{ height: 20, fontSize: '0.7rem' }} />
+                            )}
+                          </Box>
+                        }
+                        secondary={
+                          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, mt: 0.5 }}>
+                            <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
+                              <Typography variant="caption">
+                                {item.source_count || (item.sources || []).length || (item.verdict_ids || []).length || 0} sources
+                              </Typography>
+                              {item.model && <Typography variant="caption">Model: {item.model}</Typography>}
+                              {item.confidence_level && (
+                                <Typography variant="caption">{item.confidence_level} confidence</Typography>
+                              )}
+                            </Box>
+                            {Array.isArray(item.sources) && item.sources.length > 0 && (
+                              <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap', alignItems: 'center' }}>
+                                <Typography variant="caption" color="text.secondary">From:</Typography>
+                                {item.sources.map((source, idx) => (
+                                  <Chip
+                                    key={source.id || `hist-src-${idx}`}
+                                    size="small"
+                                    variant="outlined"
+                                    sx={{ height: 20, fontSize: '0.65rem' }}
+                                    label={[
+                                      source.final_bias || 'N/A',
+                                      source.label || null,
+                                      source.created_at ? source.created_at.slice(0, 10) : null,
+                                    ].filter(Boolean).join(' · ')}
+                                  />
+                                ))}
+                              </Box>
+                            )}
+                          </Box>
+                        }
+                      />
+                    </ListItem>
+                  </Paper>
+                ))}
+              </List>
+            )}
+          </Box>
         </Grid>
       </Grid>
     </AnalysisCard>
@@ -2764,6 +3111,8 @@ const AnalysisPage = () => {
   const [availableModels, setAvailableModels] = useState([]);
   const [selectedModel, setSelectedModel] = useStickyState('gemini-2.5-flash', 'selectedGptModel');
   const [fetchingModels, setFetchingModels] = useState(false);
+  const [gptModelsWarning, setGptModelsWarning] = useState('');
+  const [gptModelsErrorCode, setGptModelsErrorCode] = useState('');
   const [perplexityModels, setPerplexityModels] = useState([]);
   const [selectedPerplexityModel, setSelectedPerplexityModel] = useStickyState('sonar', 'selectedPerplexityModel');
   const [fetchingPerplexityModels, setFetchingPerplexityModels] = useState(false);
@@ -2902,23 +3251,33 @@ const AnalysisPage = () => {
   // Fetch available GPT models
   const fetchGptModels = async () => {
     setFetchingModels(true);
+    setGptModelsWarning('');
+    setGptModelsErrorCode('');
     try {
       const response = await axios.get('/api/gpt-models');
-      if (response.data.status === 'success') {
-        setAvailableModels(response.data.models);
-        // Set default model if current selection is not available
-        if (!response.data.models.some(model => model.id === selectedModel)) {
-          setSelectedModel(response.data.default || 'gemini-2.5-flash');
-        }
+      const payload = response.data || {};
+      const models = Array.isArray(payload.models) ? payload.models : [];
+      setAvailableModels(models);
+      setGptModelsWarning(payload.warning || '');
+      setGptModelsErrorCode(payload.error_code || '');
+      const nextDefault = payload.default || 'gemini-2.5-flash';
+      if (!models.some((model) => model.id === selectedModel)) {
+        setSelectedModel(nextDefault);
       }
     } catch (error) {
       console.error('Failed to fetch GPT models:', error);
       console.error('Error details:', error.response?.data || error.message);
-      // Fallback to default models if API fails
+      const detail = error.response?.data?.detail;
+      const detailText = typeof detail === 'string' ? detail : (error.message || 'Failed to fetch GPT models');
       setAvailableModels([
         { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash (Fallback)' },
-        { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (Fallback)' }
+        { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (Fallback)' },
       ]);
+      setGptModelsWarning(detailText);
+      setGptModelsErrorCode(/leaked/i.test(detailText) ? 'api_key_leaked' : 'fetch_failed');
+      if (!['gemini-2.5-flash', 'gemini-2.5-pro'].includes(selectedModel)) {
+        setSelectedModel('gemini-2.5-flash');
+      }
     } finally {
       setFetchingModels(false);
     }
@@ -3375,8 +3734,8 @@ const AnalysisPage = () => {
                       onChange={e => setSelectedModel(e.target.value)}
                       disabled={fetchingModels}
                     >
-                      {fetchingModels ? (
-                        <MenuItem disabled>Loading models...</MenuItem>
+                      {fetchingModels && availableModels.length === 0 ? (
+                        <MenuItem value={selectedModel}>Loading models...</MenuItem>
                       ) : Array.isArray(availableModels) && availableModels.length > 0 ? (
                         availableModels.map(model => (
                           <MenuItem key={model.id} value={model.id}>
@@ -3384,7 +3743,7 @@ const AnalysisPage = () => {
                           </MenuItem>
                         ))
                       ) : (
-                        <MenuItem disabled>No models available</MenuItem>
+                        <MenuItem value={selectedModel}>{selectedModel}</MenuItem>
                       )}
                     </Select>
                   </FormControl>
@@ -3394,9 +3753,17 @@ const AnalysisPage = () => {
                     </IconButton>
                   </Tooltip>
                 </Box>
-                {availableModels.some(m => m.name.includes('Fallback')) && (
+                {gptModelsWarning && (
+                  <Alert
+                    severity={gptModelsErrorCode === 'api_key_leaked' ? 'error' : 'warning'}
+                    sx={{ mt: 1, py: 0 }}
+                  >
+                    {gptModelsWarning}
+                  </Alert>
+                )}
+                {!gptModelsWarning && availableModels.some(m => (m.name || '').includes('Fallback')) && (
                   <Typography variant="caption" color="warning.main">
-                    ⚠️ Using fallback models
+                    Using fallback models
                   </Typography>
                 )}
               </Grid>
@@ -3747,6 +4114,8 @@ const AnalysisPage = () => {
         scrollAnchorRef={verdictHistorySectionRef}
         onOpenFull={loadSavedAnalysis}
         onRerun={rerunAnalysis}
+        availableModels={availableModels}
+        defaultModel={selectedModel}
       />
     </Box>
   );

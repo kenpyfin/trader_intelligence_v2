@@ -9,6 +9,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+try:
+    from ...services.prompt_config_service import get_prompt_text, render_prompt
+except ImportError:
+    from services.prompt_config_service import get_prompt_text, render_prompt
+
 logger = logging.getLogger("perplexity_research")
 
 PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions"
@@ -176,16 +181,11 @@ def _build_research_prompt(
     if days_to_earnings is not None:
         earnings_note = f" Days to next earnings: {days_to_earnings}."
 
-    return (
-        f"Research {ticker} stock for an options trade expiring on {expiration_date}.{earnings_note}\n\n"
-        "Find and summarize the most relevant recent information (last 2-4 weeks), including:\n"
-        "- Breaking news and headlines\n"
-        "- Upcoming or recent earnings and other catalysts\n"
-        "- Analyst rating changes and price target updates\n"
-        "- Regulatory, legal, or M&A developments\n"
-        "- Sector and macro headlines that materially affect this stock\n\n"
-        "Provide a concise bullet-style summary focused on what matters for a directional "
-        "options thesis through the expiration date. Cite specific facts; avoid generic filler."
+    return render_prompt(
+        "perplexity.research.user",
+        ticker=ticker,
+        expiration_date=expiration_date,
+        earnings_note=earnings_note,
     )
 
 
@@ -232,10 +232,7 @@ def fetch_web_context(
         "messages": [
             {
                 "role": "system",
-                "content": (
-                    "You are a financial research assistant. Provide factual, recent market "
-                    "intelligence with clear sourcing. Be concise and trading-focused."
-                ),
+                "content": get_prompt_text("perplexity.research.system"),
             },
             {"role": "user", "content": prompt},
         ],

@@ -5,7 +5,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from datetime import date, timedelta
 
-from .models.analysis_models import AnalysisRequest, RiskFreeRateRequest, SaveVerdictRequest
+from .models.analysis_models import AnalysisRequest, RiskFreeRateRequest, SaveVerdictRequest, ConflictResolveRequest
 from .models.order_models import StrategyOrderRequest
 from .services.analysis_service import run_full_analysis, get_option_expirations
 from .services.analysis_history_service import (
@@ -16,10 +16,12 @@ from .services.analysis_history_service import (
 )
 from .services.macro_service import get_macro_futures_data, calculate_market_implied_risk_free_rate
 from .services import broker_service, analysis_service, company_intel_service
-from .routers import portfolio, stock_selection
+from .routers import portfolio, stock_selection, prompt_config
 from .my_libs_py3.my_data import PriceDataFetcher
 from .analytics.methodologies.gpt_verdict import generate_gpt_verdict
 from .services.verdict_service import save_verdict_document, list_verdicts, get_verdict_by_id
+from .services.conflict_resolution_service import resolve_conflicts, list_resolutions, get_resolution_by_id
+from .services.gpt_models_service import list_gpt_models
 from .services.risk_free_rate_history_service import list_risk_free_rate_history
 from .services.risk_free_rate_scheduler_service import (
     get_health as get_risk_free_rate_health,
@@ -86,6 +88,7 @@ app.add_middleware(
 
 app.include_router(portfolio.router)
 app.include_router(stock_selection.router)
+app.include_router(prompt_config.router)
 
 @app.get("/")
 def read_root():
@@ -331,6 +334,59 @@ async def get_saved_verdict(doc_id: str):
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to fetch verdict: {e}")
 
+
+@app.post("/analysis/conflict-resolve")
+@app.post("/api/analysis/conflict-resolve")
+async def resolve_verdict_conflicts(request: ConflictResolveRequest):
+    """Reconcile multiple saved verdicts for one ticker into a fair assessment."""
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: resolve_conflicts(request.ticker, request.verdict_ids, request.model)
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to resolve conflicts: {e}")
+
+
+@app.get("/analysis/conflict-resolutions/{ticker}")
+@app.get("/api/analysis/conflict-resolutions/{ticker}")
+async def list_conflict_resolutions(ticker: str, page: int = 1, page_size: int = 25):
+    """List conflict resolutions for a ticker with pagination (most recent first)."""
+    try:
+        loop = asyncio.get_running_loop()
+        data = await loop.run_in_executor(
+            None,
+            lambda: list_resolutions(ticker.upper(), page=page, page_size=page_size)
+        )
+        data['status'] = 'success'
+        return data
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to list conflict resolutions: {e}")
+
+
+@app.get("/analysis/conflict-resolutions/id/{doc_id}")
+@app.get("/api/analysis/conflict-resolutions/id/{doc_id}")
+async def get_conflict_resolution(doc_id: str):
+    """Fetch a conflict resolution by its ID."""
+    try:
+        loop = asyncio.get_running_loop()
+        doc = await loop.run_in_executor(None, lambda: get_resolution_by_id(doc_id))
+        if not doc:
+            raise HTTPException(status_code=404, detail="Conflict resolution not found")
+        return {"status": "success", "item": doc}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to fetch conflict resolution: {e}")
+
+
 @app.get("/analysis/company/fundamentals/{ticker}")
 @app.get("/api/analysis/company/fundamentals/{ticker}")
 async def company_fundamentals(ticker: str):
@@ -528,61 +584,18 @@ async def get_available_perplexity_models():
 @app.get("/api/gpt-models")
 @app.get("/gpt-models")  # Alias for Docker/proxy compatibility
 async def get_available_gpt_models():
-    """Fetches available Gemini models for GPT verdict analysis."""
+    """Fetches available Gemini models for GPT verdict analysis.
+
+    Always returns a usable model list. When Gemini is unreachable or rejects
+    the API key (e.g. leaked key), returns curated fallbacks with status=degraded
+    and a warning so the UI selector keeps working.
+    """
     try:
-        api_key = os.getenv("GEMINI_API_KEY")
-        
-        if not api_key:
-            raise HTTPException(status_code=500, detail="Gemini API key not configured")
-        
-        # Fetch available models from Gemini API.
-        response = requests.get(
-            "https://generativelanguage.googleapis.com/v1beta/models",
-            params={"key": api_key},
-            timeout=10
-        )
-        
-        if response.status_code != 200:
-            detail_text = response.text[:200] if response.text else ""
-            mapped_status = response.status_code if response.status_code in (401, 403, 429) else 500
-            raise HTTPException(
-                status_code=mapped_status,
-                detail=f"Failed to fetch Gemini models ({response.status_code}): {detail_text}"
-            )
-        
-        models_data = response.json()
-        
-        # Extract model list from Gemini API response format.
-        models = []
-        for model in models_data.get("models", []):
-            name = model.get("name", "")
-            if not name.startswith("models/"):
-                continue
-            generation_methods = model.get("supportedGenerationMethods", [])
-            if "generateContent" not in generation_methods:
-                continue
-            model_id = name.split("/", 1)[1]
-            models.append(
-                {
-                    "id": model_id,
-                    "name": model.get("displayName", model_id),
-                }
-            )
-        
-        # Sort models by name for better UX
-        models.sort(key=lambda x: x["name"])
-        
-        return {
-            "status": "success",
-            "models": models,
-            "default": os.getenv("GEMINI_DEFAULT_MODEL", "gemini-2.5-flash")
-        }
-        
+        loop = asyncio.get_running_loop()
+        payload = await loop.run_in_executor(None, list_gpt_models)
+        return payload
     except HTTPException:
         raise
-    except requests.RequestException as e:
-        print(f"Error fetching models: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to connect to model service: {e}")
     except Exception as e:
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")

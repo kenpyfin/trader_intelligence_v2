@@ -15,6 +15,7 @@ import requests
 
 from ..my_libs_py3.db import connect_mongo
 from ..my_libs_py3.my_data import PriceDataFetcher
+from .prompt_config_service import get_prompt_text, render_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -258,25 +259,14 @@ def _synthesize_deep_dive_markdown(ticker: str, fundamentals: Dict[str, Any]) ->
     screener = fundamentals.get("screener") or {}
     company_name = profile.get("companyName") or ticker
 
-    system_instruction = (
-        "You are a senior equity research analyst writing a company introduction for options traders. "
-        "Use Markdown with exactly these section headings:\n"
-        "## Business Overview\n"
-        "## Products & Segments\n"
-        "## How It Makes Money\n"
-        "## Competitive Moat\n"
-        "## Key Risks\n"
-        "## Recent Developments\n\n"
-        "Ground every claim in the provided Finviz and screener data. "
-        "Screener numeric ranks are relative universe ranks (higher = stronger rank), not literal ratios. "
-        "Do not invent facts."
-    )
-    user_prompt = (
-        f"Ticker: {ticker}\n"
-        f"Company: {company_name}\n"
-        f"Profile: {json.dumps(profile, default=str)}\n"
-        f"Finviz metrics: {json.dumps(metrics, default=str)}\n"
-        f"Mongo screener ranks: {json.dumps(screener, default=str)}\n"
+    system_instruction = get_prompt_text("company_intel.system")
+    user_prompt = render_prompt(
+        "company_intel.user",
+        ticker=ticker,
+        company_name=company_name,
+        profile_json=json.dumps(profile, default=str),
+        metrics_json=json.dumps(metrics, default=str),
+        screener_json=json.dumps(screener, default=str),
     )
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{DEFAULT_GEMINI_MODEL}:generateContent"

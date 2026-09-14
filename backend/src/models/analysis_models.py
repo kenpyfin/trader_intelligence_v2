@@ -26,6 +26,13 @@ class SaveVerdictRequest(BaseModel):
     label: Optional[str] = None
 
 
+class ConflictResolveRequest(BaseModel):
+    """Payload to reconcile multiple saved verdicts for one ticker."""
+    ticker: str
+    verdict_ids: List[str]
+    model: str = 'gemini-2.5-flash'
+
+
 # Validation-related enums and models
 class ValidationStatus(str, Enum):
     """Status of validation process."""
