@@ -33,6 +33,19 @@ class ConflictResolveRequest(BaseModel):
     model: str = 'gemini-2.5-flash'
 
 
+class AnalysisChatMessage(BaseModel):
+    """One turn in the analysis follow-up chat."""
+    role: str
+    content: str
+
+
+class AnalysisChatRequest(BaseModel):
+    """Follow-up chat grounded in the current analysis result."""
+    analysis: Dict[str, Any]
+    messages: List[AnalysisChatMessage]
+    model: str = 'gemini-2.5-flash'
+
+
 # Validation-related enums and models
 class ValidationStatus(str, Enum):
     """Status of validation process."""

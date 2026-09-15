@@ -5,7 +5,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from datetime import date, timedelta
 
-from .models.analysis_models import AnalysisRequest, RiskFreeRateRequest, SaveVerdictRequest, ConflictResolveRequest
+from .models.analysis_models import AnalysisRequest, RiskFreeRateRequest, SaveVerdictRequest, ConflictResolveRequest, AnalysisChatRequest
 from .models.order_models import StrategyOrderRequest
 from .services.analysis_service import run_full_analysis, get_option_expirations
 from .services.analysis_history_service import (
@@ -21,6 +21,7 @@ from .my_libs_py3.my_data import PriceDataFetcher
 from .analytics.methodologies.gpt_verdict import generate_gpt_verdict
 from .services.verdict_service import save_verdict_document, list_verdicts, get_verdict_by_id
 from .services.conflict_resolution_service import resolve_conflicts, list_resolutions, get_resolution_by_id
+from .services.analysis_chat_service import generate_analysis_chat_reply
 from .services.gpt_models_service import list_gpt_models
 from .services.risk_free_rate_history_service import list_risk_free_rate_history
 from .services.risk_free_rate_scheduler_service import (
@@ -333,6 +334,28 @@ async def get_saved_verdict(doc_id: str):
     except Exception as e:
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to fetch verdict: {e}")
+
+
+@app.post("/analysis/chat")
+@app.post("/api/analysis/chat")
+async def analysis_chat(request: AnalysisChatRequest):
+    """Follow-up Gemini chat grounded in the current analysis result."""
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: generate_analysis_chat_reply(
+                request.analysis,
+                request.messages,
+                request.model,
+            ),
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to generate chat reply: {e}")
 
 
 @app.post("/analysis/conflict-resolve")

@@ -147,6 +147,33 @@ PROMPT_DEFINITIONS: List[PromptDefinition] = [
         placeholders=('ticker', 'verdict_blocks'),
         default_text='Reconcile the following saved verdicts for ticker {ticker}.\n\n{verdict_blocks}\nReturn only valid JSON matching the required schema.',
     ),
+    PromptDefinition(
+        id='analysis_chat.system',
+        name='Analysis Chat (system)',
+        category='Analysis Chat',
+        description='System instructions for follow-up chat grounded in the current analysis result.',
+        role='system',
+        placeholders=(),
+        default_text=(
+            "You are a trading-desk copilot for a single completed options analysis. "
+            "Answer only from ANALYSIS_CONTEXT. Cite specific figures, bias, DTE, strategies, "
+            "and risks from that context. If the user asks for something that is not in the context, "
+            "say so clearly instead of inventing fills, live prices, or news. "
+            "Do not place orders or claim broker execution. Keep replies concise. Markdown is allowed."
+        ),
+    ),
+    PromptDefinition(
+        id='analysis_chat.context',
+        name='Analysis Chat (context)',
+        category='Analysis Chat',
+        description='Wraps the compact analysis JSON that is injected as hidden chat context.',
+        role='system',
+        placeholders=('ticker', 'expiration_date', 'analysis_json'),
+        default_text=(
+            "ANALYSIS_CONTEXT for {ticker} expiration {expiration_date}:\n"
+            "{analysis_json}"
+        ),
+    ),
 ]
 
 PROMPT_BY_ID: Dict[str, PromptDefinition] = {p.id: p for p in PROMPT_DEFINITIONS}

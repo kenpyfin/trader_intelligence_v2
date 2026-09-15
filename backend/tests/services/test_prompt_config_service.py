@@ -42,6 +42,8 @@ class TestPromptConfigService(unittest.TestCase):
             "company_intel.user",
             "conflict_resolution.system",
             "conflict_resolution.user",
+            "analysis_chat.system",
+            "analysis_chat.context",
         }
         self.assertEqual({item.id for item in PROMPT_DEFINITIONS}, expected)
         self.assertGreater(len(PROMPT_BY_ID["gpt_verdict.analyst.system"].default_text), 1000)

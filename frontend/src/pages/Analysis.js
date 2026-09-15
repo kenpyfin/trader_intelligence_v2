@@ -73,6 +73,7 @@ import {
 import { useTaskPolling } from '../hooks/useTaskPolling';
 import { useRiskFreeRateTask } from '../context/RiskFreeRateTaskContext';
 import AnalysisSectionPager from '../components/AnalysisSectionPager';
+import AnalysisChat from '../components/AnalysisChat';
 
 // Missing Data Detection Utilities
 const MissingDataStates = {
@@ -1978,6 +1979,7 @@ const AnalysisDetails = ({
   riskFreeRate,
   analysisMethod,
   selectedModel,
+  chatModel,
   resultIndex = 0,
   totalResults = 1,
 }) => {
@@ -2082,12 +2084,19 @@ const AnalysisDetails = ({
       />
 
       {activeTab === 'conclusion' && (
+      <>
       <AnalysisCard title={conclusionTitle}>
         <Typography variant="h5" sx={{ color: biasColor, mb: 2, fontWeight: 'bold' }}>
           Final Bias: {finalBias}
         </Typography>
         <Box dangerouslySetInnerHTML={{ __html: data.final_conclusion_html }} sx={{ '& ul': { pl: 2 }, '& li': { mb: 0.5 } }} />
       </AnalysisCard>
+      <AnalysisChat
+        analysis={data}
+        model={chatModel || selectedModel}
+        threadKey={`${data.ticker || ''}-${data.dte ?? ''}-${resultIndex}`}
+      />
+      </>
       )}
 
       {activeTab === 'verdict' && data.gpt_verdict && (
@@ -2238,7 +2247,7 @@ const AnalysisDetails = ({
   );
 };
 
-const ResultsDisplay = ({ analysisResult, setCautionModeActive, executeAnalysis, selectedExpiration, riskFreeRate, analysisMethod, selectedModel }) => {
+const ResultsDisplay = ({ analysisResult, setCautionModeActive, executeAnalysis, selectedExpiration, riskFreeRate, analysisMethod, selectedModel, chatModel }) => {
   if (!analysisResult || !Array.isArray(analysisResult) || analysisResult.length === 0) {
     return <Typography color="text.secondary">No analysis results to display.</Typography>;
   }
@@ -2265,6 +2274,7 @@ const ResultsDisplay = ({ analysisResult, setCautionModeActive, executeAnalysis,
             riskFreeRate={riskFreeRate}
             analysisMethod={analysisMethod}
             selectedModel={selectedModel}
+            chatModel={chatModel}
             resultIndex={index}
             totalResults={analysisResult.length}
           />
@@ -3966,6 +3976,7 @@ const AnalysisPage = () => {
               riskFreeRate={riskFreeRate}
               analysisMethod={analysisMethod}
               selectedModel={verdictModel}
+              chatModel={selectedModel}
             />
           </>
         )}
