@@ -209,9 +209,9 @@ Use this section as the source of truth for field semantics when implementing se
 
 | Field | Type | Required | Definition | Used In |
 | --- | --- | --- | --- | --- |
-| `TimeStamp` | datetime | Yes | Pair log event time | pair-trade history |
-| `Ticker1`, `Ticker2` | string | Yes | Pair symbols | pair reconstruction |
-| `size1`, `size2` | float/int | Optional | Signed position deltas | pair PnL |
+| `TimeStamp` | datetime | Yes | Pair log event time | pair-trade history; portfolio pair grouping |
+| `Ticker1`, `Ticker2` | string | Yes | Pair symbols | pair reconstruction; portfolio pair cards |
+| `size1`, `size2` | float/int | Optional | Signed position deltas | pair PnL; broker qty validation |
 | `Price1`, `Price2` | float | Optional | Leg prices | pair analytics |
 | `strategy_size1`, `strategy_size2` | float/int | Optional | Intended strategy sizes | reconciliation |
 
@@ -396,6 +396,7 @@ Use this section as the source of truth for field semantics when implementing se
 
 **Usage**
 - Write/read logic in [`backend/src/my_libs_py3/my_pair_trade.py`](backend/src/my_libs_py3/my_pair_trade.py).
+- Portfolio stock pairing / dangling callout in [`backend/src/services/pair_position_service.py`](backend/src/services/pair_position_service.py) (read-only validation against broker positions on `GET /portfolio/open-positions`).
 
 **Selection value**
 - Low for single-name stock selection; keep as optional behavioral features later.
@@ -410,7 +411,7 @@ Use this section as the source of truth for field semantics when implementing se
 | IV rank source | [`backend/src/analytics/analysis.py`](backend/src/analytics/analysis.py) | `calculate_iv_rank()` reads `iv_history.<ticker>` |
 | Fundamental ranking reference | [`backend/src/my_libs_py3/TradingPlan.py`](backend/src/my_libs_py3/TradingPlan.py) | Reads `all_symbol.screenerModel` and computes rank-style scores |
 | Saved analysis/verdict/tracked orders | [`backend/src/services/analysis_history_service.py`](backend/src/services/analysis_history_service.py), [`backend/src/services/verdict_service.py`](backend/src/services/verdict_service.py), [`backend/src/services/order_tracking_service.py`](backend/src/services/order_tracking_service.py) | Uses `trader_intelligence` DB |
-| Trade and pair-trade logs | [`backend/src/my_libs_py3/my_trader.py`](backend/src/my_libs_py3/my_trader.py), [`backend/src/my_libs_py3/my_pair_trade.py`](backend/src/my_libs_py3/my_pair_trade.py) | Operational logs |
+| Trade and pair-trade logs | [`backend/src/my_libs_py3/my_trader.py`](backend/src/my_libs_py3/my_trader.py), [`backend/src/my_libs_py3/my_pair_trade.py`](backend/src/my_libs_py3/my_pair_trade.py), [`backend/src/services/pair_position_service.py`](backend/src/services/pair_position_service.py) | Operational logs; portfolio pair grouping |
 
 ---
 

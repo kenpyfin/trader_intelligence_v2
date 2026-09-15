@@ -794,14 +794,73 @@ const StrategyCard = ({ symbol, legs, entryGuidance, underlyingSpotPrice, closeN
     );
   };
 
-  const StockPositions = ({ stocks }) => {
+  const formatSignedQty = (qty) => {
+    if (!isFiniteNumber(qty)) return '--';
+    return qty > 0 ? `+${qty}` : String(qty);
+  };
+
+  const pairStatusStyle = (status) => {
+    if (status === 'matched') {
+      return { color: '#166534', background: '#e8f5e9', border: '1px solid #bbf7d0' };
+    }
+    if (status === 'size_mismatch') {
+      return { color: '#9a3412', background: '#fff7ed', border: '1px solid #fed7aa' };
+    }
+    return { color: '#721c24', background: '#f8d7da', border: '1px solid #f5c2c7' };
+  };
+
+  const pairStatusLabel = (status) => {
+    if (status === 'matched') return 'Matched';
+    if (status === 'size_mismatch') return 'Size mismatch';
+    if (status === 'missing_leg') return 'Missing leg';
+    return status || 'Unknown';
+  };
+
+  const StockCloseCell = ({ stock }) => {
+    if (!stock) return null;
+    const status = stockClosingStatus[stock.symbol];
+    const isClosing = status?.inProgress;
+    return (
+      <>
+        <button
+          type="button"
+          onClick={() => handleCloseStockPosition(stock.symbol, stock.position)}
+          disabled={isClosing || stock.position === 0}
+          style={{
+            backgroundColor: stock.position === 0 ? '#ccc' : '#dc3545',
+            color: 'white',
+            border: 'none',
+            padding: '6px 12px',
+            borderRadius: '4px',
+            cursor: stock.position === 0 ? 'not-allowed' : 'pointer',
+            fontSize: '0.9em',
+          }}
+        >
+          {isClosing ? 'Closing...' : 'Close Position'}
+        </button>
+        {status?.data && (
+          <div style={{ marginTop: '8px', padding: '6px', background: '#e8f5e9', borderRadius: '4px', fontSize: '0.8em' }}>
+            <strong>Order Status:</strong> {status.data.status}
+            <br />Filled: {status.data.filled}/{status.data.quantity_closed}
+          </div>
+        )}
+        {status?.error && (
+          <div style={{ marginTop: '8px', padding: '6px', background: '#f8d7da', borderRadius: '4px', color: '#721c24', fontSize: '0.8em' }}>
+            <strong>Error:</strong> {status.error}
+          </div>
+        )}
+      </>
+    );
+  };
+
+  const StockTable = ({ stocks, showTitle = false, title = 'Stock Positions' }) => {
     if (!stocks || stocks.length === 0) {
       return null;
     }
 
     return (
-      <div style={{ marginTop: '24px' }}>
-        <h2>Stock Positions</h2>
+      <div style={{ marginTop: showTitle ? '24px' : '10px' }}>
+        {showTitle ? <h2>{title}</h2> : null}
         <table style={{ width: '100%', marginTop: '10px', borderCollapse: 'collapse' }}>
           <thead>
             <tr style={{ background: '#f8f9fa' }}>
@@ -815,18 +874,16 @@ const StrategyCard = ({ symbol, legs, entryGuidance, underlyingSpotPrice, closeN
           </thead>
           <tbody>
             {stocks.map((stock, index) => {
-              const status = stockClosingStatus[stock.symbol];
-              const isClosing = status?.inProgress;
               const positionColor = stock.position > 0 ? 'green' : stock.position < 0 ? 'red' : 'black';
               const stockUnrealizedPnl = getPositionUnrealizedPnl(stock);
               const stockPnlColor = !isFiniteNumber(stockUnrealizedPnl) ? '#666' : (stockUnrealizedPnl >= 0 ? 'green' : 'red');
               const stockCurrentMarketPrice = getPositionMarketPrice(stock);
-              
+
               return (
-                <tr key={index}>
+                <tr key={`${stock.symbol}-${index}`}>
                   <td style={{ padding: '8px', border: '1px solid #ddd', fontWeight: 'bold' }}>{stock.symbol}</td>
                   <td style={{ padding: '8px', border: '1px solid #ddd', color: positionColor, fontWeight: 'bold' }}>
-                    {stock.position > 0 ? `+${stock.position}` : stock.position}
+                    {formatSignedQty(stock.position)}
                   </td>
                   <td style={{ padding: '8px', border: '1px solid #ddd' }}>
                     {formatCurrency(stock.position !== 0 ? (stock.avgCost / stock.position) : 0)}
@@ -838,31 +895,128 @@ const StrategyCard = ({ symbol, legs, entryGuidance, underlyingSpotPrice, closeN
                     {formatCurrency(stockUnrealizedPnl, '--')}
                   </td>
                   <td style={{ padding: '8px', border: '1px solid #ddd' }}>
-                    <button 
-                      onClick={() => handleCloseStockPosition(stock.symbol, stock.position)} 
-                      disabled={isClosing || stock.position === 0}
-                      style={{
-                        backgroundColor: stock.position === 0 ? '#ccc' : '#dc3545',
-                        color: 'white',
-                        border: 'none',
-                        padding: '6px 12px',
-                        borderRadius: '4px',
-                        cursor: stock.position === 0 ? 'not-allowed' : 'pointer',
-                        fontSize: '0.9em'
-                      }}
-                    >
-                      {isClosing ? 'Closing...' : 'Close Position'}
-                    </button>
-                    {status?.data && (
-                      <div style={{marginTop: '8px', padding: '6px', background: '#e8f5e9', borderRadius: '4px', fontSize: '0.8em'}}>
-                        <strong>Order Status:</strong> {status.data.status}
-                        <br />Filled: {status.data.filled}/{status.data.quantity_closed}
-                      </div>
-                    )}
-                    {status?.error && (
-                      <div style={{marginTop: '8px', padding: '6px', background: '#f8d7da', borderRadius: '4px', color: '#721c24', fontSize: '0.8em'}}>
-                        <strong>Error:</strong> {status.error}
-                      </div>
+                    <StockCloseCell stock={stock} />
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    );
+  };
+
+  const PairCard = ({ pair }) => {
+    const chipStyle = pairStatusStyle(pair.status);
+    const combinedPnl = pair.combined_unrealized_pnl;
+    const pnlColor = !isFiniteNumber(combinedPnl) ? '#666' : (combinedPnl >= 0 ? 'green' : 'red');
+
+    return (
+      <div
+        data-testid={`pair-card-${pair.pair_id}`}
+        style={{ border: '1px solid #ddd', borderRadius: '8px', padding: '16px', marginBottom: '16px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px', flexWrap: 'wrap' }}>
+          <div>
+            <h3 style={{ marginTop: 0, marginBottom: '8px' }}>
+              {pair.ticker1} / {pair.ticker2}
+            </h3>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+              <span
+                data-testid={`pair-status-${pair.pair_id}`}
+                style={{
+                  ...chipStyle,
+                  padding: '4px 10px',
+                  borderRadius: '999px',
+                  fontSize: '0.85em',
+                  fontWeight: 600,
+                }}
+              >
+                {pairStatusLabel(pair.status)}
+              </span>
+              <span style={{ fontSize: '0.95em' }}>
+                Combined Unrealized P/L:{' '}
+                <strong style={{ color: pnlColor }}>{formatCurrency(combinedPnl, '--')}</strong>
+              </span>
+              <span style={{ fontSize: '0.9em', color: '#555' }}>
+                Last trade: {formatDateTime(pair.last_trade_at)}
+              </span>
+            </div>
+            {Array.isArray(pair.overlapping_pairs) && pair.overlapping_pairs.length > 0 ? (
+              <div style={{ marginTop: '8px', fontSize: '0.9em', color: '#9a3412' }}>
+                Also appears in: {pair.overlapping_pairs.join(', ')}
+              </div>
+            ) : null}
+          </div>
+        </div>
+
+        <table style={{ width: '100%', marginTop: '12px', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr style={{ background: '#f8f9fa' }}>
+              <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Symbol</th>
+              <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Log qty</th>
+              <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Broker qty</th>
+              <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Avg Cost/Share</th>
+              <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Current Mkt Price</th>
+              <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Unrealized P/L</th>
+              <th style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(pair.legs || []).map((leg) => {
+              const present = Boolean(leg.present_at_broker);
+              const stock = leg.position;
+              const mismatch = present && !leg.qty_match;
+              const brokerQty = present ? leg.broker_qty : null;
+              const positionColor = isFiniteNumber(brokerQty)
+                ? (brokerQty > 0 ? 'green' : brokerQty < 0 ? 'red' : 'black')
+                : '#666';
+              const stockUnrealizedPnl = stock ? getPositionUnrealizedPnl(stock) : null;
+              const stockPnlColor = !isFiniteNumber(stockUnrealizedPnl) ? '#666' : (stockUnrealizedPnl >= 0 ? 'green' : 'red');
+              const stockCurrentMarketPrice = stock ? getPositionMarketPrice(stock) : null;
+              const avgCostShare = stock && stock.position !== 0 ? (stock.avgCost / stock.position) : null;
+
+              return (
+                <tr
+                  key={`${pair.pair_id}-${leg.symbol}`}
+                  style={mismatch ? { background: '#fff7ed' } : undefined}
+                >
+                  <td style={{ padding: '8px', border: '1px solid #ddd', fontWeight: 'bold' }}>
+                    {leg.symbol}
+                    {!present ? (
+                      <span style={{ marginLeft: '8px', color: '#721c24', fontWeight: 500, fontSize: '0.85em' }}>
+                        Not at broker
+                      </span>
+                    ) : null}
+                  </td>
+                  <td style={{ padding: '8px', border: '1px solid #ddd', fontWeight: 600 }}>
+                    {formatSignedQty(leg.log_outstanding)}
+                  </td>
+                  <td
+                    style={{
+                      padding: '8px',
+                      border: '1px solid #ddd',
+                      color: mismatch ? '#9a3412' : positionColor,
+                      fontWeight: 'bold',
+                    }}
+                  >
+                    {present ? formatSignedQty(brokerQty) : '--'}
+                    {mismatch ? (
+                      <span style={{ marginLeft: '6px', fontSize: '0.85em', fontWeight: 600 }}>mismatch</span>
+                    ) : null}
+                  </td>
+                  <td style={{ padding: '8px', border: '1px solid #ddd' }}>
+                    {present ? formatCurrency(avgCostShare, '--') : '--'}
+                  </td>
+                  <td style={{ padding: '8px', border: '1px solid #ddd' }}>
+                    {present ? formatCurrency(stockCurrentMarketPrice, '--') : '--'}
+                  </td>
+                  <td style={{ padding: '8px', border: '1px solid #ddd', color: stockPnlColor, fontWeight: 600 }}>
+                    {present ? formatCurrency(stockUnrealizedPnl, '--') : '--'}
+                  </td>
+                  <td style={{ padding: '8px', border: '1px solid #ddd' }}>
+                    {present ? <StockCloseCell stock={stock} /> : (
+                      <span style={{ color: '#666', fontSize: '0.9em' }}>—</span>
                     )}
                   </td>
                 </tr>
@@ -874,15 +1028,92 @@ const StrategyCard = ({ symbol, legs, entryGuidance, underlyingSpotPrice, closeN
     );
   };
 
+  const StockPairsSection = ({ stockPairs, stockPairsError, fallbackStocks }) => {
+    if (stockPairs) {
+      const pairs = stockPairs.pairs || [];
+      const dangling = stockPairs.dangling || [];
+      const hasPairs = pairs.length > 0;
+      const hasDangling = dangling.length > 0;
+      if (!hasPairs && !hasDangling) {
+        return null;
+      }
+
+      return (
+        <div style={{ marginTop: '24px' }} data-testid="stock-pairs-section">
+          {hasPairs ? (
+            <div>
+              <h2 style={{ marginBottom: '8px' }}>Stock Pairs</h2>
+              <p style={{ marginTop: 0, color: '#555' }}>
+                Grouped from pair trade log and validated against broker quantities (read-only).
+              </p>
+              {pairs.map((pair) => (
+                <PairCard key={pair.pair_id} pair={pair} />
+              ))}
+            </div>
+          ) : null}
+
+          {hasDangling ? (
+            <div style={{ marginTop: hasPairs ? '28px' : 0 }} data-testid="dangling-stocks-section">
+              <div
+                style={{
+                  border: '1px solid #fed7aa',
+                  background: '#fff7ed',
+                  color: '#9a3412',
+                  padding: '12px 14px',
+                  borderRadius: '6px',
+                  marginBottom: '8px',
+                }}
+              >
+                <strong>Dangling stocks</strong>
+                <div style={{ marginTop: '4px', fontSize: '0.95em' }}>
+                  These broker positions are not part of any open pair trade log.
+                </div>
+              </div>
+              <StockTable stocks={dangling} showTitle title="Dangling Stock Positions" />
+            </div>
+          ) : null}
+        </div>
+      );
+    }
+
+    return (
+      <div style={{ marginTop: '24px' }}>
+        {stockPairsError ? (
+          <div
+            data-testid="stock-pairs-error"
+            style={{
+              border: '1px solid #fed7aa',
+              background: '#fff7ed',
+              color: '#9a3412',
+              padding: '12px 14px',
+              borderRadius: '6px',
+              marginBottom: '12px',
+            }}
+          >
+            <strong>Pair grouping unavailable.</strong>
+            <div style={{ marginTop: '4px', fontSize: '0.95em' }}>{stockPairsError}</div>
+            <div style={{ marginTop: '4px', fontSize: '0.9em' }}>Showing flat stock list instead.</div>
+          </div>
+        ) : null}
+        <StockTable stocks={fallbackStocks} showTitle title="Stock Positions" />
+      </div>
+    );
+  };
+
   if (loading) return <p>Loading open positions from broker...</p>;
 
   const positions = !error && portfolioData ? portfolioData.positions : null;
   const optionPositions = positions?.options || {};
   const underlyingSpotPrices = (!error && portfolioData?.underlying_spot_prices) || {};
   const stockPositions = positions?.stocks || [];
+  const stockPairs = !error && portfolioData ? portfolioData.stock_pairs : null;
+  const stockPairsError = !error && portfolioData ? portfolioData.stock_pairs_error : null;
   const hasOptionPositions = Object.keys(optionPositions).length > 0;
+  const hasStockPairsUi = Boolean(
+    stockPairs && ((stockPairs.pairs || []).length > 0 || (stockPairs.dangling || []).length > 0)
+  );
   const hasStockPositions = Array.isArray(stockPositions) && stockPositions.length > 0;
-  const hasAnyPositions = hasOptionPositions || hasStockPositions;
+  const hasAnyPositions = hasOptionPositions || hasStockPositions || hasStockPairsUi;
 
   const actionHints = portfolioData?.action_hints || {};
   const closeNowBySymbol = (actionHints.close_now || []).reduce((acc, h) => {
@@ -974,7 +1205,13 @@ const StrategyCard = ({ symbol, legs, entryGuidance, underlyingSpotPrice, closeN
                 ))}
             </div>
           )}
-          {hasStockPositions && <StockPositions stocks={stockPositions} />}
+          {(hasStockPositions || hasStockPairsUi) && (
+            <StockPairsSection
+              stockPairs={stockPairs}
+              stockPairsError={stockPairsError}
+              fallbackStocks={stockPositions}
+            />
+          )}
         </>
       ) : (
         <div style={{ border: '1px solid #ddd', borderRadius: '8px', padding: '16px', marginTop: '24px', background: '#fdfdfd' }}>

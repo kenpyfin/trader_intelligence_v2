@@ -17,6 +17,7 @@ from .exit_signal_eval_service import (
     timing_from_cached_evaluations,
 )
 from .strategy_signature import strategy_signature
+from .pair_position_service import group_stock_pairs
 
 def _sanitize_for_json(item):
     """
@@ -121,6 +122,19 @@ async def get_grouped_open_positions():
     
     # Convert defaultdict to regular dict for JSON serialization
     grouped_positions_data['options'] = dict(grouped_positions_data['options'])
+
+    # Step 4a: Group stocks into pair-trade cards vs dangling leftovers (read-only).
+    stock_pairs = None
+    stock_pairs_error = None
+    try:
+        stock_pairs = await asyncio.to_thread(
+            group_stock_pairs,
+            grouped_positions_data.get("stocks") or [],
+        )
+    except Exception as pair_exc:
+        print(f"WARN(PortfolioSvc): stock pair grouping failed: {pair_exc}")
+        stock_pairs = None
+        stock_pairs_error = str(pair_exc)
 
     # Step 4b: Live underlying stock prices from Alpaca (same path as analysis / IV pipeline).
     underlying_spot_prices: dict = {}
@@ -379,6 +393,8 @@ async def get_grouped_open_positions():
         "positions": grouped_positions_data,
         "underlying_spot_prices": underlying_spot_prices,
         "action_hints": action_hints,
+        "stock_pairs": stock_pairs,
+        "stock_pairs_error": stock_pairs_error,
     }
     return _sanitize_for_json(response_data)
 
