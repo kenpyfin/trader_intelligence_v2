@@ -1,14 +1,14 @@
 import React from 'react';
-import { YieldCurvePanel } from '../components';
+import { RiskFreeRateHistoryChart } from '../components';
 
 const YieldCurvePage = () => {
   return (
     <div>
-      <h2 style={{ marginTop: 0, marginBottom: 12 }}>Yield Curve</h2>
+      <h2 style={{ marginTop: 0, marginBottom: 12 }}>Risk-Free Rates</h2>
       <p style={{ color: '#555', marginTop: 0 }}>
-        Compare Treasury curve vs ETF-implied risk-free rate and choose your default source.
+        Daily market-implied risk-free rate derived from SPY, QQQ, and IWM option chains, used in analyses.
       </p>
-      <YieldCurvePanel />
+      <RiskFreeRateHistoryChart />
     </div>
   );
 };

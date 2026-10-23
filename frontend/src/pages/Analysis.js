@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, Component } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo, Component } from 'react';
 import axios from 'axios';
 import Plot from 'react-plotly.js';
 import {
@@ -7,6 +7,7 @@ import {
   Card,
   CardContent,
   CardHeader,
+  Checkbox,
   Chip,
   CircularProgress,
   Collapse,
@@ -32,8 +33,11 @@ import {
   Typography,
   Alert,
   AlertTitle,
-  Tooltip
+  Tooltip,
+  Link
 } from '@mui/material';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import {
   ExpandMore as ExpandMoreIcon,
   ExpandLess as ExpandLessIcon,
@@ -52,7 +56,8 @@ import {
   HourglassEmpty as HourglassEmptyIcon,
   Info as InfoIcon,
   Build as BuildIcon,
-  Skeleton as SkeletonIcon
+  Skeleton as SkeletonIcon,
+  OpenInNew as OpenInNewIcon
 } from '@mui/icons-material';
 
 // Import enhanced quality components
@@ -64,6 +69,11 @@ import {
   ConfidenceIndicator,
   QualityScoreBadge
 } from '../components/CautionModeIndicator';
+
+import { useTaskPolling } from '../hooks/useTaskPolling';
+import { useRiskFreeRateTask } from '../context/RiskFreeRateTaskContext';
+import AnalysisSectionPager from '../components/AnalysisSectionPager';
+import AnalysisChat from '../components/AnalysisChat';
 
 // Missing Data Detection Utilities
 const MissingDataStates = {
@@ -77,6 +87,50 @@ const MissingDataStates = {
   PARTIAL_SUCCESS: 'PARTIAL_SUCCESS',
   COMPLETE: 'COMPLETE',
   COMPLETE_WITH_CAUTION: 'COMPLETE_WITH_CAUTION'  // NEW: Complete but with warnings
+};
+
+const ANALYSIS_PROGRESS_STAGES = [
+  { id: 'queued', label: 'Task queued', threshold: 0 },
+  { id: 'data_collection', label: 'Collecting market and options data', threshold: 15 },
+  { id: 'guardrail_pause', label: 'Running quality and fallback checks', threshold: 40 },
+  { id: 'full_analysis', label: 'Computing models and signals', threshold: 65 },
+  { id: 'finalizing', label: 'Finalizing verdict and response', threshold: 90 },
+];
+
+const resolveAnalysisStage = (progressValue) => {
+  const progress = Number.isFinite(progressValue) ? progressValue : 0;
+  let currentStage = ANALYSIS_PROGRESS_STAGES[0].id;
+  ANALYSIS_PROGRESS_STAGES.forEach((stage) => {
+    if (progress >= stage.threshold) {
+      currentStage = stage.id;
+    }
+  });
+  return currentStage;
+};
+
+const extractQualityAssessmentFromResult = (payload) => {
+  if (!payload) return null;
+  const firstItem = Array.isArray(payload) ? payload[0] : payload;
+  if (!firstItem || typeof firstItem !== 'object') return null;
+
+  return (
+    firstItem.error_details?.quality_assessment
+    || firstItem.quality_assessment
+    || null
+  );
+};
+
+const MALFORMED_AI_JSON_NOTE = 'AI response could not be parsed as JSON';
+
+const isMalformedAiJsonResponse = (payload) => {
+  if (!payload) return false;
+  const firstItem = Array.isArray(payload) ? payload[0] : payload;
+  if (!firstItem || typeof firstItem !== 'object') return false;
+
+  const summaryHtml = typeof firstItem.summary_html === 'string' ? firstItem.summary_html : '';
+  const finalConclusionHtml = typeof firstItem.final_conclusion_html === 'string' ? firstItem.final_conclusion_html : '';
+
+  return summaryHtml.includes(MALFORMED_AI_JSON_NOTE) || finalConclusionHtml.includes(MALFORMED_AI_JSON_NOTE);
 };
 
 const detectStrategyState = (strategy, gptVerdict, analysisResult, setCautionModeActive, executeAnalysis, ticker, selectedExpiration, riskFreeRate, analysisMethod, selectedModel) => {
@@ -285,6 +339,11 @@ function normalizeRiskFreeRate(value, fallback = 0.045) {
   return Math.round(n * f) / f;
 }
 
+const formatRiskFreeRate = (value) => {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? normalizeRiskFreeRate(numeric).toFixed(RISK_FREE_DECIMAL_PLACES) : '';
+};
+
 // --- Helper Components for Display ---
 
 const AnalysisCard = ({ title, children, action }) => (
@@ -300,6 +359,246 @@ const AnalysisCard = ({ title, children, action }) => (
     </CardContent>
   </Card>
 );
+
+const formatLargeNumber = (value) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '—';
+  if (Math.abs(n) >= 1e12) return `${(n / 1e12).toFixed(2)}T`;
+  if (Math.abs(n) >= 1e9) return `${(n / 1e9).toFixed(2)}B`;
+  if (Math.abs(n) >= 1e6) return `${(n / 1e6).toFixed(2)}M`;
+  if (Math.abs(n) >= 1e3) return `${(n / 1e3).toFixed(2)}K`;
+  return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+};
+
+const formatPercent = (value) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '—';
+  const pct = Math.abs(n) <= 1 ? n * 100 : n;
+  return `${pct.toFixed(2)}%`;
+};
+
+const formatMetricValue = (value) => {
+  if (value === null || value === undefined || value === '') return '—';
+  const n = Number(value);
+  if (Number.isFinite(n)) {
+    if (Math.abs(n) >= 1e6) return formatLargeNumber(n);
+    return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  }
+  return String(value);
+};
+
+const MetricCell = ({ label, value }) => (
+  <Grid item xs={6} md={3}>
+    <Typography variant="caption" display="block" color="text.secondary">{label}</Typography>
+    <Typography variant="body2" fontWeight="bold">{value}</Typography>
+  </Grid>
+);
+
+const CompanyFundamentalsCard = ({ ticker }) => {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [fundamentals, setFundamentals] = useState(null);
+
+  useEffect(() => {
+    if (!ticker) return undefined;
+    let cancelled = false;
+
+    const load = async () => {
+      setLoading(true);
+      setError('');
+      try {
+        const resp = await axios.get(`/api/analysis/company/fundamentals/${encodeURIComponent(ticker)}`);
+        if (!cancelled) {
+          setFundamentals(resp.data?.fundamentals || null);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(err.response?.data?.detail || 'Fundamentals unavailable.');
+          setFundamentals(null);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+
+    load();
+    return () => { cancelled = true; };
+  }, [ticker]);
+
+  const profile = fundamentals?.profile || {};
+  const metrics = fundamentals?.metrics || {};
+
+  return (
+    <AnalysisCard title="Company Fundamentals">
+      {loading && (
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+          <CircularProgress size={20} />
+          <Typography variant="body2" color="text.secondary">Loading fundamentals…</Typography>
+        </Box>
+      )}
+      {!loading && error && (
+        <Typography color="text.secondary">{error}</Typography>
+      )}
+      {!loading && !error && fundamentals && (
+        <Box>
+          <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+            <Box>
+              <Typography variant="subtitle1" fontWeight="bold">
+                {profile.companyName || ticker}
+              </Typography>
+              <Typography variant="caption" color="text.secondary">
+                {[profile.sector, profile.industry, profile.country].filter(Boolean).join(' · ')}
+              </Typography>
+            </Box>
+          </Stack>
+          <Stack direction="row" spacing={1} sx={{ mb: 2 }}>
+            {fundamentals.sources?.finviz && <Chip label="Finviz" size="small" color="info" variant="outlined" />}
+            {fundamentals.sources?.mongo && <Chip label="Mongo screener" size="small" color="default" variant="outlined" />}
+          </Stack>
+          {profile.description && (
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              {profile.description}
+            </Typography>
+          )}
+          <Grid container spacing={2}>
+            <MetricCell label="Market Cap" value={formatLargeNumber(metrics.marketCap)} />
+            <MetricCell label="Price" value={formatMetricValue(metrics.price)} />
+            <MetricCell label="P/E (TTM)" value={formatMetricValue(metrics.pe)} />
+            <MetricCell label="PEG" value={formatMetricValue(metrics.peg)} />
+            <MetricCell label="Beta" value={formatMetricValue(metrics.beta)} />
+            <MetricCell label="ROE" value={formatPercent(metrics.roe)} />
+            <MetricCell label="Debt/Equity" value={formatMetricValue(metrics.debtToEquity)} />
+            <MetricCell label="Current Ratio" value={formatMetricValue(metrics.currentRatio)} />
+            <MetricCell label="Gross Margin" value={formatPercent(metrics.grossProfitMargin)} />
+            <MetricCell label="Net Margin" value={formatPercent(metrics.netProfitMargin)} />
+            <MetricCell label="Div Yield" value={formatPercent(metrics.dividendYield)} />
+            <MetricCell label="Earnings Date" value={formatMetricValue(metrics.earningsDate)} />
+          </Grid>
+          {fundamentals.screener?.refresh_date && (
+            <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 2 }}>
+              Screener snapshot: {new Date(fundamentals.screener.refresh_date).toLocaleString()}
+            </Typography>
+          )}
+          {fundamentals.finviz_url && (
+            <Box sx={{ mt: 1 }}>
+              <Link href={fundamentals.finviz_url} target="_blank" rel="noopener noreferrer">
+                View on Finviz
+              </Link>
+            </Box>
+          )}
+        </Box>
+      )}
+    </AnalysisCard>
+  );
+};
+
+const CompanyDeepDiveCard = ({ ticker }) => {
+  const [loading, setLoading] = useState(false);
+  const [regenerating, setRegenerating] = useState(false);
+  const [error, setError] = useState('');
+  const [deepDive, setDeepDive] = useState(null);
+
+  const loadDeepDive = useCallback(async (force = false) => {
+    if (!ticker) return;
+    if (force) {
+      setRegenerating(true);
+    } else {
+      setLoading(true);
+    }
+    setError('');
+    try {
+      const resp = await axios.get(`/api/analysis/company/deep-dive/${encodeURIComponent(ticker)}`, {
+        params: force ? { force: true } : {},
+      });
+      setDeepDive(resp.data?.deep_dive || null);
+      if (resp.data?.deep_dive?.error && !resp.data?.deep_dive?.markdown) {
+        setError(resp.data.deep_dive.error);
+      }
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Failed to load company deep dive.');
+      setDeepDive(null);
+    } finally {
+      setLoading(false);
+      setRegenerating(false);
+    }
+  }, [ticker]);
+
+  useEffect(() => {
+    loadDeepDive(false);
+  }, [loadDeepDive]);
+
+  const sources = Array.isArray(deepDive?.sources) ? deepDive.sources : [];
+  const generatedAt = deepDive?.generated_at;
+  const isCached = deepDive?.from_cache;
+  const isStale = deepDive?.stale;
+
+  return (
+    <AnalysisCard
+      title="Company Deep Dive"
+      action={(
+        <Tooltip title="Regenerate deep dive">
+          <span>
+            <IconButton
+              onClick={() => loadDeepDive(true)}
+              disabled={loading || regenerating || !ticker}
+              size="small"
+            >
+              {regenerating ? <CircularProgress size={18} /> : <RefreshIcon />}
+            </IconButton>
+          </span>
+        </Tooltip>
+      )}
+    >
+      {(loading || regenerating) && (
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+          <CircularProgress size={20} />
+          <Typography variant="body2" color="text.secondary">
+            {regenerating ? 'Regenerating deep dive…' : 'Generating deep dive…'}
+          </Typography>
+        </Box>
+      )}
+      {!loading && error && (
+        <Typography color="text.secondary">{error}</Typography>
+      )}
+      {!loading && deepDive?.markdown && (
+        <Box>
+          <Stack direction="row" spacing={1} sx={{ mb: 2 }}>
+            {isCached && <Chip label="Cached" size="small" color="default" />}
+            {isStale && <Chip label="Stale" size="small" color="warning" />}
+            {(deepDive.data_sources || []).includes('finviz') && (
+              <Chip label="Finviz" size="small" color="info" variant="outlined" />
+            )}
+            {(deepDive.data_sources || []).includes('mongo') && (
+              <Chip label="Mongo screener" size="small" color="default" variant="outlined" />
+            )}
+          </Stack>
+          <Box sx={{ '& h2': { mt: 2, mb: 1, fontSize: '1.05rem' }, '& p, & li': { mb: 1 } }}>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{deepDive.markdown}</ReactMarkdown>
+          </Box>
+          {generatedAt && (
+            <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 2 }}>
+              Generated: {new Date(generatedAt).toLocaleString()}
+            </Typography>
+          )}
+          {sources.length > 0 && (
+            <Box sx={{ mt: 2 }}>
+              <Typography variant="subtitle2" gutterBottom>Sources</Typography>
+              <List dense disablePadding>
+                {sources.map((src, idx) => (
+                  <ListItem key={`${src}-${idx}`} disablePadding sx={{ mb: 0.5 }}>
+                    <Link href={src} target="_blank" rel="noopener noreferrer" sx={{ fontSize: '0.85rem', wordBreak: 'break-all' }}>
+                      {src}
+                    </Link>
+                  </ListItem>
+                ))}
+              </List>
+            </Box>
+          )}
+        </Box>
+      )}
+    </AnalysisCard>
+  );
+};
 
 const CandlestickChart = ({ plotData, ticker }) => {
   if (!plotData || !plotData.data || !plotData.columns || !plotData.index) {
@@ -438,132 +737,117 @@ const CandlestickChart = ({ plotData, ticker }) => {
   return <Plot data={traces} layout={layout} style={{ width: '100%' }} />;
 };
 
-const MacroInsights = ({ onRateCalculated }) => {
-  const [futures, setFutures] = useState(null);
-  const [loading, setLoading] = useState(true);
-  
-  const [rfTickers, setRfTickers] = useStickyState('SPY, QQQ, IWM', 'rfTickers');
-  const [calculating, setCalculating] = useState(false);
-  const [calcResult, setCalcResult] = useState(null);
-  const [calcLogs, setCalcLogs] = useState([]);
+// --- Rationale sentence matching helpers (shared by AnalysisReference + GptVerdictCard) ---
 
-  useEffect(() => {
-    const fetchMacroData = async () => {
-      try {
-        const response = await axios.get('/api/macro-data');
-        setFutures(response.data);
-      } catch (error) {
-        console.error("Failed to fetch macro data:", error);
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchMacroData();
-  }, []);
+const RATIONALE_STOPWORDS = new Set([
+  'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with',
+  'by', 'from', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had',
+  'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'must',
+  'that', 'this', 'these', 'those', 'it', 'its', 'as', 'if', 'when', 'while', 'than',
+  'then', 'so', 'not', 'no', 'nor', 'can', 'into', 'over', 'under', 'above', 'below',
+  'between', 'during', 'before', 'after', 'through', 'out', 'up', 'down', 'off', 'about',
+]);
 
-  const handleCalculateRate = async (e) => {
-    e.preventDefault();
-    setCalculating(true);
-    setCalcResult(null);
-    setCalcLogs([]);
-    try {
-      const response = await axios.post('/api/calculate-risk-free-rate', {
-        tickers: rfTickers.split(',').map(t => t.trim().toUpperCase()),
-      });
-      setCalcResult(response.data.risk_free_rate);
-      setCalcLogs(response.data.logs);
-      if (response.data.risk_free_rate) {
-        onRateCalculated(response.data.risk_free_rate);
-      }
-    } catch (error) {
-      console.error("Failed to calculate risk-free rate:", error);
-      setCalcLogs(['Calculation failed. See browser console for details.']);
-    } finally {
-      setCalculating(false);
-    }
-  };
-
-  const renderFuturesTable = () => {
-    if (loading) return <CircularProgress size={24} />;
-    if (!futures || futures.error || Object.keys(futures).length === 0) return <Typography color="error">Could not load futures data.</Typography>;
-
-    // Additional safety checks for table structure
-    const firstKey = Object.keys(futures)[0];
-    if (!firstKey || !futures[firstKey] || typeof futures[firstKey] !== 'object') {
-      return <Typography color="error">Invalid futures data structure.</Typography>;
-    }
-
-    return (
-      <TableContainer component={Paper} variant="outlined">
-        <Table size="small">
-          <TableHead>
-            <TableRow sx={{ backgroundColor: '#f5f5f5' }}>
-              {Object.keys(futures[firstKey]).map(header => <TableCell key={header} sx={{ fontWeight: 'bold' }}>{header}</TableCell>)}
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {Object.entries(futures).map(([ticker, data]) => (
-              <TableRow key={ticker}>
-                {Object.entries(data || {}).map(([key, value]) => (
-                  <TableCell key={key} sx={{ color: key === 'Change' && (typeof value === 'string' && value.startsWith('+') ? 'success.main' : 'error.main') }}>
-                    {value}
-                  </TableCell>
-                ))}
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </TableContainer>
-    );
-  };
-
-  return (
-    <AnalysisCard title="Macro Economy Insights">
-      <Grid container spacing={3}>
-        <Grid item xs={12} md={6}>
-          <Typography variant="subtitle1" gutterBottom>Market Futures (Finviz)</Typography>
-          {renderFuturesTable()}
-        </Grid>
-        <Grid item xs={12} md={6}>
-          <Typography variant="subtitle1" gutterBottom>Implied Risk-Free Rate Calculator</Typography>
-          <Box component="form" onSubmit={handleCalculateRate} sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-            <TextField
-              label="Tickers (comma-separated)"
-              value={rfTickers}
-              onChange={e => setRfTickers(e.target.value)}
-              fullWidth
-              size="small"
-            />
-            <Button 
-              type="submit" 
-              variant="contained" 
-              disabled={calculating}
-              startIcon={calculating ? <CircularProgress size={20} /> : <SmartToyIcon />}
-            >
-              {calculating ? 'Calculating...' : 'Calculate Implied Rate'}
-            </Button>
-          </Box>
-          {calcResult !== null && (
-            <Alert severity="success" sx={{ mt: 2 }}>
-              Calculated Rate: <strong>{(calcResult * 100).toFixed(3)}%</strong>
-            </Alert>
-          )}
-          {calcLogs.length > 0 && (
-            <Paper variant="outlined" sx={{ mt: 2, p: 1, maxHeight: 150, overflowY: 'auto', bgcolor: '#f9f9f9' }}>
-              <Typography variant="caption" fontWeight="bold">Calculation Log:</Typography>
-              {calcLogs.map((log, i) => <Typography key={i} variant="caption" display="block" sx={{ fontFamily: 'monospace' }}>{log}</Typography>)}
-            </Paper>
-          )}
-        </Grid>
-      </Grid>
-    </AnalysisCard>
-  );
+const splitRationaleIntoSentences = (text) => {
+  if (!text || typeof text !== 'string') return [];
+  const raw = text.match(/[^.!?]+[.!?]+(?:\s|$)|[^.!?]+$/g) || [];
+  return raw.map((s) => s.trim()).filter(Boolean);
 };
 
-const StrategyOrder = ({ strategy, strategies = [], ticker, expirationDate, gptVerdict, analysisResult, setCautionModeActive, executeAnalysis, selectedExpiration, riskFreeRate, analysisMethod, selectedModel }) => {
+const tokenize = (str) => {
+  if (!str) return [];
+  const lowered = str.toLowerCase().replace(/[^\w\s%-]/g, ' ');
+  return lowered.split(/\s+/).filter((t) => t && !RATIONALE_STOPWORDS.has(t));
+};
+
+const isNumericToken = (token) => /\d/.test(token);
+
+const findBestSentenceIndex = (condition, sentences) => {
+  if (!condition || !sentences?.length) return -1;
+  const condTokens = tokenize(condition);
+  if (condTokens.length === 0) return -1;
+
+  let bestIdx = -1;
+  let bestScore = 0;
+
+  sentences.forEach((sentence, idx) => {
+    const sentTokens = new Set(tokenize(sentence));
+    let score = 0;
+    condTokens.forEach((t) => {
+      if (sentTokens.has(t)) {
+        score += isNumericToken(t) ? 2 : 1;
+      }
+    });
+    if (score > bestScore) {
+      bestScore = score;
+      bestIdx = idx;
+    }
+  });
+
+  return bestScore >= 2 ? bestIdx : -1;
+};
+
+// Small affordance shown next to an entry condition: hover to preview the matched
+// rationale sentence, click to scroll to and highlight it in the analysis.
+const AnalysisReference = ({ gptVerdict, anchorId, conditionText, onJump }) => {
+    if (!anchorId) return null;
+
+    const rationale = gptVerdict?.rationale || '';
+    const sentences = splitRationaleIntoSentences(rationale);
+    const matchedIdx = findBestSentenceIndex(conditionText, sentences);
+    const matchedSentence = matchedIdx >= 0 ? sentences[matchedIdx] : null;
+    const targetId = matchedIdx >= 0 ? `${anchorId}-sent-${matchedIdx}` : anchorId;
+
+    const handleJump = () => {
+        if (onJump) {
+            onJump(targetId);
+        } else {
+            const el = document.getElementById(targetId);
+            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+    };
+
+    const tooltipBody = matchedSentence ? (
+        <Box sx={{ maxWidth: 340 }}>
+            <Typography variant="caption" sx={{ fontWeight: 700, display: 'block', mb: 0.5 }}>
+                Supporting Analysis
+            </Typography>
+            <Typography variant="caption" sx={{ display: 'block', lineHeight: 1.4 }}>
+                {matchedSentence.length > 400 ? `${matchedSentence.slice(0, 400)}…` : matchedSentence}
+            </Typography>
+            <Typography variant="caption" sx={{ display: 'block', mt: 1, fontStyle: 'italic', opacity: 0.85 }}>
+                Click to jump &amp; highlight ↑
+            </Typography>
+        </Box>
+    ) : rationale ? (
+        <Box sx={{ maxWidth: 340 }}>
+            <Typography variant="caption" sx={{ display: 'block', lineHeight: 1.4 }}>
+                No pinpoint match found. Click to jump to the full analysis.
+            </Typography>
+        </Box>
+    ) : (
+        'Jump to full analysis'
+    );
+
+    return (
+        <Tooltip title={tooltipBody} placement="top" arrow>
+            <IconButton
+                size="small"
+                onClick={handleJump}
+                sx={{ ml: 0.5, p: 0.25, flexShrink: 0 }}
+                aria-label="View analysis reference"
+            >
+                <InfoIcon sx={{ fontSize: 16 }} color="action" />
+            </IconButton>
+        </Tooltip>
+    );
+};
+
+const StrategyOrder = ({ strategy, strategies = [], ticker, expirationDate, gptVerdict, analysisResult, setCautionModeActive, executeAnalysis, selectedExpiration, riskFreeRate, analysisMethod, selectedModel, analysisAnchorId, onReferenceJump }) => {
     const [isOrdering, setIsOrdering] = useState({});
     const [orderStatus, setOrderStatus] = useState({});    
     const [showGptInsights, setShowGptInsights] = useState(false);
+    const [showEntryTimingDetails, setShowEntryTimingDetails] = useState({});
 
     // Consolidate strategies for execution from either GPT verdict or standard analysis
     let allStrategies = [];
@@ -841,6 +1125,15 @@ const StrategyOrder = ({ strategy, strategies = [], ticker, expirationDate, gptV
             'Low': 'error'
         }[confidence] || 'default';
 
+        const entryTiming = gptVerdict?.execution_recommendations?.entry_timing;
+        const entrySeverity = entryTiming?.status === 'enter_now' ? 'success' : entryTiming?.status === 'wait' ? 'warning' : 'info';
+        const entryLabel =
+          entryTiming?.status === 'enter_now'
+            ? 'Good time to enter'
+            : entryTiming?.status === 'wait'
+              ? 'Wait — entry conditions not met'
+              : 'Review entry conditions manually';
+
         return (
             <Card key={index} variant="outlined" sx={{ mb: 2 }}>
                 <CardContent>
@@ -848,6 +1141,48 @@ const StrategyOrder = ({ strategy, strategies = [], ticker, expirationDate, gptV
                         <Typography variant="h6">{strategy.name || strategy.type}</Typography>
                         <Chip label={`${confidence} Confidence`} color={confidenceColor} size="small" variant="outlined" />
                     </Box>
+
+                    {entryTiming && (
+                        <Box sx={{ mb: 2 }}>
+                            <Alert severity={entrySeverity} sx={{ mb: 1 }}>
+                                <AlertTitle>{entryTiming.status === 'enter_now' ? 'Timing: Enter Now' : entryTiming.status === 'wait' ? 'Timing: Wait' : 'Timing: Review'}</AlertTitle>
+                                {entryLabel}
+                            </Alert>
+                            {(Array.isArray(entryTiming.conditions) && entryTiming.conditions.length > 0) && (
+                                <>
+                                    <Button
+                                        size="small"
+                                        variant="text"
+                                        onClick={() =>
+                                            setShowEntryTimingDetails((prev) => ({ ...prev, [index]: !prev[index] }))
+                                        }
+                                        sx={{ mb: 1 }}
+                                    >
+                                        {showEntryTimingDetails[index] ? 'Hide' : 'Show'} entry condition details
+                                    </Button>
+                                    <Collapse in={!!showEntryTimingDetails[index]}>
+                                        <List dense disablePadding>
+                                            {entryTiming.conditions.map((c, i) => (
+                                                <ListItem key={i} disablePadding sx={{ mb: 0.5, alignItems: 'flex-start' }}>
+                                                    <ListItemText
+                                                        primaryTypographyProps={{ variant: 'caption', fontWeight: 600 }}
+                                                        primary={`${c.status === 'met' ? '✓' : c.status === 'unmet' ? '!' : '?'} ${c.text}`}
+                                                        secondary={c.reason}
+                                                    />
+                                                    <AnalysisReference
+                                                        gptVerdict={gptVerdict}
+                                                        anchorId={analysisAnchorId}
+                                                        conditionText={c.text}
+                                                        onJump={onReferenceJump}
+                                                    />
+                                                </ListItem>
+                                            ))}
+                                        </List>
+                                    </Collapse>
+                                </>
+                            )}
+                        </Box>
+                    )}
 
                     <Typography variant="subtitle2" gutterBottom>Strategy Legs:</Typography>
                     <List dense disablePadding sx={{ mb: 2, bgcolor: '#f5f5f5', borderRadius: 1 }}>
@@ -1145,8 +1480,14 @@ const StrategyOrder = ({ strategy, strategies = [], ticker, expirationDate, gptV
                                                     </Typography>
                                                     <List dense disablePadding>
                                                         {gptVerdict.execution_recommendations.entry_conditions.slice(0, 3).map((condition, i) => (
-                                                            <ListItem key={i} disablePadding sx={{ mb: 0.5 }}>
+                                                            <ListItem key={i} disablePadding sx={{ mb: 0.5, alignItems: 'flex-start' }}>
                                                                 <ListItemText primary={condition} primaryTypographyProps={{ variant: 'caption', lineHeight: 1.4 }} />
+                                                                <AnalysisReference
+                                                                    gptVerdict={gptVerdict}
+                                                                    anchorId={analysisAnchorId}
+                                                                    conditionText={condition}
+                                                                    onJump={onReferenceJump}
+                                                                />
                                                             </ListItem>
                                                         ))}
                                                     </List>
@@ -1256,11 +1597,300 @@ const StrategyOrder = ({ strategy, strategies = [], ticker, expirationDate, gptV
     );
 };
 
-const GptVerdictCard = ({ verdict }) => {
+const webResearchMarkdownSx = {
+  fontSize: '0.875rem',
+  lineHeight: 1.65,
+  color: 'text.primary',
+  '& > *:first-of-type': { mt: 0 },
+  '& > *:last-child': { mb: 0 },
+  '& p': { my: 1 },
+  '& h1, & h2, & h3, & h4': {
+    mt: 2,
+    mb: 0.75,
+    fontWeight: 600,
+    lineHeight: 1.3,
+    color: 'primary.dark',
+  },
+  '& h1': { fontSize: '1.05rem' },
+  '& h2': { fontSize: '1rem' },
+  '& h3, & h4': { fontSize: '0.95rem' },
+  '& ul, & ol': { pl: 2.25, my: 1 },
+  '& ul': { listStyleType: 'disc' },
+  '& ol': { listStyleType: 'decimal' },
+  '& li': { mb: 0.65, pl: 0.25 },
+  '& li::marker': { color: 'primary.main' },
+  '& li > p': { my: 0.25 },
+  '& strong': { fontWeight: 600, color: 'text.primary' },
+  '& em': { color: 'text.secondary' },
+  '& a': { color: 'primary.main', textDecoration: 'none', '&:hover': { textDecoration: 'underline' } },
+  '& blockquote': {
+    borderLeft: '3px solid',
+    borderColor: 'primary.light',
+    pl: 2,
+    ml: 0,
+    my: 1.5,
+    color: 'text.secondary',
+    fontStyle: 'italic',
+    bgcolor: 'action.hover',
+    borderRadius: '0 4px 4px 0',
+    py: 0.5,
+  },
+  '& code': {
+    fontFamily: 'monospace',
+    fontSize: '0.8rem',
+    bgcolor: 'action.hover',
+    px: 0.5,
+    py: 0.25,
+    borderRadius: 0.5,
+  },
+  '& hr': { my: 2, borderColor: 'divider' },
+  '& table': { borderCollapse: 'collapse', width: '100%', my: 1.5, fontSize: '0.8rem' },
+  '& th, & td': { border: '1px solid', borderColor: 'divider', px: 1, py: 0.75, textAlign: 'left' },
+  '& th': { bgcolor: 'action.hover', fontWeight: 600 },
+};
+
+const formatWebResearchFetchedAt = (iso) => {
+  if (!iso) return null;
+  try {
+    return new Date(iso).toLocaleString(undefined, {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    });
+  } catch {
+    return null;
+  }
+};
+
+const sourceLinkLabel = (url) => {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, '');
+    const path = new URL(url).pathname;
+    if (path && path !== '/' && path.length < 48) {
+      return `${host}${path}`;
+    }
+    return host;
+  } catch {
+    return url;
+  }
+};
+
+/** Strip Perplexity inline citation markers like [1] or [1][2] for cleaner reading. */
+const stripInlineCitations = (line) =>
+  line.replace(/\s*\[(\d+)\](?:\[(\d+)\])*/g, '').trim();
+
+/** Normalize plain-text Perplexity output into markdown-friendly content. */
+const normalizeWebResearchSummary = (text) => {
+  if (!text || typeof text !== 'string') return '';
+  let trimmed = text.trim();
+  if (!trimmed) return '';
+
+  if (!/^#|\*\*|\[.*\]\(http|^[-*]\s/m.test(trimmed)) {
+    const rawLines = trimmed.split('\n').map((line) => line.trim()).filter(Boolean);
+    const bulletLike = rawLines.filter((line) => /^[-•*]\s/.test(line) || /^\d+\.\s/.test(line));
+    if (bulletLike.length >= Math.max(2, rawLines.length * 0.5)) {
+      trimmed = rawLines
+        .map((line) => {
+          const cleaned = stripInlineCitations(line);
+          if (/^[-•*]\s/.test(cleaned)) return `- ${cleaned.replace(/^[-•*]\s+/, '')}`;
+          if (/^\d+\.\s/.test(cleaned)) return cleaned;
+          return cleaned;
+        })
+        .join('\n');
+    } else {
+      trimmed = rawLines
+        .map((line) => stripInlineCitations(line))
+        .map((line, i, arr) => {
+          if (/^[A-Z][A-Za-z0-9\s/&-]{2,48}:$/.test(line)) {
+            return `### ${line.slice(0, -1)}`;
+          }
+          if (/^[A-Z][A-Za-z0-9\s/&-]{2,48}:\s/.test(line) && line.length < 72) {
+            const colon = line.indexOf(':');
+            return `**${line.slice(0, colon + 1)}**${line.slice(colon + 1)}`;
+          }
+          if (arr.length > 1 && line.length < 200) return `- ${line}`;
+          return line;
+        })
+        .join('\n\n');
+    }
+  }
+
+  return trimmed
+    .split('\n')
+    .map((line) => stripInlineCitations(line))
+    .join('\n');
+};
+
+const webResearchMarkdownComponents = {
+  h3: ({ children }) => (
+    <Typography
+      component="h3"
+      variant="subtitle2"
+      fontWeight={700}
+      sx={{
+        mt: 2,
+        mb: 0.75,
+        pb: 0.5,
+        color: 'primary.dark',
+        borderBottom: 1,
+        borderColor: 'divider',
+      }}
+    >
+      {children}
+    </Typography>
+  ),
+  li: ({ children }) => (
+    <Box component="li" sx={{ mb: 0.75, '& p': { display: 'inline', margin: 0 } }}>
+      <Typography component="span" variant="body2" sx={{ lineHeight: 1.65 }}>
+        {children}
+      </Typography>
+    </Box>
+  ),
+  p: ({ children }) => (
+    <Typography component="p" variant="body2" sx={{ lineHeight: 1.65, my: 1 }}>
+      {children}
+    </Typography>
+  ),
+};
+
+const WebResearchSummaryBlock = ({ webResearch, sources }) => {
+  const [expanded, setExpanded] = useState(true);
+  const summary = normalizeWebResearchSummary(webResearch?.summary || '');
+  const linkList = (sources && sources.length > 0 ? sources : webResearch?.sources) || [];
+  const fetchedLabel = formatWebResearchFetchedAt(webResearch?.fetched_at);
+
+  if (!summary && linkList.length === 0) return null;
+
+  return (
+    <Box sx={{ mb: 3 }}>
+      <Stack
+        direction="row"
+        alignItems="center"
+        justifyContent="space-between"
+        spacing={1}
+        sx={{ mb: 1 }}
+      >
+        <Stack direction="row" alignItems="center" spacing={1}>
+          <SearchIcon color="primary" fontSize="small" />
+          <Typography variant="subtitle1" fontWeight="bold">
+            Web Research Summary
+          </Typography>
+          {linkList.length > 0 && (
+            <Chip size="small" label={`${linkList.length} sources`} variant="outlined" sx={{ height: 22 }} />
+          )}
+        </Stack>
+        <IconButton
+          size="small"
+          aria-label={expanded ? 'Collapse web research' : 'Expand web research'}
+          onClick={() => setExpanded((v) => !v)}
+        >
+          {expanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+        </IconButton>
+      </Stack>
+
+      <Collapse in={expanded}>
+        <Paper
+          variant="outlined"
+          sx={{
+            overflow: 'hidden',
+            borderColor: 'primary.light',
+            bgcolor: 'background.paper',
+          }}
+        >
+          <Box
+            sx={{
+              px: 2,
+              py: 1.25,
+              bgcolor: (theme) => theme.palette.mode === 'dark' ? 'action.hover' : 'primary.50',
+              borderBottom: 1,
+              borderColor: 'divider',
+            }}
+          >
+            <Stack direction="row" flexWrap="wrap" gap={1} alignItems="center">
+              <Chip
+                size="small"
+                icon={<SearchIcon sx={{ fontSize: '14px !important' }} />}
+                label={webResearch?.provider === 'perplexity' ? 'Perplexity Sonar' : (webResearch?.provider || 'Web search')}
+                color="primary"
+                variant="outlined"
+              />
+              {webResearch?.model && (
+                <Chip size="small" label={webResearch.model} variant="outlined" />
+              )}
+              {fetchedLabel && (
+                <Typography variant="caption" color="text.secondary" sx={{ ml: { xs: 0, sm: 'auto' } }}>
+                  Retrieved {fetchedLabel}
+                </Typography>
+              )}
+            </Stack>
+          </Box>
+
+          {summary && (
+            <Box sx={{ px: 2, py: 2, bgcolor: '#f8fafc' }}>
+              <Box sx={webResearchMarkdownSx}>
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  components={webResearchMarkdownComponents}
+                >
+                  {summary}
+                </ReactMarkdown>
+              </Box>
+            </Box>
+          )}
+
+          {linkList.length > 0 && (
+            <>
+              {summary && <Divider />}
+              <Box sx={{ px: 2, py: 1.5, bgcolor: 'background.default' }}>
+                <Typography variant="caption" color="text.secondary" fontWeight={700} sx={{ display: 'block', mb: 1.25, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                  Sources · {linkList.length}
+                </Typography>
+                <Stack spacing={0.75}>
+                  {linkList.map((source, i) => (
+                    <Tooltip key={`${source}-${i}`} title={source} placement="top-start" enterDelay={400}>
+                      <Link
+                        href={source}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        underline="hover"
+                        variant="body2"
+                        sx={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 0.75,
+                          color: 'primary.main',
+                          fontWeight: 500,
+                          maxWidth: '100%',
+                        }}
+                      >
+                        <OpenInNewIcon sx={{ fontSize: 15, flexShrink: 0 }} />
+                        <Box component="span" sx={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {sourceLinkLabel(source)}
+                        </Box>
+                      </Link>
+                    </Tooltip>
+                  ))}
+                </Stack>
+              </Box>
+            </>
+          )}
+        </Paper>
+      </Collapse>
+    </Box>
+  );
+};
+
+const GptVerdictCard = ({ verdict, anchorId, highlightedSentenceId }) => {
   if (!verdict) return null;
+
+  const rationaleSentences = splitRationaleIntoSentences(verdict.rationale);
 
   return (
     <AnalysisCard title="GPT-Powered Verdict & Rationale">
+      <WebResearchSummaryBlock
+        webResearch={verdict.web_research}
+        sources={verdict.sources}
+      />
+
       {verdict.key_reasoning_points && verdict.key_reasoning_points.length > 0 && (
         <Box sx={{ mb: 3 }}>
           <Typography variant="subtitle1" gutterBottom fontWeight="bold">Key Analysis Points</Typography>
@@ -1281,7 +1911,29 @@ const GptVerdictCard = ({ verdict }) => {
           <Typography variant="subtitle1" gutterBottom fontWeight="bold">Detailed Reasoning</Typography>
           <Paper variant="outlined" sx={{ p: 2 }}>
             <Typography variant="body2" sx={{ lineHeight: 1.6 }}>
-              {verdict.rationale}
+              {rationaleSentences.length > 0 ? (
+                rationaleSentences.map((sentence, i) => {
+                  const sid = anchorId ? `${anchorId}-sent-${i}` : null;
+                  const isHighlighted = sid && highlightedSentenceId === sid;
+                  return (
+                    <Box
+                      key={i}
+                      component="span"
+                      id={sid || undefined}
+                      sx={{
+                        transition: 'background-color 0.4s ease',
+                        backgroundColor: isHighlighted ? 'warning.light' : 'transparent',
+                        borderRadius: 0.5,
+                        scrollMarginTop: '90px',
+                      }}
+                    >
+                      {sentence}{' '}
+                    </Box>
+                  );
+                })
+              ) : (
+                verdict.rationale
+              )}
             </Typography>
           </Paper>
         </Box>
@@ -1314,26 +1966,6 @@ const GptVerdictCard = ({ verdict }) => {
           </Grid>
         )}
       </Grid>
-
-      {verdict.search_performed && verdict.sources && verdict.sources.length > 0 && (
-        <Box sx={{ mt: 3 }}>
-          <Typography variant="subtitle2" gutterBottom>Sources Consulted</Typography>
-          <List dense disablePadding>
-            {verdict.sources.map((source, i) => (
-              <ListItem key={i} disablePadding>
-                <ListItemText 
-                  primary={
-                    <a href={source} target="_blank" rel="noopener noreferrer" style={{ color: '#1976d2', textDecoration: 'none' }}>
-                      {source}
-                    </a>
-                  } 
-                  primaryTypographyProps={{ variant: 'caption' }}
-                />
-              </ListItem>
-            ))}
-          </List>
-        </Box>
-      )}
     </AnalysisCard>
   );
 };
@@ -1346,15 +1978,82 @@ const AnalysisDetails = ({
   selectedExpiration,
   riskFreeRate,
   analysisMethod,
-  selectedModel
+  selectedModel,
+  chatModel,
+  resultIndex = 0,
+  totalResults = 1,
 }) => {
   const finalBias = data.final_bias || '';
   const biasColor = finalBias.includes('Bullish') ? 'success.main' : finalBias.includes('Bearish') ? 'error.main' : 'warning.main';
+
+  // Stable anchor so condition tooltips can scroll back to this result's reasoning.
+  const analysisAnchorId = `analysis-reasoning-${data.ticker || 'ticker'}-${data.dte ?? 'na'}`;
+  const [activeTab, setActiveTab] = useState('conclusion');
+  const [pendingReferenceId, setPendingReferenceId] = useState(null);
+  const [highlightedSentenceId, setHighlightedSentenceId] = useState(null);
+  const highlightTimerRef = useRef(null);
+
+  const handleReferenceJump = useCallback((targetId) => {
+    setActiveTab('verdict');
+    setPendingReferenceId(targetId);
+  }, []);
+
+  useEffect(() => {
+    if (!pendingReferenceId || activeTab !== 'verdict') return undefined;
+
+    const frameId = window.requestAnimationFrame(() => {
+      const el = document.getElementById(pendingReferenceId);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setHighlightedSentenceId(pendingReferenceId);
+      if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+      highlightTimerRef.current = setTimeout(() => setHighlightedSentenceId(null), 3000);
+      setPendingReferenceId(null);
+    });
+
+    return () => window.cancelAnimationFrame(frameId);
+  }, [pendingReferenceId, activeTab]);
+
+  useEffect(() => () => {
+    if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+  }, []);
+
+  useEffect(() => {
+    setActiveTab('conclusion');
+    setPendingReferenceId(null);
+  }, [data.ticker, data.dte, resultIndex]);
 
   const isGptResult = !!data.gpt_verdict;
   const conclusionTitle = isGptResult
     ? `AI-Powered Conclusion & Strategy (DTE: ${data.dte} days)`
     : `Holistic Conclusion & Strategy (DTE: ${data.dte} days)`;
+
+  const pagerTabs = useMemo(() => {
+    const items = [
+      { key: 'conclusion', label: 'Conclusion' },
+    ];
+    if (data.gpt_verdict) {
+      items.push({ key: 'verdict', label: 'AI Verdict' });
+    }
+    items.push(
+      { key: 'fundamentals', label: 'Fundamentals' },
+      { key: 'deep-dive', label: 'Deep Dive' },
+      { key: 'chart', label: 'Price Chart' },
+      { key: 'strategies', label: 'Strategies' },
+    );
+    if (!isGptResult) {
+      items.push(
+        { key: 'patterns', label: 'Patterns' },
+        { key: 'sentiment', label: 'Sentiment' },
+        { key: 'volatility', label: 'Volatility' },
+        { key: 'valuation', label: 'Valuation' },
+      );
+    }
+    return items;
+  }, [data.gpt_verdict, isGptResult]);
+
+  const pagerHeading = totalResults > 1
+    ? `Analysis sections · DTE ${data.dte ?? '—'} days`
+    : 'Analysis sections';
 
   const renderUOA = (uoaList, type) => {
     if (!uoaList || uoaList.length === 0) return null;
@@ -1377,15 +2076,48 @@ const AnalysisDetails = ({
 
   return (
     <Box>
+      <AnalysisSectionPager
+        tabs={pagerTabs}
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+        heading={pagerHeading}
+      />
+
+      {activeTab === 'conclusion' && (
+      <>
       <AnalysisCard title={conclusionTitle}>
         <Typography variant="h5" sx={{ color: biasColor, mb: 2, fontWeight: 'bold' }}>
           Final Bias: {finalBias}
         </Typography>
         <Box dangerouslySetInnerHTML={{ __html: data.final_conclusion_html }} sx={{ '& ul': { pl: 2 }, '& li': { mb: 0.5 } }} />
       </AnalysisCard>
+      <AnalysisChat
+        analysis={data}
+        model={chatModel || selectedModel}
+        threadKey={`${data.ticker || ''}-${data.dte ?? ''}-${resultIndex}`}
+      />
+      </>
+      )}
 
-      {data.gpt_verdict && <GptVerdictCard verdict={data.gpt_verdict} />}
+      {activeTab === 'verdict' && data.gpt_verdict && (
+        <Box id={analysisAnchorId} sx={{ scrollMarginTop: '108px' }}>
+          <GptVerdictCard
+            verdict={data.gpt_verdict}
+            anchorId={analysisAnchorId}
+            highlightedSentenceId={highlightedSentenceId}
+          />
+        </Box>
+      )}
 
+      {activeTab === 'fundamentals' && (
+      <CompanyFundamentalsCard ticker={data.ticker} />
+      )}
+
+      {activeTab === 'deep-dive' && (
+      <CompanyDeepDiveCard ticker={data.ticker} />
+      )}
+
+      {activeTab === 'chart' && (
       <AnalysisCard title="Price Chart (Candlesticks + MAs)">
         {data.candlestick_analysis?.plot_data ? 
           <CandlestickChart plotData={data.candlestick_analysis.plot_data} ticker={data.ticker} /> :
@@ -1408,7 +2140,9 @@ const AnalysisDetails = ({
           )}
         </Grid>
       </AnalysisCard>
-      
+      )}
+
+      {activeTab === 'strategies' && (
       <StrategyOrder
         strategies={data.recommended_strategies || [data.recommended_strategy].filter(Boolean)}
         ticker={data.ticker}
@@ -1421,10 +2155,12 @@ const AnalysisDetails = ({
         riskFreeRate={riskFreeRate}
         analysisMethod={analysisMethod}
         selectedModel={selectedModel}
+        analysisAnchorId={analysisAnchorId}
+        onReferenceJump={handleReferenceJump}
       />
-      
-      { !isGptResult &&
-        <>
+      )}
+
+      {activeTab === 'patterns' && !isGptResult && (
           <AnalysisCard title="1. Candlestick Patterns (Context)">
             {data.candlestick_analysis?.patterns && data.candlestick_analysis.patterns.length > 0 ? (
               <Box sx={{ mt: 1 }}>
@@ -1444,7 +2180,9 @@ const AnalysisDetails = ({
               <Typography variant="body2" sx={{ mt: 1 }}>No significant candlestick patterns identified in the last few periods.</Typography>
             )}
           </AnalysisCard>
+      )}
 
+      {activeTab === 'sentiment' && !isGptResult && (
           <AnalysisCard title="2. Sentiment Analysis (Volume & OI)">
             <Grid container spacing={2}>
               <Grid item xs={12} md={4}>
@@ -1467,13 +2205,17 @@ const AnalysisDetails = ({
             {renderUOA(data.volume_oi_analysis?.uoa_calls, 'Call')}
             {renderUOA(data.volume_oi_analysis?.uoa_puts, 'Put')}
           </AnalysisCard>
+      )}
 
+      {activeTab === 'volatility' && !isGptResult && (
           <AnalysisCard title="3. Volatility & Movement Analysis">
             <Typography variant="body1" gutterBottom><strong>Market-Implied Move:</strong> {data.movement_analysis?.expected_move_pct?.toFixed(2) || 'N/A'}%</Typography>
             {data.movement_analysis?.vol_compression_text && <Typography variant="body2" paragraph><strong>Volatility Compression:</strong> {data.movement_analysis.vol_compression_text}</Typography>}
             {data.movement_analysis?.earnings_note && <Typography variant="body2" paragraph><strong>Catalyst Event:</strong> {data.movement_analysis.earnings_note}</Typography>}
           </AnalysisCard>
-          
+      )}
+
+      {activeTab === 'valuation' && !isGptResult && (
           <AnalysisCard title="4. Quantitative Valuation (Undervalued Options)">
             {data.results_df && data.results_df.length > 0 ? (
               <TableContainer component={Paper} variant="outlined">
@@ -1500,13 +2242,12 @@ const AnalysisDetails = ({
               </TableContainer>
             ) : <Typography variant="body2">No significantly undervalued options were found.</Typography>}
           </AnalysisCard>
-        </>
-      }
+      )}
     </Box>
   );
 };
 
-const ResultsDisplay = ({ analysisResult, setCautionModeActive, executeAnalysis, selectedExpiration, riskFreeRate, analysisMethod, selectedModel }) => {
+const ResultsDisplay = ({ analysisResult, setCautionModeActive, executeAnalysis, selectedExpiration, riskFreeRate, analysisMethod, selectedModel, chatModel }) => {
   if (!analysisResult || !Array.isArray(analysisResult) || analysisResult.length === 0) {
     return <Typography color="text.secondary">No analysis results to display.</Typography>;
   }
@@ -1533,6 +2274,9 @@ const ResultsDisplay = ({ analysisResult, setCautionModeActive, executeAnalysis,
             riskFreeRate={riskFreeRate}
             analysisMethod={analysisMethod}
             selectedModel={selectedModel}
+            chatModel={chatModel}
+            resultIndex={index}
+            totalResults={analysisResult.length}
           />
         </Box>
       ))}
@@ -1540,7 +2284,7 @@ const ResultsDisplay = ({ analysisResult, setCautionModeActive, executeAnalysis,
   );
 };
 
-const SavedVerdictsControls = ({ ticker, currentResult }) => {
+const SavedVerdictsControls = ({ ticker, currentResult, currentRiskFreeRate, scrollAnchorRef, onOpenFull, onRerun, availableModels = [], defaultModel = 'gemini-2.5-flash' }) => {
   const [saving, setSaving] = useState(false);
   const [saveLabel, setSaveLabel] = useState('');
   const [saveMsg, setSaveMsg] = useState('');
@@ -1553,6 +2297,15 @@ const SavedVerdictsControls = ({ ticker, currentResult }) => {
   const [hasMore, setHasMore] = useState(false);
   const [selectedId, setSelectedId] = useState('');
   const [selectedDoc, setSelectedDoc] = useState(null);
+
+  const [selectedForResolve, setSelectedForResolve] = useState(() => new Set());
+  const [resolveModel, setResolveModel] = useState(defaultModel || 'gemini-2.5-flash');
+  const [resolving, setResolving] = useState(false);
+  const [resolveResult, setResolveResult] = useState(null);
+  const [resolveError, setResolveError] = useState('');
+  const [resolutions, setResolutions] = useState([]);
+  const [resolutionsLoading, setResolutionsLoading] = useState(false);
+  const [selectedResolution, setSelectedResolution] = useState(null);
 
   // Use the provided ticker; currentResult is optional (used for manual save and compare)
 
@@ -1573,12 +2326,38 @@ const SavedVerdictsControls = ({ ticker, currentResult }) => {
     }
   };
 
+  const loadResolutions = async () => {
+    if (!ticker) return;
+    setResolutionsLoading(true);
+    try {
+      const resp = await axios.get(`/api/analysis/conflict-resolutions/${encodeURIComponent(ticker)}`);
+      setResolutions(resp.data?.items || []);
+    } catch (e) {
+      console.error('Failed to load conflict resolutions', e);
+      setResolutions([]);
+    } finally {
+      setResolutionsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (defaultModel) setResolveModel(defaultModel);
+  }, [defaultModel]);
+
   useEffect(() => {
     setSavedList([]);
     setSelectedDoc(null);
     setSelectedId('');
+    setSelectedForResolve(new Set());
+    setResolveResult(null);
+    setResolveError('');
+    setSelectedResolution(null);
+    setResolutions([]);
     setPage(1);
-    if (ticker) loadList();
+    if (ticker) {
+      loadList();
+      loadResolutions();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ticker]);
 
@@ -1604,11 +2383,22 @@ const SavedVerdictsControls = ({ ticker, currentResult }) => {
     setSaving(true);
     setSaveMsg('');
     try {
+      const rateCandidate = Number(currentRiskFreeRate);
+      const mergedVerdict = {
+        ...currentResult,
+        market_data: {
+          ...(currentResult.market_data || {}),
+          risk_free_rate: Number.isFinite(rateCandidate)
+            ? rateCandidate
+            : currentResult.market_data?.risk_free_rate,
+        },
+      };
       const resp = await axios.post('/api/analysis/verdicts', {
-        verdict: currentResult,
+        verdict: mergedVerdict,
         label: saveLabel || undefined,
       });
       setSaveMsg(`Saved (id: ${resp.data?.id || 'unknown'})`);
+      setSaveLabel('');
       await loadList();
     } catch (e) {
       setSaveMsg(`Save failed: ${e.response?.data?.detail || e.message}`);
@@ -1632,11 +2422,88 @@ const SavedVerdictsControls = ({ ticker, currentResult }) => {
     }
   };
 
+  const toggleResolve = (id) => {
+    setSelectedForResolve((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleResolve = async () => {
+    if (!ticker || selectedForResolve.size < 2) {
+      setResolveError('ValueError: Need at least 2 saved verdicts to resolve.');
+      return;
+    }
+    setResolving(true);
+    setResolveError('');
+    setSelectedResolution(null);
+    try {
+      const resp = await axios.post('/api/analysis/conflict-resolve', {
+        ticker,
+        verdict_ids: Array.from(selectedForResolve),
+        model: resolveModel,
+      });
+      setResolveResult(resp.data);
+      setSelectedForResolve(new Set());
+      await loadResolutions();
+    } catch (e) {
+      const detail = e.response?.data?.detail;
+      let message = '';
+      if (typeof detail === 'string') {
+        message = detail;
+      } else if (Array.isArray(detail)) {
+        message = detail.map((d) => (typeof d === 'string' ? d : d?.msg || JSON.stringify(d))).join('; ');
+      } else if (detail != null) {
+        message = String(detail);
+      } else {
+        message = e.message || 'Conflict resolve failed';
+      }
+      const isValueError = e.response?.status === 400 || /valueerror/i.test(message);
+      setResolveError(isValueError && !/^ValueError:/i.test(message) ? `ValueError: ${message}` : message);
+      setResolveResult(null);
+    } finally {
+      setResolving(false);
+    }
+  };
+
+  const handleOpenResolution = async (id) => {
+    if (!id) return;
+    setSelectedResolution(id);
+    try {
+      const resp = await axios.get(`/api/analysis/conflict-resolutions/id/${encodeURIComponent(id)}`);
+      setResolveResult(resp.data?.item || null);
+      setResolveError('');
+    } catch (e) {
+      console.error('Failed to fetch conflict resolution', e);
+      setResolveError(e.response?.data?.detail || e.message || 'Failed to load resolution');
+    }
+  };
+
   const currentBias = currentResult?.final_bias || '';
   const previousBias = selectedDoc?.final_bias || '';
   const biasChanged = previousBias && currentBias && previousBias !== currentBias;
+  const displayResult = resolveResult;
+  const agreementPoints = displayResult?.agreement_points || [];
+  const disagreementPoints = displayResult?.disagreement_points || [];
+  const resolutionSources = Array.isArray(displayResult?.sources) ? displayResult.sources : [];
+
+  const formatSourceTimestamp = (value) => {
+    if (!value || typeof value !== 'string') return '';
+    return value.slice(0, 19).replace('T', ' ');
+  };
+
+  const describeSourceMethod = (method) => {
+    const text = method || '';
+    if (text.includes('gpt') && text.includes('web')) return 'Web Verdict';
+    if (text.includes('gpt')) return 'GPT Verdict';
+    if (text) return 'Model Verdict';
+    return 'Verdict';
+  };
 
   return (
+    <Box ref={scrollAnchorRef}>
     <AnalysisCard title="Verdict History">
       <Grid container spacing={3}>
         <Grid item xs={12} md={4}>
@@ -1670,12 +2537,15 @@ const SavedVerdictsControls = ({ ticker, currentResult }) => {
               <Table size="small" stickyHeader>
                 <TableHead>
                   <TableRow>
+                    <TableCell padding="checkbox" />
                     <TableCell>Saved At</TableCell>
+                    <TableCell>Ticker</TableCell>
                     <TableCell>Label</TableCell>
                     <TableCell>Type</TableCell>
                     <TableCell>Bias</TableCell>
                     <TableCell>Expiration</TableCell>
                     <TableCell align="right">DTE</TableCell>
+                    <TableCell align="right">RF Rate</TableCell>
                     <TableCell align="right">Price</TableCell>
                   </TableRow>
                 </TableHead>
@@ -1685,7 +2555,7 @@ const SavedVerdictsControls = ({ ticker, currentResult }) => {
                       const ts = item.created_at?.slice(0, 19).replace('T',' ');
                       const ov = item.overview || {};
                       const typeText = ov.method_label || ((item.analysis_method || '').includes('gpt')
-                        ? (((item.analysis_method || '').includes('web') ? 'GPT Web Verdict' : 'GPT Verdict'))
+                        ? (((item.analysis_method || '').includes('web') ? 'Web Verdict' : 'GPT Verdict'))
                         : 'Model Verdict');
                       const isSelected = selectedId === item.id;
                       return (
@@ -1694,19 +2564,30 @@ const SavedVerdictsControls = ({ ticker, currentResult }) => {
                           onClick={() => handleSelect(item.id)}
                           sx={{ cursor: 'pointer', bgcolor: isSelected ? 'action.selected' : 'inherit', '&:hover': { bgcolor: 'action.hover' } }}
                         >
+                          <TableCell padding="checkbox" onClick={(e) => e.stopPropagation()}>
+                            <Checkbox
+                              size="small"
+                              checked={selectedForResolve.has(item.id)}
+                              onChange={() => toggleResolve(item.id)}
+                            />
+                          </TableCell>
                           <TableCell>{ts}</TableCell>
+                          <TableCell>{item.ticker || ov.ticker || ''}</TableCell>
                           <TableCell>{item.label || ''}</TableCell>
                           <TableCell>{typeText}</TableCell>
                           <TableCell>{item.final_bias || ov.final_bias || ''}</TableCell>
                           <TableCell>{item.expiration_date || ov.expiration_date || ''}</TableCell>
                           <TableCell align="right">{ov.dte ?? ''}</TableCell>
+                          <TableCell align="right">
+                            {formatRiskFreeRate(item.risk_free_rate ?? ov.risk_free_rate) || '—'}
+                          </TableCell>
                           <TableCell align="right">{typeof ov.S_current === 'number' ? `$${ov.S_current.toFixed(2)}` : ''}</TableCell>
                         </TableRow>
                       );
                     })
                   ) : (
                     <TableRow>
-                      <TableCell colSpan={7} align="center">No saved verdicts yet.</TableCell>
+                      <TableCell colSpan={10} align="center">No saved verdicts yet.</TableCell>
                     </TableRow>
                   )}
                 </TableBody>
@@ -1729,9 +2610,102 @@ const SavedVerdictsControls = ({ ticker, currentResult }) => {
             </FormControl>
           </Box>
 
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mt: 2, flexWrap: 'wrap' }}>
+            <FormControl size="small" sx={{ minWidth: 200 }}>
+              <InputLabel>Resolve Model</InputLabel>
+              <Select
+                value={resolveModel}
+                label="Resolve Model"
+                onChange={(e) => setResolveModel(e.target.value)}
+              >
+                {(availableModels || []).length > 0 ? (
+                  availableModels.map((model) => (
+                    <MenuItem key={model.id} value={model.id}>
+                      {model.name || model.id}
+                    </MenuItem>
+                  ))
+                ) : (
+                  <MenuItem value={resolveModel}>{resolveModel}</MenuItem>
+                )}
+              </Select>
+            </FormControl>
+            <Button
+              variant="contained"
+              color="secondary"
+              disabled={resolving || !ticker}
+              onClick={handleResolve}
+            >
+              {resolving ? 'Resolving...' : 'Resolve Conflict'}
+            </Button>
+            <Typography
+              variant="caption"
+              sx={{
+                color: selectedForResolve.size < 2 ? 'error.main' : 'text.secondary',
+                fontWeight: selectedForResolve.size < 2 ? 600 : 400,
+              }}
+            >
+              Select 2+ verdicts ({selectedForResolve.size} selected)
+            </Typography>
+          </Box>
+          {resolveError && (
+            <Alert
+              severity="error"
+              variant="filled"
+              sx={{
+                mt: 2,
+                bgcolor: 'error.main',
+                color: 'error.contrastText',
+                '& .MuiAlert-icon': { color: 'error.contrastText' },
+              }}
+            >
+              <AlertTitle sx={{ color: 'error.contrastText', fontWeight: 700 }}>
+                {/^ValueError:/i.test(resolveError) ? 'ValueError' : 'Resolve failed'}
+              </AlertTitle>
+              <Typography component="span" sx={{ color: 'error.contrastText' }}>
+                {resolveError.replace(/^ValueError:\s*/i, '')}
+              </Typography>
+            </Alert>
+          )}
+
           {selectedDoc && (
             <Paper variant="outlined" sx={{ mt: 2, p: 2, bgcolor: '#f9f9f9' }}>
-              <Typography variant="subtitle2">Saved Bias: {previousBias || 'N/A'}</Typography>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1, gap: 1, flexWrap: 'wrap' }}>
+                <Typography variant="subtitle2">Saved Bias: {previousBias || 'N/A'}</Typography>
+                <Box sx={{ display: 'flex', gap: 1 }}>
+                  <Button
+                    variant="contained"
+                    size="small"
+                    disabled={!selectedDoc?.data}
+                    onClick={() => onOpenFull?.(selectedDoc.data, {
+                      source: 'verdict',
+                      label: selectedDoc.label,
+                      createdAt: selectedDoc.created_at,
+                      analysisMethod: selectedDoc.analysis_method,
+                      gptModel: selectedDoc.gpt_model,
+                      expirationRaw: selectedDoc.expiration_date,
+                      riskFreeRate: selectedDoc.risk_free_rate ?? selectedDoc?.data?.market_data?.risk_free_rate,
+                    })}
+                  >
+                    Open Full Analysis
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    size="small"
+                    onClick={() => onRerun?.({
+                      ticker: selectedDoc.ticker,
+                      analysisMethod: selectedDoc.analysis_method,
+                      gptModel: selectedDoc.gpt_model,
+                      riskFreeRate: selectedDoc.risk_free_rate ?? selectedDoc?.data?.market_data?.risk_free_rate,
+                      expirationRaw: selectedDoc.expiration_date,
+                    })}
+                  >
+                    Analyze Again
+                  </Button>
+                </Box>
+              </Box>
+              {selectedDoc?.label && (
+                <Typography variant="subtitle2" color="primary">Label: {selectedDoc.label}</Typography>
+              )}
               {biasChanged && (
                 <Typography variant="subtitle2" color="error">Changed vs Current: {currentBias || 'N/A'}</Typography>
               )}
@@ -1741,21 +2715,192 @@ const SavedVerdictsControls = ({ ticker, currentResult }) => {
               </Box>
             </Paper>
           )}
+
+          {displayResult && (
+            <Paper variant="outlined" sx={{ mt: 2, p: 2 }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1, flexWrap: 'wrap' }}>
+                <Typography variant="subtitle1">Conflict Resolution</Typography>
+                {displayResult.final_bias && (
+                  <Chip label={displayResult.final_bias} size="small" color="primary" />
+                )}
+                {displayResult.confidence_level && (
+                  <Chip label={`${displayResult.confidence_level} confidence`} size="small" variant="outlined" />
+                )}
+                {displayResult.model && (
+                  <Typography variant="caption" color="text.secondary">Model: {displayResult.model}</Typography>
+                )}
+              </Box>
+
+              {resolutionSources.length > 0 && (
+                <Box sx={{ mb: 2 }}>
+                  <Typography variant="subtitle2" gutterBottom>
+                    Source History ({resolutionSources.length})
+                  </Typography>
+                  <TableContainer component={Paper} variant="outlined">
+                    <Table size="small">
+                      <TableHead>
+                        <TableRow>
+                          <TableCell>Saved At</TableCell>
+                          <TableCell>Label</TableCell>
+                          <TableCell>Type</TableCell>
+                          <TableCell>Bias</TableCell>
+                          <TableCell>Expiration</TableCell>
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {resolutionSources.map((source, idx) => (
+                          <TableRow
+                            key={source.id || `source-${idx}`}
+                            hover={!!source.id}
+                            sx={{ cursor: source.id ? 'pointer' : 'default' }}
+                            onClick={() => {
+                              if (source.id) handleSelect(source.id);
+                            }}
+                          >
+                            <TableCell>{formatSourceTimestamp(source.created_at) || '—'}</TableCell>
+                            <TableCell>{source.label || '—'}</TableCell>
+                            <TableCell>{describeSourceMethod(source.analysis_method)}</TableCell>
+                            <TableCell>
+                              {source.final_bias ? (
+                                <Chip label={source.final_bias} size="small" sx={{ height: 20, fontSize: '0.7rem' }} />
+                              ) : '—'}
+                            </TableCell>
+                            <TableCell>{source.expiration_date || '—'}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </TableContainer>
+                  <Typography variant="caption" color="text.secondary">
+                    Click a source row to open that saved verdict.
+                  </Typography>
+                </Box>
+              )}
+
+              {displayResult.conflict_summary && (
+                <Typography variant="body2" sx={{ mb: 1 }}>{displayResult.conflict_summary}</Typography>
+              )}
+              {agreementPoints.length > 0 && (
+                <Box sx={{ mb: 1 }}>
+                  <Typography variant="subtitle2">Agreements</Typography>
+                  <List dense disablePadding>
+                    {agreementPoints.map((point, idx) => (
+                      <ListItem key={`agree-${idx}`} sx={{ py: 0 }}>
+                        <ListItemText primary={point} />
+                      </ListItem>
+                    ))}
+                  </List>
+                </Box>
+              )}
+              {disagreementPoints.length > 0 && (
+                <Box sx={{ mb: 1 }}>
+                  <Typography variant="subtitle2">Disagreements</Typography>
+                  <List dense disablePadding>
+                    {disagreementPoints.map((point, idx) => (
+                      <ListItem key={`disagree-${idx}`} sx={{ py: 0 }}>
+                        <ListItemText primary={point} />
+                      </ListItem>
+                    ))}
+                  </List>
+                </Box>
+              )}
+              <Box
+                dangerouslySetInnerHTML={{
+                  __html: displayResult.summary_html || '<p>No resolution summary.</p>',
+                }}
+              />
+            </Paper>
+          )}
+
+          <Box sx={{ mt: 3 }}>
+            <Typography variant="subtitle1" gutterBottom>Conflict Resolutions</Typography>
+            {resolutionsLoading ? (
+              <CircularProgress size={24} />
+            ) : resolutions.length === 0 ? (
+              <Typography variant="body2" color="text.secondary">
+                No conflict resolutions yet. Select 2+ verdicts and resolve to create one.
+              </Typography>
+            ) : (
+              <List>
+                {resolutions.map((item) => (
+                  <Paper
+                    key={item.id}
+                    variant="outlined"
+                    sx={{
+                      mb: 1,
+                      bgcolor: selectedResolution === item.id ? 'action.selected' : 'inherit',
+                    }}
+                  >
+                    <ListItem
+                      button
+                      onClick={() => handleOpenResolution(item.id)}
+                      sx={{ cursor: 'pointer' }}
+                    >
+                      <ListItemText
+                        primary={
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+                            <Typography variant="subtitle2">
+                              {item.created_at?.slice(0, 19).replace('T', ' ') || 'Unknown time'}
+                            </Typography>
+                            {item.final_bias && (
+                              <Chip label={item.final_bias} size="small" sx={{ height: 20, fontSize: '0.7rem' }} />
+                            )}
+                          </Box>
+                        }
+                        secondary={
+                          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, mt: 0.5 }}>
+                            <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
+                              <Typography variant="caption">
+                                {item.source_count || (item.sources || []).length || (item.verdict_ids || []).length || 0} sources
+                              </Typography>
+                              {item.model && <Typography variant="caption">Model: {item.model}</Typography>}
+                              {item.confidence_level && (
+                                <Typography variant="caption">{item.confidence_level} confidence</Typography>
+                              )}
+                            </Box>
+                            {Array.isArray(item.sources) && item.sources.length > 0 && (
+                              <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap', alignItems: 'center' }}>
+                                <Typography variant="caption" color="text.secondary">From:</Typography>
+                                {item.sources.map((source, idx) => (
+                                  <Chip
+                                    key={source.id || `hist-src-${idx}`}
+                                    size="small"
+                                    variant="outlined"
+                                    sx={{ height: 20, fontSize: '0.65rem' }}
+                                    label={[
+                                      source.final_bias || 'N/A',
+                                      source.label || null,
+                                      source.created_at ? source.created_at.slice(0, 10) : null,
+                                    ].filter(Boolean).join(' · ')}
+                                  />
+                                ))}
+                              </Box>
+                            )}
+                          </Box>
+                        }
+                      />
+                    </ListItem>
+                  </Paper>
+                ))}
+              </List>
+            )}
+          </Box>
         </Grid>
       </Grid>
     </AnalysisCard>
+    </Box>
   );
 };
 
 const MethodologyExplanation = ({ methodology }) => {
   if (methodology === 'gpt-5-web-verdict') {
     return (
-      <AnalysisCard title="About: GPT-5 Web Verdict Analysis">
+      <AnalysisCard title="About: Web Verdict Analysis">
         <Typography paragraph>
-          The <strong>GPT-5 Web Verdict</strong> methodology enhances the standard GPT Verdict by empowering the AI model with real-time web search capabilities.
+          The <strong>Web Verdict</strong> methodology runs entirely on <strong>Perplexity Sonar</strong>: live web research, then the same two-stage Analyst + Trader pipeline used by GPT Verdict.
         </Typography>
         <Typography paragraph>
-          In addition to synthesizing the quantitative data provided by our internal analysis, the model will actively search for the latest news, analyst ratings, and market chatter related to the stock. This allows it to incorporate breaking developments and qualitative insights that are not captured in the raw market data, providing the most up-to-date and contextually-aware verdict possible.
+          Perplexity gathers recent news, earnings catalysts, analyst actions, and sector headlines, then synthesizes them with our quantitative sub-analyses (technicals, volatility, options positioning). Only <strong>PERPLEXITY_API_KEY</strong> is required—no Gemini key for this mode. Source URLs are listed when available.
         </Typography>
       </AnalysisCard>
     );
@@ -1824,6 +2969,7 @@ class AnalysisErrorBoundary extends Component {
 
   componentDidCatch(error, errorInfo) {
     console.error('Analysis page error:', error, errorInfo);
+    this.setState({ error: error });
   }
 
   render() {
@@ -1835,6 +2981,13 @@ class AnalysisErrorBoundary extends Component {
             <Typography>
               An unexpected error occurred. Please refresh the page and try again.
             </Typography>
+            {this.state.error && (
+              <Box sx={{ mt: 2, p: 2, bgcolor: 'rgba(0,0,0,0.05)', borderRadius: 1 }}>
+                <Typography variant="body2" color="error" sx={{ fontFamily: 'monospace' }}>
+                  {this.state.error.toString()}
+                </Typography>
+              </Box>
+            )}
             <Button
               onClick={() => window.location.reload()}
               sx={{ mt: 2 }}
@@ -1850,6 +3003,65 @@ class AnalysisErrorBoundary extends Component {
     return this.props.children;
   }
 }
+
+const StockRankingsDisplay = ({ ticker, analysisResult }) => {
+  const [rankings, setRankings] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!ticker || !analysisResult) {
+      setRankings([]);
+      return;
+    }
+    const fetchRankings = async () => {
+      setLoading(true);
+      try {
+        const response = await axios.get(`/api/stock-selection/rankings/${encodeURIComponent(ticker)}`);
+        if (response.data?.status === 'success') {
+          setRankings(response.data.rankings || []);
+        }
+      } catch (err) {
+        console.error('Failed to fetch stock rankings:', err);
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchRankings();
+  }, [ticker, analysisResult]);
+
+  if (!analysisResult) return null;
+  if (loading) return <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', mb: 2 }}><CircularProgress size={16} /><Typography variant="caption">Checking selection rankings...</Typography></Box>;
+  if (rankings.length === 0) return null;
+
+  return (
+    <Box sx={{ mb: 3 }}>
+      <Typography variant="subtitle2" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+        <CheckCircleIcon fontSize="small" color="success" />
+        Top Ranked Stock Selection
+      </Typography>
+      <Grid container spacing={2}>
+        {rankings.map((r, i) => (
+          <Grid item xs={12} sm={6} md={4} key={i}>
+            <Paper variant="outlined" sx={{ p: 1.5, bgcolor: '#f0fdf4', borderColor: '#4caf50' }}>
+              <Typography variant="caption" color="text.secondary" display="block">
+                Strategy: <strong>{r.strategy_label}</strong> ({r.mode.replace('_', ' ')})
+              </Typography>
+              <Typography variant="body2" sx={{ mt: 0.5 }}>
+                Global Rank: <strong>{r.global_rank}</strong>
+              </Typography>
+              <Typography variant="body2">
+                Cluster Rank: <strong>{r.cluster_rank}</strong>
+              </Typography>
+              <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+                Score: {Number(r.selection_score).toFixed(3)} | {r.group_label || r.regime_bucket}
+              </Typography>
+            </Paper>
+          </Grid>
+        ))}
+      </Grid>
+    </Box>
+  );
+};
 
 const AnalysisPage = () => {
   const [ticker, setTicker] = useStickyState('SPY', 'ticker');
@@ -1868,21 +3080,54 @@ const AnalysisPage = () => {
       return normalizeRiskFreeRate(candidate);
     });
   }, [setRiskFreeRateStored]);
+
+  const { calcResult: dailyRateCalcResult } = useRiskFreeRateTask();
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const applyLatestDailyRate = async () => {
+      try {
+        const response = await axios.get('/api/risk-free-rate/latest');
+        const latestRate = response.data?.risk_free_rate;
+        if (!cancelled && Number.isFinite(Number(latestRate))) {
+          setRiskFreeRate(Number(latestRate));
+        }
+      } catch (_error) {
+        // Keep sticky default when latest daily rate is unavailable.
+      }
+    };
+
+    void applyLatestDailyRate();
+    return () => {
+      cancelled = true;
+    };
+  }, [dailyRateCalcResult, setRiskFreeRate]);
   const [expirations, setExpirations] = useState([]);
   const [selectedExpiration, setSelectedExpiration] = useState('');
   const [fetchingExpirations, setFetchingExpirations] = useState(false);
   const [analysisResult, setAnalysisResult] = useStickyState(null, 'analysisResult');
-  const [loading, setLoading] = useState(false);
+  const [viewingSaved, setViewingSaved] = useState(false);
+  const [savedSnapshotMeta, setSavedSnapshotMeta] = useState(null);
+  const [analysisStage, setAnalysisStage] = useState('idle'); // 'idle', 'data_collection', 'guardrail_pause', 'full_analysis'
   const [error, setError] = useState('');
+  const [showMalformedJsonReturn, setShowMalformedJsonReturn] = useState(false);
 
   // NEW: Caution mode state management
   const [cautionModeActive, setCautionModeActive] = useState(false);
   const [qualityAssessment, setQualityAssessment] = useState(null);
   
-  // GPT Model selection state
+  // GPT / Perplexity model selection state
   const [availableModels, setAvailableModels] = useState([]);
   const [selectedModel, setSelectedModel] = useStickyState('gemini-2.5-flash', 'selectedGptModel');
   const [fetchingModels, setFetchingModels] = useState(false);
+  const [gptModelsWarning, setGptModelsWarning] = useState('');
+  const [gptModelsErrorCode, setGptModelsErrorCode] = useState('');
+  const [perplexityModels, setPerplexityModels] = useState([]);
+  const [selectedPerplexityModel, setSelectedPerplexityModel] = useStickyState('sonar', 'selectedPerplexityModel');
+  const [fetchingPerplexityModels, setFetchingPerplexityModels] = useState(false);
+  const isWebVerdictMethod = analysisMethod === 'gpt-5-web-verdict';
+  const verdictModel = isWebVerdictMethod ? selectedPerplexityModel : selectedModel;
   const HISTORY_PAGE_SIZE = 5;
   const HISTORY_SCOPE_ALL = 'all';
   const HISTORY_SCOPE_CURRENT = 'current';
@@ -1894,6 +3139,9 @@ const AnalysisPage = () => {
   const [historyHasMore, setHistoryHasMore] = useState(false);
   const [historyTotal, setHistoryTotal] = useState(0);
   const [historyReloadVersion, setHistoryReloadVersion] = useState(0);
+  const verdictHistorySectionRef = useRef(null);
+
+  const { startTask: runAnalysisTask, loading: asyncLoading, taskStatus, error: asyncError, result: asyncResult } = useTaskPolling();
 
   const normalizedTickerForHistory = (ticker || '').trim().toUpperCase();
   const hasHistoryTicker = normalizedTickerForHistory.length > 0;
@@ -1910,11 +3158,6 @@ const AnalysisPage = () => {
     const date = new Date(isoString);
     if (Number.isNaN(date.getTime())) return '';
     return date.toLocaleString();
-  };
-
-  const formatRiskFreeRate = (value) => {
-    const numeric = Number(value);
-    return Number.isFinite(numeric) ? normalizeRiskFreeRate(numeric).toFixed(RISK_FREE_DECIMAL_PLACES) : '';
   };
 
   const formatExpiration = (value) => {
@@ -2018,31 +3261,68 @@ const AnalysisPage = () => {
   // Fetch available GPT models
   const fetchGptModels = async () => {
     setFetchingModels(true);
+    setGptModelsWarning('');
+    setGptModelsErrorCode('');
     try {
       const response = await axios.get('/api/gpt-models');
-      if (response.data.status === 'success') {
-        setAvailableModels(response.data.models);
-        // Set default model if current selection is not available
-        if (!response.data.models.some(model => model.id === selectedModel)) {
-          setSelectedModel(response.data.default || 'gemini-2.5-flash');
-        }
+      const payload = response.data || {};
+      const models = Array.isArray(payload.models) ? payload.models : [];
+      setAvailableModels(models);
+      setGptModelsWarning(payload.warning || '');
+      setGptModelsErrorCode(payload.error_code || '');
+      const nextDefault = payload.default || 'gemini-2.5-flash';
+      if (!models.some((model) => model.id === selectedModel)) {
+        setSelectedModel(nextDefault);
       }
     } catch (error) {
       console.error('Failed to fetch GPT models:', error);
       console.error('Error details:', error.response?.data || error.message);
-      // Fallback to default models if API fails
+      const detail = error.response?.data?.detail;
+      const detailText = typeof detail === 'string' ? detail : (error.message || 'Failed to fetch GPT models');
       setAvailableModels([
         { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash (Fallback)' },
-        { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (Fallback)' }
+        { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (Fallback)' },
       ]);
+      setGptModelsWarning(detailText);
+      setGptModelsErrorCode(/leaked/i.test(detailText) ? 'api_key_leaked' : 'fetch_failed');
+      if (!['gemini-2.5-flash', 'gemini-2.5-pro'].includes(selectedModel)) {
+        setSelectedModel('gemini-2.5-flash');
+      }
     } finally {
       setFetchingModels(false);
     }
   };
 
-  // Load GPT models when analysis method is GPT-based
+  const fetchPerplexityModels = async () => {
+    setFetchingPerplexityModels(true);
+    try {
+      const response = await axios.get('/api/perplexity-models');
+      if (response.data.status === 'success') {
+        setPerplexityModels(response.data.models);
+        if (!response.data.models.some((m) => m.id === selectedPerplexityModel)) {
+          setSelectedPerplexityModel(response.data.default || 'sonar');
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch Perplexity models:', error);
+      setPerplexityModels([
+        { id: 'sonar', name: 'Sonar (Fallback)' },
+        { id: 'sonar-pro', name: 'Sonar Pro (Fallback)' },
+      ]);
+    } finally {
+      setFetchingPerplexityModels(false);
+    }
+  };
+
+  // Load models when analysis method is GPT-based
   useEffect(() => {
-    if (analysisMethod.includes('gpt') && availableModels.length === 0) {
+    if (analysisMethod === 'gpt-5-web-verdict' && perplexityModels.length === 0) {
+      fetchPerplexityModels();
+    } else if (
+      analysisMethod.includes('gpt')
+      && analysisMethod !== 'gpt-5-web-verdict'
+      && availableModels.length === 0
+    ) {
       fetchGptModels();
     }
   }, [analysisMethod]);
@@ -2077,56 +3357,107 @@ const AnalysisPage = () => {
 
     setTicker(normalizedTicker);
     setSelectedExpiration(normalizedExpiration);
-
-    setLoading(true);
-    setError('');
-    setAnalysisResult(null);
-
-    // Clear quality assessment if not in caution mode
     if (!cautionMode) {
       setQualityAssessment(null);
       setCautionModeActive(false);
     }
+    setShowMalformedJsonReturn(false);
+    setError('');
+    setViewingSaved(false);
+    setSavedSnapshotMeta(null);
 
-    try {
-      const requestPayload = {
-        ticker: normalizedTicker,
-        expiration_date: normalizedExpiration,
-        risk_free_rate: targetRate,
-        analysis_method: targetMethod,
-        gpt_model: targetModel,
-      };
+    const requestPayload = {
+      ticker: normalizedTicker,
+      expiration_date: normalizedExpiration,
+      risk_free_rate: targetRate,
+      analysis_method: targetMethod,
+      gpt_model: targetModel,
+      caution_mode: cautionMode,
+    };
 
-      // Add caution mode flag if enabled
-      if (cautionMode) {
-        requestPayload.caution_mode = true;
+    // Run pre-check before async analysis when override is not enabled.
+    if (!cautionMode) {
+      try {
+        const qualityCheckResponse = await axios.post('/api/analysis/data-quality-check', requestPayload);
+        const nextAssessment = qualityCheckResponse.data?.quality_assessment;
+
+        if (nextAssessment) {
+          setQualityAssessment(nextAssessment);
+          const qualityLevel = nextAssessment.overall_level || 'failed';
+          const combinedScore = nextAssessment.combined_score || nextAssessment.quality_score || 0;
+          const passThreshold = nextAssessment?.thresholds_used?.pass_threshold || 0.6;
+          const qualityFailed = (
+            combinedScore < passThreshold ||
+            ['acceptable', 'poor', 'failed'].includes(qualityLevel)
+          );
+
+          if (qualityFailed) {
+            setAnalysisStage('guardrail_pause');
+            return;
+          }
+        }
+      } catch (err) {
+        console.warn('Data quality pre-check failed, blocking analysis by default:', err);
+        setError('Data quality check failed. Please retry or use a different expiration date.');
+        setAnalysisStage('guardrail_pause');
+        return;
       }
-
-      const response = await axios.post('/api/analysis/stock', requestPayload);
-
-      const result = response.data;
-      const normalizedResult = (result && typeof result === 'object' && !Array.isArray(result)) ? [result] : result;
-
-      // Extract quality assessment data from response
-      if (result?.error_details?.quality_assessment) {
-        setQualityAssessment(result.error_details.quality_assessment);
-      }
-
-      // Set caution mode if explicitly requested or if analysis succeeded with warnings
-      if (cautionMode || result?.caution_mode_active) {
-        setCautionModeActive(true);
-      }
-
-      setAnalysisResult(normalizedResult);
-
-      setHistoryPage(1);
-      setHistoryReloadVersion((prev) => prev + 1);
-    } catch (err) {
-      setError(err.response?.data?.detail || 'An unexpected error occurred.');
-    } finally {
-      setLoading(false);
     }
+
+    setAnalysisStage('full_analysis');
+    if (cautionMode) {
+      setCautionModeActive(true);
+    }
+
+    // Call the async analysis hook
+    runAnalysisTask('/api/analysis/stock/async', {
+      ...requestPayload,
+    }, 'Analysis');
   };
+
+  useEffect(() => {
+    if (asyncResult) {
+      if (isMalformedAiJsonResponse(asyncResult)) {
+        setAnalysisResult(null);
+        setQualityAssessment(null);
+        setAnalysisStage('idle');
+        setShowMalformedJsonReturn(true);
+        setError('Note: AI response could not be parsed as JSON.');
+        return;
+      }
+
+      const firstItem = Array.isArray(asyncResult) ? asyncResult[0] : asyncResult;
+      if (firstItem?.analysis_blocked) {
+        setQualityAssessment(firstItem.quality_assessment || null);
+        setAnalysisResult(null);
+        setShowMalformedJsonReturn(false);
+        setAnalysisStage('guardrail_pause');
+        setError(firstItem.message || 'Analysis blocked due to data quality.');
+        return;
+      }
+
+      setAnalysisResult(asyncResult);
+      setShowMalformedJsonReturn(false);
+      setQualityAssessment(extractQualityAssessmentFromResult(asyncResult));
+      setHistoryReloadVersion(v => v + 1);
+    }
+  }, [asyncResult, setAnalysisResult]);
+
+  useEffect(() => {
+    if (asyncError) {
+      setShowMalformedJsonReturn(false);
+      setError(asyncError);
+      setQualityAssessment(null);
+    }
+  }, [asyncError]);
+
+  useEffect(() => {
+    if (!asyncLoading) {
+      setAnalysisStage((prev) => (prev === 'guardrail_pause' ? prev : 'idle'));
+      return;
+    }
+    setAnalysisStage(resolveAnalysisStage(taskStatus?.progress));
+  }, [asyncLoading, taskStatus]);
 
   const handleFetchExpirations = async () => {
     try {
@@ -2164,7 +3495,7 @@ const AnalysisPage = () => {
         expiration: selectedExpiration,
         riskFreeRate,
         analysisMethod,
-        gptModel: selectedModel,
+        gptModel: verdictModel,
       });
     } catch (error) {
       console.error('Error in handleAnalyze:', error);
@@ -2172,67 +3503,179 @@ const AnalysisPage = () => {
     }
   };
 
-  const handleHistoryAnalyze = async (entry) => {
-    if (!entry) return;
-
+  const normalizeHistoryEntryTicker = (entry) => {
+    if (!entry) return '';
     const payload = entry.request_payload || {};
-    const rawTicker = payload.ticker || entry.ticker || '';
-    const rawExpiration = payload.expiration_date || entry.expiration_date_raw || entry.expiration_date || '';
-    const nextMethod = payload.analysis_method || entry.analysis_method || analysisMethod;
-    const nextRateCandidate = payload.risk_free_rate ?? entry.risk_free_rate ?? riskFreeRate;
-    const nextRate = Number(nextRateCandidate);
-    const needsGptModel = (nextMethod || '').includes('gpt');
-    const nextModel = needsGptModel
-      ? (payload.gpt_model || entry.gpt_model || selectedModel)
+    return (payload.ticker || entry.ticker || '').trim().toUpperCase();
+  };
+
+  const loadSavedAnalysis = useCallback((payload, meta = {}) => {
+    const resultList = Array.isArray(payload) ? payload : (payload ? [payload] : []);
+    if (resultList.length === 0) return;
+
+    const primary = resultList[0] || {};
+    const restoredMethod = meta.analysisMethod || primary.analysis_method || analysisMethod;
+    const restoredModel = meta.gptModel || primary.gpt_model || selectedModel;
+    const rawExp = meta.expirationRaw || primary.expiration_date || '';
+    let normalizedExp = String(rawExp).trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(normalizedExp)) {
+      normalizedExp = normalizedExp.replace(/-/g, '');
+    }
+
+    setError('');
+    setShowMalformedJsonReturn(false);
+    setQualityAssessment(null);
+    setCautionModeActive(false);
+    setAnalysisStage('idle');
+
+    if (primary.ticker) setTicker(String(primary.ticker).toUpperCase());
+    setAnalysisMethod(restoredMethod);
+    if ((restoredMethod || '').includes('gpt') && restoredModel) {
+      if (restoredMethod === 'gpt-5-web-verdict') {
+        setSelectedPerplexityModel(restoredModel);
+      } else {
+        setSelectedModel(restoredModel);
+      }
+    }
+    if (normalizedExp) {
+      setSelectedExpiration(normalizedExp);
+      setExpirations((prev) => (prev.includes(normalizedExp) ? prev : [normalizedExp, ...prev]));
+    }
+
+    const restoredRate = Number(
+      meta.riskFreeRate ?? primary.market_data?.risk_free_rate ?? primary.risk_free_rate
+    );
+    if (Number.isFinite(restoredRate)) {
+      setRiskFreeRate(restoredRate);
+    }
+
+    setAnalysisResult(resultList);
+    setViewingSaved(true);
+    setSavedSnapshotMeta({
+      source: meta.source || 'saved',
+      label: meta.label || '',
+      createdAt: meta.createdAt || primary.created_at || '',
+    });
+
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [
+    analysisMethod,
+    selectedModel,
+    setAnalysisResult,
+    setAnalysisMethod,
+    setSelectedModel,
+    setSelectedPerplexityModel,
+    setTicker,
+    setRiskFreeRate,
+  ]);
+
+  const handleOpenHistoryEntry = useCallback((entry) => {
+    if (!entry) return;
+    loadSavedAnalysis(entry.analysis_result || entry.primary_verdict, {
+      source: 'history',
+      analysisMethod: entry.analysis_method || (entry.request_payload || {}).analysis_method,
+      gptModel: entry.gpt_model || (entry.request_payload || {}).gpt_model,
+      expirationRaw: entry.expiration_date_raw || entry.expiration_date,
+      createdAt: entry.created_at,
+      riskFreeRate: entry.risk_free_rate ?? (entry.request_payload || {}).risk_free_rate,
+    });
+  }, [loadSavedAnalysis]);
+
+  const rerunAnalysis = useCallback(async (meta = {}) => {
+    const normalizedTicker = String(meta.ticker || ticker || '').trim().toUpperCase();
+    if (!normalizedTicker) return;
+
+    const nextMethod = meta.analysisMethod || analysisMethod;
+    const isWeb = nextMethod === 'gpt-5-web-verdict';
+    const needsGpt = (nextMethod || '').includes('gpt');
+    const nextModel = needsGpt
+      ? (meta.gptModel || (isWeb ? selectedPerplexityModel : selectedModel))
       : selectedModel;
+    const rateCandidate = Number(meta.riskFreeRate ?? riskFreeRate);
+    const nextRate = Number.isNaN(rateCandidate) ? riskFreeRate : rateCandidate;
 
-    const normalizedTicker = rawTicker.trim().toUpperCase();
-
-    let normalizedExpiration = rawExpiration.trim();
-    if (/^\d{4}-\d{2}-\d{2}$/.test(normalizedExpiration)) {
-      normalizedExpiration = normalizedExpiration.replace(/-/g, '');
+    let normalizedExp = String(meta.expirationRaw || selectedExpiration || '').trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(normalizedExp)) {
+      normalizedExp = normalizedExp.replace(/-/g, '');
     }
 
     setTicker(normalizedTicker);
     setAnalysisMethod(nextMethod);
-    setRiskFreeRate(Number.isNaN(nextRate) ? riskFreeRate : nextRate);
-    setSelectedExpiration(normalizedExpiration);
-    setExpirations((prev) => {
-      if (!normalizedExpiration) return prev;
-      return prev.includes(normalizedExpiration) ? prev : [normalizedExpiration, ...prev];
-    });
-
-    if (needsGptModel && nextModel) {
-      setSelectedModel(nextModel);
+    setRiskFreeRate(nextRate);
+    if (normalizedExp) {
+      setSelectedExpiration(normalizedExp);
+      setExpirations((prev) => (prev.includes(normalizedExp) ? prev : [normalizedExp, ...prev]));
+    }
+    if (needsGpt && nextModel) {
+      if (isWeb) setSelectedPerplexityModel(nextModel);
+      else setSelectedModel(nextModel);
     }
 
     await executeAnalysis({
       ticker: normalizedTicker,
-      expiration: normalizedExpiration,
-      riskFreeRate: Number.isNaN(nextRate) ? riskFreeRate : nextRate,
+      expiration: normalizedExp,
+      riskFreeRate: nextRate,
       analysisMethod: nextMethod,
       gptModel: nextModel,
+    });
+  }, [
+    ticker,
+    analysisMethod,
+    selectedModel,
+    selectedPerplexityModel,
+    riskFreeRate,
+    selectedExpiration,
+    setTicker,
+    setAnalysisMethod,
+    setRiskFreeRate,
+    setSelectedModel,
+    setSelectedPerplexityModel,
+  ]);
+
+  const handleHistoryAnalyze = async (entry) => {
+    if (!entry) return;
+    const payload = entry.request_payload || {};
+    await rerunAnalysis({
+      ticker: normalizeHistoryEntryTicker(entry),
+      analysisMethod: payload.analysis_method || entry.analysis_method,
+      gptModel: payload.gpt_model || entry.gpt_model,
+      riskFreeRate: payload.risk_free_rate ?? entry.risk_free_rate,
+      expirationRaw: payload.expiration_date || entry.expiration_date_raw || entry.expiration_date,
     });
   };
 
   return (
     <Box>
-      <MacroInsights onRateCalculated={setRiskFreeRate} />
-      
       <MethodologyExplanation methodology={analysisMethod} />
 
       <AnalysisCard title="Stock and Option Analysis">
         <Box component="form" onSubmit={handleAnalyze} sx={{ mb: 3 }}>
           <Grid container spacing={2} alignItems="flex-end">
-            <Grid item xs={12} sm={6} md={2}>
-              <TextField
-                label="Ticker"
-                value={ticker}
-                onChange={(e) => setTicker(e.target.value)}
-                required
-                fullWidth
-                size="small"
-              />
+            <Grid item xs={12} sm={6} md={3}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                <TextField
+                  label="Ticker"
+                  value={ticker}
+                  onChange={(e) => setTicker(e.target.value)}
+                  required
+                  fullWidth
+                  size="small"
+                />
+                {ticker && (
+                  <Tooltip title={`View ${ticker} on Finviz`}>
+                    <IconButton 
+                      size="small" 
+                      component="a" 
+                      href={`https://finviz.com/quote.ashx?t=${ticker}`} 
+                      target="_blank" 
+                      rel="noopener noreferrer"
+                      sx={{ flexShrink: 0 }}
+                    >
+                      <OpenInNewIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                )}
+              </Box>
             </Grid>
 
             <Grid item xs={12} sm={6} md={3}>
@@ -2245,27 +3688,27 @@ const AnalysisPage = () => {
                 >
                   <MenuItem value="holistic-market-edge">Holistic Market Edge</MenuItem>
                   <MenuItem value="gpt-verdict">GPT Verdict</MenuItem>
-                  <MenuItem value="gpt-5-web-verdict">GPT-5 Web Verdict</MenuItem>
+                  <MenuItem value="gpt-5-web-verdict">Web Verdict</MenuItem>
                 </Select>
               </FormControl>
             </Grid>
             
-            {/* Show GPT model selector only for GPT-based methodologies */}
-            {analysisMethod.includes('gpt') && (
+            {/* Perplexity model selector for Web Verdict */}
+            {isWebVerdictMethod && (
               <Grid item xs={12} sm={6} md={3}>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                   <FormControl fullWidth size="small">
-                    <InputLabel>GPT Model</InputLabel>
+                    <InputLabel>Perplexity Model</InputLabel>
                     <Select
-                      value={selectedModel}
-                      label="GPT Model"
-                      onChange={e => setSelectedModel(e.target.value)}
-                      disabled={fetchingModels}
+                      value={selectedPerplexityModel}
+                      label="Perplexity Model"
+                      onChange={(e) => setSelectedPerplexityModel(e.target.value)}
+                      disabled={fetchingPerplexityModels}
                     >
-                      {fetchingModels ? (
+                      {fetchingPerplexityModels ? (
                         <MenuItem disabled>Loading models...</MenuItem>
-                      ) : Array.isArray(availableModels) && availableModels.length > 0 ? (
-                        availableModels.map(model => (
+                      ) : Array.isArray(perplexityModels) && perplexityModels.length > 0 ? (
+                        perplexityModels.map((model) => (
                           <MenuItem key={model.id} value={model.id}>
                             {model.name}
                           </MenuItem>
@@ -2276,14 +3719,61 @@ const AnalysisPage = () => {
                     </Select>
                   </FormControl>
                   <Tooltip title="Refresh models list">
+                    <IconButton onClick={fetchPerplexityModels} disabled={fetchingPerplexityModels} size="small">
+                      <RefreshIcon />
+                    </IconButton>
+                  </Tooltip>
+                </Box>
+                {perplexityModels.some((m) => m.name.includes('Fallback')) && (
+                  <Typography variant="caption" color="warning.main">
+                    ⚠️ Using fallback models
+                  </Typography>
+                )}
+              </Grid>
+            )}
+
+            {/* Gemini model selector for GPT Verdict only */}
+            {analysisMethod === 'gpt-verdict' && (
+              <Grid item xs={12} sm={6} md={3}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                  <FormControl fullWidth size="small">
+                    <InputLabel>GPT Model</InputLabel>
+                    <Select
+                      value={selectedModel}
+                      label="GPT Model"
+                      onChange={e => setSelectedModel(e.target.value)}
+                      disabled={fetchingModels}
+                    >
+                      {fetchingModels && availableModels.length === 0 ? (
+                        <MenuItem value={selectedModel}>Loading models...</MenuItem>
+                      ) : Array.isArray(availableModels) && availableModels.length > 0 ? (
+                        availableModels.map(model => (
+                          <MenuItem key={model.id} value={model.id}>
+                            {model.name}
+                          </MenuItem>
+                        ))
+                      ) : (
+                        <MenuItem value={selectedModel}>{selectedModel}</MenuItem>
+                      )}
+                    </Select>
+                  </FormControl>
+                  <Tooltip title="Refresh models list">
                     <IconButton onClick={fetchGptModels} disabled={fetchingModels} size="small">
                       <RefreshIcon />
                     </IconButton>
                   </Tooltip>
                 </Box>
-                {availableModels.some(m => m.name.includes('Fallback')) && (
+                {gptModelsWarning && (
+                  <Alert
+                    severity={gptModelsErrorCode === 'api_key_leaked' ? 'error' : 'warning'}
+                    sx={{ mt: 1, py: 0 }}
+                  >
+                    {gptModelsWarning}
+                  </Alert>
+                )}
+                {!gptModelsWarning && availableModels.some(m => (m.name || '').includes('Fallback')) && (
                   <Typography variant="caption" color="warning.main">
-                    ⚠️ Using fallback models
+                    Using fallback models
                   </Typography>
                 )}
               </Grid>
@@ -2309,6 +3799,11 @@ const AnalysisPage = () => {
                     value={selectedExpiration}
                     label="Expiration Date"
                     onChange={e => setSelectedExpiration(e.target.value)}
+                    MenuProps={{
+                      PaperProps: {
+                        sx: { maxHeight: 280 },
+                      },
+                    }}
                   >
                     {expirations.map(exp => (
                       <MenuItem key={exp} value={exp}>
@@ -2337,9 +3832,9 @@ const AnalysisPage = () => {
               <Button 
                 type="submit" 
                 variant="contained" 
-                disabled={loading || !selectedExpiration}
+                disabled={asyncLoading || !selectedExpiration}
                 fullWidth
-                startIcon={loading ? <CircularProgress size={20} color="inherit" /> : <SmartToyIcon />}
+                startIcon={asyncLoading ? <CircularProgress size={20} color="inherit" /> : <SmartToyIcon />}
               >
                 2. Run Analysis
               </Button>
@@ -2347,95 +3842,144 @@ const AnalysisPage = () => {
           </Grid>
         </Box>
 
-        {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
-        {loading && (
+        {error && (
+          <Alert
+            severity="error"
+            sx={{ mb: 2 }}
+            action={showMalformedJsonReturn ? (
+              <Button
+                color="inherit"
+                size="small"
+                onClick={() => {
+                  setError('');
+                  setShowMalformedJsonReturn(false);
+                  setAnalysisStage('idle');
+                }}
+              >
+                Return
+              </Button>
+            ) : null}
+          >
+            {error}
+          </Alert>
+        )}
+        
+        {analysisStage === 'guardrail_pause' && qualityAssessment && (
+          <Box sx={{ mb: 3 }}>
+            <Alert severity="warning" sx={{ mb: 2 }}>
+              <AlertTitle>Data Quality Gate</AlertTitle>
+              Data quality did not pass for <strong>{ticker}</strong> on <strong>{selectedExpiration}</strong>. Analysis is currently stopped.
+            </Alert>
+            <DataQualityCard qualityData={qualityAssessment} showRetryOptions={!asyncLoading} />
+            <Box sx={{ display: 'flex', gap: 2, mt: 2 }}>
+              <Button
+                variant="contained"
+                color="warning"
+                disabled={asyncLoading}
+                onClick={() => executeAnalysis({
+                  ticker,
+                  expiration: selectedExpiration,
+                  riskFreeRate,
+                  analysisMethod,
+                  gptModel: verdictModel,
+                  cautionMode: true
+                })}
+              >
+                Override and Continue
+              </Button>
+              <Button
+                variant="outlined"
+                disabled={asyncLoading}
+                onClick={() => {
+                  setAnalysisStage('idle');
+                  setCautionModeActive(false);
+                }}
+              >
+                Cancel
+              </Button>
+            </Box>
+          </Box>
+        )}
+
+        {/* Show quality assessment as soon as it's available, even during loading */}
+        {qualityAssessment && analysisStage !== 'guardrail_pause' && (
+          <Box sx={{ mb: 3 }}>
+            <DataQualityCard qualityData={qualityAssessment} showRetryOptions={!asyncLoading} />
+          </Box>
+        )}
+
+        {asyncLoading && (
           <Paper variant="outlined" sx={{ p: 3, mb: 3, textAlign: 'center' }}>
             <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
               <CircularProgress size={40} />
               <Typography variant="h6" color="primary">
-                {analysisMethod.includes('gpt') ? 'AI Analysis in Progress' : 'Analysis in Progress'}
+                {taskStatus?.name || 'Analysis in Progress'}
+              </Typography>
+              <Typography variant="body1">
+                {taskStatus?.message || 'Analysis is running...'}
               </Typography>
 
-              {analysisMethod.includes('gpt') && (
-                <Box sx={{ width: '100%', maxWidth: 600 }}>
-                  <Typography variant="body2" color="text.secondary" paragraph>
-                    Multi-stage analysis pipeline running:
-                  </Typography>
-
-                  <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
-                    <Paper variant="outlined" sx={{ p: 2, bgcolor: '#e3f2fd', borderColor: '#2196f3' }}>
-                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                        <Box sx={{
-                          width: 20,
-                          height: 20,
-                          borderRadius: '50%',
-                          bgcolor: 'primary.main',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center'
-                        }}>
-                          <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: 'white' }} />
-                        </Box>
-                        <Typography variant="subtitle2" fontWeight="bold">Stage 1: Data Collection</Typography>
-                      </Box>
-                      <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, ml: 3 }}>
-                        Gathering market data, options chains, and technical indicators
-                      </Typography>
-                    </Paper>
-
-                    <Paper variant="outlined" sx={{ p: 2, bgcolor: '#fff3e0', borderColor: '#ff9800' }}>
-                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                        <CircularProgress size={16} />
-                        <Typography variant="subtitle2" fontWeight="bold">Stage 2: Market Analysis</Typography>
-                      </Box>
-                      <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, ml: 3 }}>
-                        AI analyzing market conditions, sentiment, and technical patterns
-                      </Typography>
-                    </Paper>
-
-                    <Paper variant="outlined" sx={{ p: 2, bgcolor: '#f5f5f5', borderColor: '#e0e0e0' }}>
-                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                        <HourglassEmptyIcon color="disabled" />
-                        <Typography variant="subtitle2" color="text.secondary">Stage 3: Strategy Generation</Typography>
-                      </Box>
-                      <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, ml: 3 }}>
-                        Generating executable trading strategies based on analysis
-                      </Typography>
-                    </Paper>
-                  </Box>
-
-                  <Box sx={{ mt: 2 }}>
-                    <Typography variant="caption" color="text.secondary">
-                      This process typically takes 30-60 seconds. Please wait while we generate your personalized trading insights.
-                    </Typography>
-                  </Box>
-                </Box>
-              )}
-
-              {!analysisMethod.includes('gpt') && (
-                <Box sx={{ maxWidth: 400 }}>
-                  <Typography variant="body2" color="text.secondary">
-                    Analyzing market data and calculating option strategies for <strong>{ticker}</strong>
-                  </Typography>
-                  <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
-                    This usually takes just a few seconds...
-                  </Typography>
-                </Box>
-              )}
             </Box>
           </Paper>
         )}
-        {analysisResult &&
-          <ResultsDisplay
-            analysisResult={analysisResult}
-            setCautionModeActive={setCautionModeActive}
-            executeAnalysis={executeAnalysis}
-            selectedExpiration={selectedExpiration}
-            riskFreeRate={riskFreeRate}
-            analysisMethod={analysisMethod}
-            selectedModel={selectedModel}
-          />
-        }
+        {analysisResult && viewingSaved && (
+          <Alert
+            severity="info"
+            sx={{ mb: 2 }}
+            action={(
+              <Box sx={{ display: 'flex', gap: 1 }}>
+                <Button
+                  color="inherit"
+                  size="small"
+                  disabled={asyncLoading}
+                  onClick={() => {
+                    const primary = Array.isArray(analysisResult) ? analysisResult[0] : analysisResult;
+                    rerunAnalysis({
+                      ticker: primary?.ticker,
+                      analysisMethod: primary?.analysis_method,
+                      gptModel: primary?.gpt_model,
+                      riskFreeRate: primary?.market_data?.risk_free_rate,
+                      expirationRaw: primary?.expiration_date,
+                    });
+                  }}
+                >
+                  Re-run with live data
+                </Button>
+                <Button
+                  color="inherit"
+                  size="small"
+                  onClick={() => {
+                    setViewingSaved(false);
+                    setSavedSnapshotMeta(null);
+                  }}
+                >
+                  Dismiss
+                </Button>
+              </Box>
+            )}
+          >
+            <AlertTitle>Viewing saved analysis</AlertTitle>
+            Restored from {savedSnapshotMeta?.source === 'history' ? 'Recent Analyses' : 'Verdict History'}
+            {savedSnapshotMeta?.label ? ` · "${savedSnapshotMeta.label}"` : ''}
+            {savedSnapshotMeta?.createdAt ? ` · ${formatTimestamp(savedSnapshotMeta.createdAt)}` : ''}
+            . Quotes reflect the time of capture; re-run for live data.
+          </Alert>
+        )}
+        {analysisResult && (
+          <>
+            <StockRankingsDisplay ticker={ticker} analysisResult={analysisResult} />
+            <ResultsDisplay
+              analysisResult={analysisResult}
+              setCautionModeActive={setCautionModeActive}
+              executeAnalysis={executeAnalysis}
+              selectedExpiration={selectedExpiration}
+              riskFreeRate={riskFreeRate}
+              analysisMethod={analysisMethod}
+              selectedModel={verdictModel}
+              chatModel={selectedModel}
+            />
+          </>
+        )}
       </AnalysisCard>
 
       <AnalysisCard title="Recent Analyses">
@@ -2488,12 +4032,31 @@ const AnalysisPage = () => {
                 {historyItems.map((entry) => (
                   <Paper key={entry.id} variant="outlined" sx={{ mb: 1 }}>
                     <ListItem
+                      onClick={() => handleOpenHistoryEntry(entry)}
+                      sx={{
+                        cursor: 'pointer',
+                        '&:hover': { bgcolor: 'action.hover' },
+                      }}
                       secondaryAction={
                         <Box>
-                          <Button size="small" onClick={() => handleHistoryAnalyze(entry)} sx={{ mr: 1 }}>
+                          <Button
+                            size="small"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleHistoryAnalyze(entry);
+                            }}
+                            sx={{ mr: 1 }}
+                          >
                             Analyze Again
                           </Button>
-                          <IconButton edge="end" size="small" onClick={() => handleRemoveHistoryItem(entry.id)}>
+                          <IconButton
+                            edge="end"
+                            size="small"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleRemoveHistoryItem(entry.id);
+                            }}
+                          >
                             <DeleteIcon fontSize="small" />
                           </IconButton>
                         </Box>
@@ -2558,6 +4121,12 @@ const AnalysisPage = () => {
       <SavedVerdictsControls
         ticker={ticker}
         currentResult={analysisResult && Array.isArray(analysisResult) ? analysisResult[0] : null}
+        currentRiskFreeRate={riskFreeRate}
+        scrollAnchorRef={verdictHistorySectionRef}
+        onOpenFull={loadSavedAnalysis}
+        onRerun={rerunAnalysis}
+        availableModels={availableModels}
+        defaultModel={selectedModel}
       />
     </Box>
   );

@@ -45,6 +45,12 @@ class PriceDataFetcher:
         self._fallback_manager = None  # Lazy initialization to avoid circular imports
 
     def _parse_finviz_value(self, value_str):
+        if value_str is None:
+            return np.nan
+        if isinstance(value_str, (int, float)):
+            if isinstance(value_str, float) and np.isnan(value_str):
+                return np.nan
+            return float(value_str)
         if not isinstance(value_str, str) or value_str == '-':
             return np.nan
         value_str = value_str.strip()
@@ -59,7 +65,7 @@ class PriceDataFetcher:
                 return float(value_str.rstrip('K')) * 1e3
             return float(value_str)
         except (ValueError, TypeError):
-            return value_str
+            return np.nan
 
     def _read_finviz_key(self):
         """Reads the Finviz authentication key first from Airflow Variables,
@@ -552,6 +558,136 @@ class PriceDataFetcher:
         
         return pd.DataFrame() # Should be unreachable if loop finishes, but as a fallback
 
+    def _fetch_finviz_export_csv(self, tic: str, view: int, max_retries: int = 2) -> pd.DataFrame:
+        """Fetch a Finviz Elite CSV export for a single ticker."""
+        if not self.finviz_key:
+            logging.error("Finviz authentication key is not set.")
+            return pd.DataFrame()
+
+        base_url = "https://elite.finviz.com/export.ashx"
+        url = f"{base_url}?v={view}&t={tic.upper()}&auth={self.finviz_key}"
+        retry_delay = 10
+        attempt = 0
+
+        while attempt <= max_retries:
+            try:
+                response = requests.get(url, timeout=30)
+                response.raise_for_status()
+                if "Invalid authentication" in response.text:
+                    raise ValueError("Finviz API: Invalid authentication key.")
+                if "No data" in response.text or not response.text.strip():
+                    logging.warning("Finviz API: No export data for %s (v=%s).", tic, view)
+                    return pd.DataFrame()
+                df = pd.read_csv(io.StringIO(response.text))
+                if df.empty:
+                    return pd.DataFrame()
+                return df
+            except requests.exceptions.RequestException as exc:
+                attempt += 1
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                if status == 429 and attempt <= max_retries:
+                    logging.warning("Finviz rate limit for %s v=%s; retrying.", tic, view)
+                    time.sleep(retry_delay)
+                    continue
+                if status == 400:
+                    logging.error("Finviz 400 for %s v=%s", tic, view)
+                    return pd.DataFrame()
+                if attempt > max_retries:
+                    logging.error("Finviz export failed for %s v=%s: %s", tic, view, exc)
+                    return pd.DataFrame()
+                time.sleep(retry_delay)
+            except ValueError as exc:
+                logging.error("Finviz export error for %s v=%s: %s", tic, view, exc)
+                return pd.DataFrame()
+            except Exception as exc:
+                logging.error("Unexpected Finviz export error for %s v=%s: %s", tic, view, exc)
+                return pd.DataFrame()
+        return pd.DataFrame()
+
+    def get_company_finviz_profile(self, tic, max_retries=2):
+        """
+        Fetch a broad company profile from Finviz Elite (v=152 overview + v=161 financials).
+        Returns a normalized dict of fundamental fields.
+        """
+        overview = self._fetch_finviz_export_csv(tic, 152, max_retries=max_retries)
+        financials = self._fetch_finviz_export_csv(tic, 161, max_retries=max_retries)
+        if overview.empty and financials.empty:
+            return {}
+
+        row = {}
+        if not overview.empty:
+            row.update(overview.iloc[0].to_dict())
+        if not financials.empty:
+            for key, value in financials.iloc[0].to_dict().items():
+                row.setdefault(key, value)
+
+        def _val(col):
+            if col not in row:
+                return np.nan
+            raw = row[col]
+            if col in ("Earnings Date", "Company", "Sector", "Industry", "Country"):
+                if raw is None or (isinstance(raw, float) and np.isnan(raw)):
+                    return np.nan
+                text = str(raw).strip()
+                return text if text and text != "-" else np.nan
+            return self._parse_finviz_value(raw)
+
+        market_cap = _val("Market Cap")
+        if isinstance(market_cap, (int, float)) and not np.isnan(market_cap) and market_cap > 0:
+            # Finviz exports market cap in millions USD.
+            market_cap = float(market_cap) * 1_000_000
+
+        return {
+            "company": _val("Company"),
+            "sector": _val("Sector"),
+            "industry": _val("Industry"),
+            "country": _val("Country"),
+            "price": _val("Price"),
+            "market_cap": market_cap,
+            "pe": _val("P/E"),
+            "forward_pe": _val("Forward P/E"),
+            "peg": _val("PEG"),
+            "ps": _val("P/S"),
+            "pb": _val("P/B"),
+            "pcash": _val("P/Cash"),
+            "pfcf": _val("P/Free Cash Flow"),
+            "dividend_yield": _val("Dividend Yield"),
+            "payout_ratio": _val("Payout Ratio"),
+            "eps_ttm": _val("EPS (ttm)"),
+            "eps_growth_this_year": _val("EPS Growth This Year"),
+            "eps_growth_past_5y": _val("EPS Growth Past 5 Years"),
+            "sales_growth_past_5y": _val("Sales Growth Past 5 Years"),
+            "eps_growth_qoq": _val("EPS Growth Quarter Over Quarter"),
+            "sales_growth_qoq": _val("Sales Growth Quarter Over Quarter"),
+            "insider_own": _val("Insider Ownership"),
+            "inst_own": _val("Institutional Ownership"),
+            "roa": _val("Return on Assets"),
+            "roe": _val("Return on Equity"),
+            "roic": _val("Return on Invested Capital"),
+            "current_ratio": _val("Current Ratio"),
+            "quick_ratio": _val("Quick Ratio"),
+            "lt_debt_equity": _val("LT Debt/Equity"),
+            "debt_equity": _val("Total Debt/Equity"),
+            "gross_margin": _val("Gross Margin"),
+            "operating_margin": _val("Operating Margin"),
+            "profit_margin": _val("Profit Margin"),
+            "beta": _val("Beta"),
+            "avg_volume": _val("Average Volume"),
+            "rel_volume": _val("Relative Volume"),
+            "earnings_date": _val("Earnings Date"),
+            "analyst_recom": _val("Analyst Recom"),
+            "target_price": _val("Target Price"),
+            "perf_week": _val("Performance (Week)"),
+            "perf_month": _val("Performance (Month)"),
+            "perf_quarter": _val("Performance (Quarter)"),
+            "rsi_14": _val("Relative Strength Index (14)"),
+            "sma_20": _val("20-Day Simple Moving Average"),
+            "sma_50": _val("50-Day Simple Moving Average"),
+            "sma_200": _val("200-Day Simple Moving Average"),
+            "high_52w": _val("52-Week High"),
+            "low_52w": _val("52-Week Low"),
+        }
+
     def get_stock_details_finviz(self, tic, max_retries=2):
         """
         Fetches detailed stock data from Finviz Elite API, including dividend yield and earnings date.
@@ -563,83 +699,41 @@ class PriceDataFetcher:
         Returns:
             dict: A dictionary with fundamental stock data, or an empty dict if error.
         """
-        if not self.finviz_key:
-            logging.error("Finviz authentication key is not set. Cannot fetch stock details.")
+        profile = self.get_company_finviz_profile(tic, max_retries=max_retries)
+        if not profile:
             return {}
 
-        # v=161 is a common view for detailed stock data including fundamentals.
-        base_url = "https://elite.finviz.com/export.ashx"
-        url = f"{base_url}?v=161&t={tic.upper()}&auth={self.finviz_key}"
-        
-        retry_delay = 10
-        attempt = 0
-        
-        while attempt <= max_retries:
-            try:
-                response = requests.get(url)
-                response.raise_for_status()
-
-                if "Invalid authentication" in response.text:
-                    raise ValueError("Finviz API: Invalid authentication key.")
-                if "No data" in response.text or response.text.strip() == "":
-                    logging.warning(f"Finviz API: No stock details data found for ticker {tic}.")
-                    return {}
-
-                df = pd.read_csv(io.StringIO(response.text))
-                
-                if df.empty:
-                    logging.warning(f"Finviz API: Empty DataFrame returned for stock details of {tic}.")
-                    return {}
-
-                # --- Extract Data ---
-                results = {}
-                stock_data = df.iloc[0] # Assuming first row has the data
-
-                # Map desired keys to potential column names in Finviz export
-                key_map = {
-                    'Industry': 'Industry', 'Sector': 'Sector', 'Market_cap': 'Market Cap',
-                    'Earnings_date': 'Earnings Date', 'PEG': 'PEG', 'Profit_Margin': 'Profit Margin',
-                    'Avg_Volume': 'Avg Volume', 'Inst_Own': 'Inst Own', 'Beta': 'Beta',
-                    'Current_Ratio': 'Current Ratio', 'PB': 'P/B', 'Debt_to_Equity': 'Debt/Eq',
-                    'LDebt_to_Equity': 'LT Debt/Eq', 'Sales': 'Sales', 'ROE': 'ROE',
-                    'dividend_yield': 'Dividend Yield'
-                }
-
-                for result_key, finviz_col in key_map.items():
-                    if finviz_col in stock_data:
-                        raw_value = stock_data[finviz_col]
-                        # Use the helper method to parse the value
-                        results[result_key] = self._parse_finviz_value(raw_value)
-                    else:
-                        results[result_key] = np.nan
-
-                logging.info(f"Successfully fetched details for {tic}")
-                return results
-
-            except requests.exceptions.RequestException as e_req:
-                attempt += 1
-                current_response_text = response.text if 'response' in locals() and response is not None else "No response object"
-                if 'response' in locals() and response is not None and response.status_code == 429 and attempt <= max_retries:
-                    logging.warning(f"Finviz API rate limit hit for {tic} stock details. Retrying in {retry_delay} seconds...")
-                    time.sleep(retry_delay)
-                elif attempt > max_retries:
-                    logging.error(f"Failed to fetch stock details for {tic} from Finviz after {max_retries} attempts. Error: {e_req}. Last response: {current_response_text[:200]}")
-                    return {}
-                elif 'response' in locals() and response is not None and response.status_code == 400:
-                    logging.error(f"Finviz API 400 Error for {tic} stock details: Likely invalid ticker. URL: {url}. Response: {current_response_text[:200]}")
-                    return {} # Do not retry on 400
-                else:
-                    logging.warning(f"Retry {attempt}/{max_retries} for {tic} stock details due to error: {e_req}. Retrying in {retry_delay} seconds...")
-                    time.sleep(retry_delay)
-            
-            except ValueError as e_val: # Handles "Invalid authentication" or parsing errors
-                logging.error(f"Data processing error for {tic} stock details: {e_val}")
-                return {}
-            except Exception as e_other:
-                 logging.error(f"An unexpected error occurred while processing Finviz stock details for {tic}: {e_other}")
-                 return {}
-        
-        return {} # Fallback if all retries fail
+        return {
+            "Industry": profile.get("industry"),
+            "Sector": profile.get("sector"),
+            "Market_cap": profile.get("market_cap"),
+            "Earnings_date": profile.get("earnings_date"),
+            "PEG": profile.get("peg"),
+            "Profit_Margin": profile.get("profit_margin"),
+            "Avg_Volume": profile.get("avg_volume"),
+            "Inst_Own": profile.get("inst_own"),
+            "Beta": profile.get("beta"),
+            "Current_Ratio": profile.get("current_ratio"),
+            "PB": profile.get("pb"),
+            "Debt_to_Equity": profile.get("debt_equity"),
+            "LDebt_to_Equity": profile.get("lt_debt_equity"),
+            "ROE": profile.get("roe"),
+            "ROA": profile.get("roa"),
+            "dividend_yield": profile.get("dividend_yield"),
+            "price": profile.get("price"),
+            "pe_ratio": profile.get("pe"),
+            "eps_growth_this_year": profile.get("eps_growth_this_year"),
+            "sales_growth_quarterly": profile.get("sales_growth_qoq"),
+            "debt_equity": profile.get("debt_equity"),
+            "roa": profile.get("roa"),
+            "roe": profile.get("roe"),
+            "profit_margin": profile.get("profit_margin"),
+            "beta": profile.get("beta"),
+            "average_volume": profile.get("avg_volume"),
+            "relative_volume": profile.get("rel_volume"),
+            "market_cap": profile.get("market_cap"),
+            "earnings_date": profile.get("earnings_date"),
+        }
 
     async def get_current_price_from_broker_async(self, ticker: str) -> float | None:
         """

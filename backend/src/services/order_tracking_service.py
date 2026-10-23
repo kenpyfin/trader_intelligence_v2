@@ -5,6 +5,7 @@ from ..models.order_models import StrategyOrderRequest
 from ..my_libs_py3.db import connect_mongo
 from .analysis_service import _sanitize_for_json
 from .connection_manager import connection_manager
+from .strategy_signature import strategy_signature
 
 
 def _get_collection():
@@ -14,22 +15,8 @@ def _get_collection():
 
 
 def _strategy_signature(ticker: str, expiration_date: str, legs: List[Dict[str, Any]]) -> str:
-    """
-    Produce a stable signature string for a strategy for matching/display.
-    Example: "AAPL|20251219|BUY*1*150*C;SELL*1*155*C"
-    """
-    norm_legs = [
-        {
-            'action': str(l.get('action', '')).upper(),
-            'quantity': int(l.get('quantity', 1)),
-            'strike': float(l.get('strike')),
-            'right': str(l.get('right', '')).upper(),
-        }
-        for l in legs
-    ]
-    norm_legs.sort(key=lambda x: (x['right'], x['strike'], x['action']))
-    parts = [f"{x['action']}*{x['quantity']}*{x['strike']}*{x['right']}" for x in norm_legs]
-    return f"{ticker.upper()}|{expiration_date}|" + ";".join(parts)
+    # Legacy wrapper kept for backwards compatibility with any older callers.
+    return strategy_signature(ticker, expiration_date, legs)
 
 
 def record_strategy_execution(
@@ -57,7 +44,7 @@ def record_strategy_execution(
             'right': l.right.upper(),
         })
 
-    signature = _strategy_signature(order_request.ticker, order_request.expiration_date.replace('-', ''), legs_for_store)
+    signature = strategy_signature(order_request.ticker, order_request.expiration_date.replace('-', ''), legs_for_store)
 
     # Keep only essential GPT fields to keep document small
     gpt_snapshot: Optional[Dict[str, Any]] = None

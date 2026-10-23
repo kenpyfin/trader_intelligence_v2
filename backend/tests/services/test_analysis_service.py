@@ -34,7 +34,7 @@ class DummyTrader:
         ]
 
 
-def test_get_option_expirations_sorts_and_limits(monkeypatch):
+def test_get_option_expirations_sorts_all_unique(monkeypatch):
     dummy_trader = DummyTrader()
 
     async def fake_get_trader():
@@ -44,6 +44,16 @@ def test_get_option_expirations_sorts_and_limits(monkeypatch):
 
     expirations = asyncio.run(analysis_service.get_option_expirations("aapl"))
 
-    assert len(expirations) == 10
-    assert expirations[0] == "20240315"
-    assert expirations[-1] == "20240816"
+    assert expirations == [
+        "20240315",
+        "20240405",
+        "20240412",
+        "20240419",
+        "20240426",
+        "20240517",
+        "20240621",
+        "20240719",
+        "20240816",
+        "20240920",
+        "20241018",
+    ]

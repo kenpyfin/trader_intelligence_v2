@@ -14,10 +14,19 @@ import Typography from '@mui/material/Typography';
 import Button from '@mui/material/Button';
 import Container from '@mui/material/Container';
 import Box from '@mui/material/Box';
+import Fab from '@mui/material/Fab';
+import Zoom from '@mui/material/Zoom';
+import CircularProgress from '@mui/material/CircularProgress';
+import Tooltip from '@mui/material/Tooltip';
+import KeyboardArrowUpIcon from '@mui/icons-material/KeyboardArrowUp';
 
 import AnalysisPage from './pages/Analysis';
 import PortfolioPage from './pages/Portfolio';
 import YieldCurvePage from './pages/YieldCurve';
+import TopStocksByGroupPage from './pages/TopStocksByGroup';
+import PromptConfigPage from './pages/PromptConfig';
+import { StockSelectionTaskProvider, useStockSelectionTask } from './context/StockSelectionTaskContext';
+import { RiskFreeRateTaskProvider } from './context/RiskFreeRateTaskContext';
 
 const theme = createTheme({
   palette: {
@@ -45,7 +54,8 @@ const theme = createTheme({
 
 const Navigation = () => {
   const location = useLocation();
-  
+  const { recomputeLoading } = useStockSelectionTask();
+
   const getButtonStyle = (path) => {
     const isActive = location.pathname === path;
     return {
@@ -64,7 +74,7 @@ const Navigation = () => {
         <Typography variant="h6" component="div" sx={{ flexGrow: 1, fontWeight: 'bold' }}>
           Trader Intelligence
         </Typography>
-        <Box sx={{ display: 'flex', gap: 2 }}>
+        <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
           <Button component={NavLink} to="/" sx={getButtonStyle('/')}>
             Analysis
           </Button>
@@ -74,9 +84,65 @@ const Navigation = () => {
           <Button component={NavLink} to="/rates" sx={getButtonStyle('/rates')}>
             Rates
           </Button>
+          <Button component={NavLink} to="/stock-selection" sx={getButtonStyle('/stock-selection')}>
+            <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 1 }}>
+              Stock Selection
+              {recomputeLoading && (
+                <Tooltip title="Snapshot recomputation running in the background">
+                  <CircularProgress size={14} color="inherit" aria-label="Stock selection recomputing" />
+                </Tooltip>
+              )}
+            </Box>
+          </Button>
+          <Button component={NavLink} to="/config" sx={getButtonStyle('/config')}>
+            Config
+          </Button>
         </Box>
       </Toolbar>
     </AppBar>
+  );
+};
+
+const ScrollToTopButton = () => {
+  const [showButton, setShowButton] = React.useState(false);
+
+  React.useEffect(() => {
+    const handleScroll = () => {
+      setShowButton(window.scrollY > 300);
+    };
+
+    window.addEventListener('scroll', handleScroll);
+    handleScroll();
+
+    return () => {
+      window.removeEventListener('scroll', handleScroll);
+    };
+  }, []);
+
+  const handleScrollToTop = () => {
+    window.scrollTo({
+      top: 0,
+      behavior: 'smooth',
+    });
+  };
+
+  return (
+    <Zoom in={showButton}>
+      <Fab
+        color="primary"
+        size="medium"
+        aria-label="scroll back to top"
+        onClick={handleScrollToTop}
+        sx={{
+          position: 'fixed',
+          bottom: 24,
+          right: 24,
+          zIndex: (theme) => theme.zIndex.tooltip + 1,
+        }}
+      >
+        <KeyboardArrowUpIcon />
+      </Fab>
+    </Zoom>
   );
 };
 
@@ -85,14 +151,21 @@ const App = () => {
     <ThemeProvider theme={theme}>
       <CssBaseline />
       <Router>
-        <Navigation />
-        <Container maxWidth="xl" sx={{ mt: 4, mb: 4 }}>
-          <Routes>
-            <Route path="/" element={<AnalysisPage />} />
-            <Route path="/portfolio" element={<PortfolioPage />} />
-            <Route path="/rates" element={<YieldCurvePage />} />
-          </Routes>
-        </Container>
+        <StockSelectionTaskProvider>
+          <RiskFreeRateTaskProvider>
+            <Navigation />
+            <Container maxWidth="xl" sx={{ mt: 4, mb: 4 }}>
+              <Routes>
+                <Route path="/" element={<AnalysisPage />} />
+                <Route path="/portfolio" element={<PortfolioPage />} />
+                <Route path="/rates" element={<YieldCurvePage />} />
+                <Route path="/stock-selection" element={<TopStocksByGroupPage />} />
+                <Route path="/config" element={<PromptConfigPage />} />
+              </Routes>
+            </Container>
+            <ScrollToTopButton />
+          </RiskFreeRateTaskProvider>
+        </StockSelectionTaskProvider>
       </Router>
     </ThemeProvider>
   );

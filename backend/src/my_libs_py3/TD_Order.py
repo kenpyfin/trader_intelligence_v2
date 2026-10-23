@@ -122,10 +122,16 @@ class AlpacaTrader:
             if hasattr(item, "tag") and hasattr(item, "value")
         }
 
+        equity = summary_map.get("Equity")
+        last_equity = summary_map.get("PreviousEquity")
+        pnl_today = None
+        if equity is not None and last_equity is not None:
+            pnl_today = equity - last_equity
+
         # Map known tags to our expected dictionary keys
         return {
             "total_account_value": summary_map.get("NetLiquidationByCurrency") or summary_map.get("NetLiquidation"),
-            "pnl_today": None,  # Not directly available from this summary type
+            "pnl_today": pnl_today,
             "unrealized_pnl": summary_map.get("UnrealizedPnL"),
             "realized_pnl_today": summary_map.get("RealizedPnL"),
             "available_cash": summary_map.get("AvailableFunds"),
@@ -406,6 +412,13 @@ class AlpacaTrader:
         if not normalized:
             return pd.DataFrame()
         return pd.DataFrame(normalized)
+
+    async def get_stock_market_prices(self, symbols: Sequence[str]) -> Dict[str, Optional[float]]:
+        """Batch last-sale / snapshot market prices (Alpaca `get_stock_snapshot`)."""
+        await self.connect()
+        if not symbols:
+            return {}
+        return await self.client.get_stock_market_prices(symbols)
 
     async def get_option_expirations(self, symbol: str):
         await self.connect()
@@ -719,6 +732,12 @@ def _parse_occ_symbol(symbol: str) -> Dict[str, Any]:
 
 def _normalize_position(raw: Dict[str, Any]) -> Dict[str, Any]:
     asset_class = raw.get("asset_class") or raw.get("assetClass")
+    unrealized_pnl = _maybe_float(
+        raw.get("unrealized_pl")
+        or raw.get("unrealizedPnl")
+        or raw.get("unrealized_pnl")
+        or raw.get("unrealizedPNL")
+    )
     base = {
         "account": raw.get("account_id") or raw.get("account"),
         "exchange": raw.get("exchange") or "ALPACA",
@@ -727,7 +746,7 @@ def _normalize_position(raw: Dict[str, Any]) -> Dict[str, Any]:
         "position": _to_float(raw.get("qty") or raw.get("quantity") or raw.get("position")),
         "avgCost": _maybe_float(raw.get("avg_entry_price") or raw.get("avgPrice")),
         "marketValue": _maybe_float(raw.get("market_value")),
-        "unrealizedPNL": _maybe_float(raw.get("unrealized_pl") or raw.get("unrealized_plpc")),
+        "unrealizedPNL": unrealized_pnl,
     }
     if asset_class in ("us_option", "option"):
         parsed = _parse_occ_symbol(raw.get("symbol", ""))

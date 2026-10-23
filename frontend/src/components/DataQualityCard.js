@@ -17,8 +17,7 @@ import {
   ListItemText,
   Divider,
   Button,
-  Stack,
-  Tooltip
+  Stack
 } from '@mui/material';
 import {
   ExpandMore,
@@ -27,9 +26,7 @@ import {
   Error,
   CheckCircle,
   Info,
-  TrendingDown,
-  TrendingUp,
-  Help
+  TrendingUp
 } from '@mui/icons-material';
 
 // Quality level configuration
@@ -130,8 +127,6 @@ const QualityIssueItem = ({ issue, severity = 'warning' }) => {
 
 const DataQualityCard = ({
   qualityData,
-  onProceedWithCaution,
-  allowCaution = false,
   showRetryOptions = true
 }) => {
   const [expanded, setExpanded] = useState(false);
@@ -139,25 +134,33 @@ const DataQualityCard = ({
   if (!qualityData) return null;
 
   const {
-    overall_quality_level = 'failed',
-    combined_score = 0,
-    completeness_score = 0,
-    quality_score = 0,
-    overlap_score = 0,
-    pass_threshold = 0.6,
+    overall_level = 'failed',
+    component_scores = { completeness: 0, quality: 0, overlap: 0 },
     issues = [],
     recommendations = [],
-    asset_type = 'standard',
-    strike_count = 0,
-    valid_strikes = 0
+    total_rows = 0,
+    valid_strikes_count = 0,
+    complete_greeks_count = 0,
+    average_spread_percentage = null,
+    display_metrics = {}
   } = qualityData;
+
+  const overall_quality_level = overall_level;
+  const valid_strikes = valid_strikes_count;
+  const strike_count = total_rows;
+  
+  const completeness_ratio = strike_count > 0 ? valid_strikes / strike_count : 0;
+  const greeks_ratio = strike_count > 0 ? complete_greeks_count / strike_count : 0;
+  const pricingMetrics = display_metrics?.completeness?.options_pricing || null;
+  const ivMetrics = display_metrics?.completeness?.iv_data || null;
+  const greeksMetrics = display_metrics?.completeness?.greeks_data || null;
+  const coverageMetrics = display_metrics?.coverage?.strikes_with_call_put || null;
+  const freshnessMetrics = display_metrics?.freshness || null;
+  const avgAgeMinutes = freshnessMetrics?.average_age_minutes;
+  const optionLastTradeNote = freshnessMetrics?.option_last_trade_note;
 
   const qualityConfig = QUALITY_LEVELS[overall_quality_level] || QUALITY_LEVELS.failed;
   const IconComponent = qualityConfig.icon;
-
-  const canProceedWithCaution = allowCaution &&
-    (overall_quality_level === 'acceptable' || overall_quality_level === 'poor') &&
-    combined_score >= 0.35; // Minimum threshold for caution mode
 
   const handleToggleExpanded = () => {
     setExpanded(!expanded);
@@ -198,37 +201,15 @@ const DataQualityCard = ({
       />
 
       <CardContent sx={{ pt: 0 }}>
-        {/* Overall Score */}
+        {/* Overall Quality Snapshot */}
         <Box mb={2}>
-          <QualityScoreBar
-            label="Overall Quality Score"
-            score={combined_score}
-            color={qualityConfig.color}
-            showPercentage={true}
-          />
-          <Box display="flex" alignItems="center" gap={1} mb={1}>
-            <Typography variant="body2" color="text.secondary">
-              Required Threshold: {(pass_threshold * 100).toFixed(1)}%
-            </Typography>
-            <Tooltip title={`This ${asset_type} asset requires a minimum quality score of ${(pass_threshold * 100).toFixed(1)}% to proceed with full analysis`}>
-              <Help sx={{ fontSize: 16, color: 'text.secondary' }} />
-            </Tooltip>
-          </Box>
+          <Typography variant="body2" color="text.secondary">
+            Raw data quality metrics are shown below (completeness, freshness, and coverage).
+          </Typography>
         </Box>
 
-        {/* Action Buttons */}
+        {/* Retry Options */}
         <Stack direction="row" spacing={1} mb={2}>
-          {canProceedWithCaution && (
-            <Button
-              variant="outlined"
-              color="warning"
-              startIcon={<Warning />}
-              onClick={onProceedWithCaution}
-              size="small"
-            >
-              Proceed with Caution
-            </Button>
-          )}
           {showRetryOptions && (
             <Button
               variant="outlined"
@@ -242,47 +223,83 @@ const DataQualityCard = ({
 
         {/* Summary Alert */}
         <Alert
-          severity={overall_quality_level === 'failed' ? 'error' : 'warning'}
+          severity="info"
           sx={{ mb: 2 }}
         >
-          <AlertTitle>Quality Summary</AlertTitle>
+          <AlertTitle>Data Availability Summary</AlertTitle>
           Found {valid_strikes} valid strikes out of {strike_count} total strikes.
-          {combined_score < pass_threshold
-            ? ` Quality score of ${(combined_score * 100).toFixed(1)}% is below the required ${(pass_threshold * 100).toFixed(1)}% threshold.`
-            : ` Quality score of ${(combined_score * 100).toFixed(1)}% meets requirements.`
-          }
-          {canProceedWithCaution && (
-            <> You can proceed with caution for reduced accuracy analysis.</>
-          )}
+          This card reports raw data completeness, freshness, and coverage for transparency.
         </Alert>
 
         {/* Expandable Details */}
         <Collapse in={expanded}>
           <Divider sx={{ mb: 2 }} />
 
-          {/* Component Scores */}
           <Typography variant="subtitle2" gutterBottom>
-            Quality Component Breakdown
+            Data Status Breakdown
           </Typography>
           <Box sx={{ mb: 3 }}>
+            {pricingMetrics && (
+              <QualityScoreBar
+                label={`Options Pricing Completeness (${pricingMetrics.complete_count} / ${pricingMetrics.total_count})`}
+                score={pricingMetrics.ratio || 0}
+                color={(pricingMetrics.ratio || 0) >= 0.7 ? '#4caf50' : (pricingMetrics.ratio || 0) >= 0.4 ? '#ff9800' : '#f44336'}
+                showPercentage={true}
+              />
+            )}
+            {ivMetrics && (
+              <QualityScoreBar
+                label={`IV Completeness (${ivMetrics.complete_count} / ${ivMetrics.total_count})`}
+                score={ivMetrics.ratio || 0}
+                color={(ivMetrics.ratio || 0) >= 0.7 ? '#4caf50' : (ivMetrics.ratio || 0) >= 0.4 ? '#ff9800' : '#f44336'}
+                showPercentage={true}
+              />
+            )}
             <QualityScoreBar
-              label="Data Completeness (40% weight)"
-              score={completeness_score}
-              color={completeness_score >= 0.7 ? '#4caf50' : completeness_score >= 0.4 ? '#ff9800' : '#f44336'}
+              label={`Valid Strikes (${valid_strikes} / ${strike_count})`}
+              score={completeness_ratio}
+              color={completeness_ratio >= 0.7 ? '#4caf50' : completeness_ratio >= 0.4 ? '#ff9800' : '#f44336'}
               showPercentage={true}
             />
             <QualityScoreBar
-              label="Data Quality (40% weight)"
-              score={quality_score}
-              color={quality_score >= 0.7 ? '#4caf50' : quality_score >= 0.4 ? '#ff9800' : '#f44336'}
+              label={`Complete Greeks (${(greeksMetrics?.complete_count ?? complete_greeks_count)} / ${(greeksMetrics?.total_count ?? strike_count)})`}
+              score={greeksMetrics?.ratio ?? greeks_ratio}
+              color={(greeksMetrics?.ratio ?? greeks_ratio) >= 0.7 ? '#4caf50' : (greeksMetrics?.ratio ?? greeks_ratio) >= 0.4 ? '#ff9800' : '#f44336'}
               showPercentage={true}
             />
-            <QualityScoreBar
-              label="Strike Coverage (20% weight)"
-              score={overlap_score}
-              color={overlap_score >= 0.7 ? '#4caf50' : overlap_score >= 0.4 ? '#ff9800' : '#f44336'}
-              showPercentage={true}
-            />
+            {coverageMetrics && (
+              <QualityScoreBar
+                label={`Call/Put Strike Coverage (${coverageMetrics.count} / ${coverageMetrics.total_strikes})`}
+                score={coverageMetrics.ratio || 0}
+                color={(coverageMetrics.ratio || 0) >= 0.7 ? '#4caf50' : (coverageMetrics.ratio || 0) >= 0.4 ? '#ff9800' : '#f44336'}
+                showPercentage={true}
+              />
+            )}
+            {average_spread_percentage !== null && (
+              <Box sx={{ mt: 1, mb: 2 }}>
+                <Typography variant="body2" color="text.secondary">
+                  <strong>Average Bid-Ask Spread:</strong> {(average_spread_percentage * 100).toFixed(2)}%
+                </Typography>
+              </Box>
+            )}
+            <Box sx={{ mt: 1, mb: 2 }}>
+              <Typography variant="body2" color="text.secondary">
+                <strong>Data Freshness:</strong>{' '}
+                {avgAgeMinutes !== null && avgAgeMinutes !== undefined
+                  ? `Average quote age ${avgAgeMinutes.toFixed(1)} minutes`
+                  : 'Timestamp freshness not available from source data'}
+              </Typography>
+              {freshnessMetrics?.latest_timestamp && (
+                <Typography variant="caption" color="text.secondary">
+                  Latest observed quote timestamp: {freshnessMetrics.latest_timestamp}
+                </Typography>
+              )}
+              {optionLastTradeNote && (
+                <Typography variant="caption" color="text.secondary" display="block">
+                  Option last trade (informational only): {optionLastTradeNote}
+                </Typography>
+              )}
+            </Box>
           </Box>
 
           {/* Issues List */}

@@ -2,9 +2,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import traceback
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import date, timedelta
 
-from .models.analysis_models import AnalysisRequest, RiskFreeRateRequest, SaveVerdictRequest
+from .models.analysis_models import AnalysisRequest, RiskFreeRateRequest, SaveVerdictRequest, ConflictResolveRequest, AnalysisChatRequest
 from .models.order_models import StrategyOrderRequest
 from .services.analysis_service import run_full_analysis, get_option_expirations
 from .services.analysis_history_service import (
@@ -14,13 +15,26 @@ from .services.analysis_history_service import (
     clear_history_for_ticker,
 )
 from .services.macro_service import get_macro_futures_data, calculate_market_implied_risk_free_rate
-from .services import broker_service, analysis_service
-from .routers import portfolio
+from .services import broker_service, analysis_service, company_intel_service
+from .routers import portfolio, stock_selection, prompt_config
 from .my_libs_py3.my_data import PriceDataFetcher
-from .analytics.treasury_curve import build_treasury_curve
-from .my_libs_py3.fmp import FMPClient
 from .analytics.methodologies.gpt_verdict import generate_gpt_verdict
 from .services.verdict_service import save_verdict_document, list_verdicts, get_verdict_by_id
+from .services.conflict_resolution_service import resolve_conflicts, list_resolutions, get_resolution_by_id
+from .services.analysis_chat_service import generate_analysis_chat_reply
+from .services.gpt_models_service import list_gpt_models
+from .services.risk_free_rate_history_service import list_risk_free_rate_history
+from .services.risk_free_rate_scheduler_service import (
+    get_health as get_risk_free_rate_health,
+    get_latest_daily_rate,
+    is_us_market_hours,
+    run_daily_risk_free_rate_if_stale,
+)
+from .services.task_manager import task_manager
+from .services.background_scheduler_service import (
+    start_background_scheduler,
+    stop_background_scheduler,
+)
 import numpy as np
 import math
 import os
@@ -42,10 +56,20 @@ def get_fallback_config() -> FallbackStrategyConfig:
     return _global_fallback_config
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await start_background_scheduler()
+    try:
+        yield
+    finally:
+        await stop_background_scheduler()
+
+
 app = FastAPI(
     title="Trader Intelligence API",
     description="API for stock and option analysis.",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 # Configure CORS middleware to allow cross-origin requests from the frontend
@@ -64,6 +88,8 @@ app.add_middleware(
 )
 
 app.include_router(portfolio.router)
+app.include_router(stock_selection.router)
+app.include_router(prompt_config.router)
 
 @app.get("/")
 def read_root():
@@ -91,6 +117,30 @@ def cors_test():
         "origin_allowed": True,
         "timestamp": date.today().isoformat()
     }
+
+
+@app.get("/tasks/{task_id}")
+@app.get("/api/tasks/{task_id}")
+async def get_background_task_status(task_id: str):
+    task = task_manager.get_status(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return {"status": "success", "task": task}
+
+
+@app.get("/tasks/{task_id}/result")
+@app.get("/api/tasks/{task_id}/result")
+async def get_background_task_result(task_id: str):
+    task = task_manager.get_result(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    state = task.get("state")
+    if state == "SUCCESS":
+        return {"status": "success", "task_id": task_id, "result": task.get("result")}
+    if state == "FAILURE":
+        return {"status": "failure", "task_id": task_id, "error": task.get("error")}
+    return {"status": "pending", "task_id": task_id, "state": state}
 
 @app.get("/macro-data")
 @app.get("/api/macro-data")  # Alias for nginx proxy compatibility
@@ -166,51 +216,18 @@ def get_macro_data():
         # Return an error payload instead of a 500 to let the frontend render a friendly message
         return {"error": f"An unexpected error occurred while fetching macro data: {e}"}
 
-@app.get("/yield-curve")
-@app.get("/api/yield-curve")
-async def get_yield_curve(source: str = "treasury", tickers: str = "SPY, QQQ, IWM"):
-    try:
-        standard = [
-            ("1M", 1/12), ("3M", 3/12), ("6M", 6/12), ("1Y", 1.0), ("2Y", 2.0),
-            ("3Y", 3.0), ("5Y", 5.0), ("7Y", 7.0), ("10Y", 10.0), ("20Y", 20.0), ("30Y", 30.0)
-        ]
-        if source.lower() == "treasury":
-            curve = build_treasury_curve(FMPClient())
-            # If FMP yields are unavailable, fall back to a flat curve using ETF-implied rate
-            if not curve.get("terms"):
-                ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
-                rate, logs = await calculate_market_implied_risk_free_rate(ticker_list)
-                if rate is not None:
-                    out = [{"tenor": t, "rate": float(rate)} for t, _ in standard]
-                    return {
-                        "source": "treasury",
-                        "as_of": curve.get("as_of"),
-                        "curve": out,
-                        "logs": logs,
-                        "note": "FMP treasury yields unavailable; using ETF-implied flat curve."
-                    }
-                # As a last resort, keep the internal default rate function (likely 4.5%)
-            rate_fn = curve["rate_fn"]
-            out = [{"tenor": t, "rate": float(rate_fn(T))} for t, T in standard]
-            return {"source": "treasury", "as_of": curve["as_of"], "curve": out}
-        elif source.lower() == "etf":
-            ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
-            rate, logs = await calculate_market_implied_risk_free_rate(ticker_list)
-            if rate is None:
-                return {"source": "etf", "curve": [], "logs": logs, "error": "Could not compute implied rate"}
-            out = [{"tenor": t, "rate": float(rate)} for t, _ in standard]
-            return {"source": "etf", "curve": out, "logs": logs}
-        else:
-            raise HTTPException(status_code=400, detail="Invalid source. Use 'treasury' or 'etf'.")
-    except Exception as e:
-        print(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Failed to build yield curve: {e}")
-
 @app.post("/calculate-risk-free-rate")
 @app.post("/api/calculate-risk-free-rate")  # Alias for nginx proxy compatibility
 async def get_risk_free_rate(request: RiskFreeRateRequest):
     """Calculates the market-implied risk-free rate from a basket of ETFs."""
     try:
+        if not is_us_market_hours():
+            return {
+                "risk_free_rate": None,
+                "logs": ["Skipped: US equity market is closed."],
+                "skipped": True,
+                "reason": "outside_market_hours",
+            }
         # The service now calculates the rate across multiple standard expiries automatically.
         rate, logs = await calculate_market_implied_risk_free_rate(
             tickers=request.tickers
@@ -220,12 +237,67 @@ async def get_risk_free_rate(request: RiskFreeRateRequest):
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
 
+@app.get("/risk-free-rate/history")
+@app.get("/api/risk-free-rate/history")
+async def get_risk_free_rate_history(ticker: str = "", limit: int = 200, days: int = 365):
+    """Return historical risk-free rates used in past analyses."""
+    try:
+        loop = asyncio.get_running_loop()
+        data = await loop.run_in_executor(
+            None,
+            lambda: list_risk_free_rate_history(ticker=ticker, limit=limit, days=days),
+        )
+        return data
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to fetch risk-free rate history: {e}")
+
+
+@app.get("/risk-free-rate/health")
+@app.get("/api/risk-free-rate/health")
+async def get_daily_risk_free_rate_health():
+    """Return whether today's market-implied risk-free rate has been calculated."""
+    try:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, get_risk_free_rate_health)
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to fetch risk-free rate health: {e}")
+
+
+@app.get("/risk-free-rate/latest")
+@app.get("/api/risk-free-rate/latest")
+async def get_latest_risk_free_rate():
+    """Return the most recently calculated daily risk-free rate."""
+    try:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, get_latest_daily_rate)
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to fetch latest risk-free rate: {e}")
+
+
+@app.post("/risk-free-rate/run/async")
+@app.post("/api/risk-free-rate/run/async")
+async def run_daily_risk_free_rate_async():
+    """Calculate today's risk-free rate in the background if missing (trading days and market hours only)."""
+    try:
+        task_id = task_manager.submit("RiskFreeRate", run_daily_risk_free_rate_if_stale)
+        return {"task_id": task_id, "status_url": f"/api/tasks/{task_id}"}
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to queue risk-free rate calculation: {e}")
+
 @app.post("/analysis/verdicts")
 @app.post("/api/analysis/verdicts")
 async def save_verdict(request: SaveVerdictRequest):
     """Save an analysis verdict snapshot for later retrieval/compare."""
     try:
-        result = save_verdict_document(request.verdict, request.label)
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: save_verdict_document(request.verdict, request.label)
+        )
         return result
     except Exception as e:
         print(traceback.format_exc())
@@ -236,7 +308,11 @@ async def save_verdict(request: SaveVerdictRequest):
 async def list_saved_verdicts(ticker: str, page: int = 1, page_size: int = 25):
     """List saved verdicts for a ticker with pagination (most recent first)."""
     try:
-        data = list_verdicts(ticker.upper(), page=page, page_size=page_size)
+        loop = asyncio.get_running_loop()
+        data = await loop.run_in_executor(
+            None,
+            lambda: list_verdicts(ticker.upper(), page=page, page_size=page_size)
+        )
         data['status'] = 'success'
         return data
     except Exception as e:
@@ -248,7 +324,8 @@ async def list_saved_verdicts(ticker: str, page: int = 1, page_size: int = 25):
 async def get_saved_verdict(doc_id: str):
     """Fetch a saved verdict by its ID."""
     try:
-        doc = get_verdict_by_id(doc_id)
+        loop = asyncio.get_running_loop()
+        doc = await loop.run_in_executor(None, lambda: get_verdict_by_id(doc_id))
         if not doc:
             raise HTTPException(status_code=404, detail="Verdict not found")
         return {"status": "success", "item": doc}
@@ -257,6 +334,112 @@ async def get_saved_verdict(doc_id: str):
     except Exception as e:
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to fetch verdict: {e}")
+
+
+@app.post("/analysis/chat")
+@app.post("/api/analysis/chat")
+async def analysis_chat(request: AnalysisChatRequest):
+    """Follow-up Gemini chat grounded in the current analysis result."""
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: generate_analysis_chat_reply(
+                request.analysis,
+                request.messages,
+                request.model,
+            ),
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to generate chat reply: {e}")
+
+
+@app.post("/analysis/conflict-resolve")
+@app.post("/api/analysis/conflict-resolve")
+async def resolve_verdict_conflicts(request: ConflictResolveRequest):
+    """Reconcile multiple saved verdicts for one ticker into a fair assessment."""
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: resolve_conflicts(request.ticker, request.verdict_ids, request.model)
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to resolve conflicts: {e}")
+
+
+@app.get("/analysis/conflict-resolutions/{ticker}")
+@app.get("/api/analysis/conflict-resolutions/{ticker}")
+async def list_conflict_resolutions(ticker: str, page: int = 1, page_size: int = 25):
+    """List conflict resolutions for a ticker with pagination (most recent first)."""
+    try:
+        loop = asyncio.get_running_loop()
+        data = await loop.run_in_executor(
+            None,
+            lambda: list_resolutions(ticker.upper(), page=page, page_size=page_size)
+        )
+        data['status'] = 'success'
+        return data
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to list conflict resolutions: {e}")
+
+
+@app.get("/analysis/conflict-resolutions/id/{doc_id}")
+@app.get("/api/analysis/conflict-resolutions/id/{doc_id}")
+async def get_conflict_resolution(doc_id: str):
+    """Fetch a conflict resolution by its ID."""
+    try:
+        loop = asyncio.get_running_loop()
+        doc = await loop.run_in_executor(None, lambda: get_resolution_by_id(doc_id))
+        if not doc:
+            raise HTTPException(status_code=404, detail="Conflict resolution not found")
+        return {"status": "success", "item": doc}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to fetch conflict resolution: {e}")
+
+
+@app.get("/analysis/company/fundamentals/{ticker}")
+@app.get("/api/analysis/company/fundamentals/{ticker}")
+async def company_fundamentals(ticker: str):
+    """Fetch company fundamentals from Mongo screener + Finviz."""
+    try:
+        loop = asyncio.get_running_loop()
+        data = await loop.run_in_executor(
+            None,
+            lambda: company_intel_service.get_fundamentals(ticker.upper()),
+        )
+        return {"status": "success", "fundamentals": data}
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to fetch fundamentals: {e}")
+
+
+@app.get("/analysis/company/deep-dive/{ticker}")
+@app.get("/api/analysis/company/deep-dive/{ticker}")
+async def company_deep_dive(ticker: str, force: bool = False):
+    """Return cached company deep dive or generate from Finviz + Mongo via Gemini."""
+    try:
+        loop = asyncio.get_running_loop()
+        data = await loop.run_in_executor(
+            None,
+            lambda: company_intel_service.get_or_create_deep_dive(ticker.upper(), force=force),
+        )
+        return {"status": "success", "deep_dive": data}
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to fetch company deep dive: {e}")
 
 @app.post("/analysis/stock-gpt")
 async def analyze_stock_with_gpt(request: AnalysisRequest):
@@ -360,7 +543,11 @@ async def analyze_stock_with_gpt(request: AnalysisRequest):
 
         # Auto-save verdict history (best-effort)
         try:
-            save_verdict_document(result, None)
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: save_verdict_document(result, None)
+            )
         except Exception as _e:
             print(f"WARNING: Autosave of GPT verdict failed: {_e}")
 
@@ -400,68 +587,76 @@ async def fetch_expirations(ticker: str):
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
 
+@app.get("/api/perplexity-models")
+@app.get("/perplexity-models")  # Alias for Docker/proxy compatibility
+async def get_available_perplexity_models():
+    """Static list of Perplexity Sonar models for Web Verdict analysis."""
+    from .analytics.methodologies.perplexity_research import (
+        list_perplexity_models,
+        resolve_perplexity_model,
+    )
+
+    default_model = resolve_perplexity_model(os.getenv("PERPLEXITY_MODEL", "sonar"))
+    return {
+        "status": "success",
+        "models": list_perplexity_models(),
+        "default": default_model,
+    }
+
+
 @app.get("/api/gpt-models")
 @app.get("/gpt-models")  # Alias for Docker/proxy compatibility
 async def get_available_gpt_models():
-    """Fetches available Gemini models for GPT verdict analysis."""
+    """Fetches available Gemini models for GPT verdict analysis.
+
+    Always returns a usable model list. When Gemini is unreachable or rejects
+    the API key (e.g. leaked key), returns curated fallbacks with status=degraded
+    and a warning so the UI selector keeps working.
+    """
     try:
-        api_key = os.getenv("GEMINI_API_KEY")
-        
-        if not api_key:
-            raise HTTPException(status_code=500, detail="Gemini API key not configured")
-        
-        # Fetch available models from Gemini API.
-        response = requests.get(
-            "https://generativelanguage.googleapis.com/v1beta/models",
-            params={"key": api_key},
-            timeout=10
-        )
-        
-        if response.status_code != 200:
-            detail_text = response.text[:200] if response.text else ""
-            mapped_status = response.status_code if response.status_code in (401, 403, 429) else 500
-            raise HTTPException(
-                status_code=mapped_status,
-                detail=f"Failed to fetch Gemini models ({response.status_code}): {detail_text}"
-            )
-        
-        models_data = response.json()
-        
-        # Extract model list from Gemini API response format.
-        models = []
-        for model in models_data.get("models", []):
-            name = model.get("name", "")
-            if not name.startswith("models/"):
-                continue
-            generation_methods = model.get("supportedGenerationMethods", [])
-            if "generateContent" not in generation_methods:
-                continue
-            model_id = name.split("/", 1)[1]
-            models.append(
-                {
-                    "id": model_id,
-                    "name": model.get("displayName", model_id),
-                }
-            )
-        
-        # Sort models by name for better UX
-        models.sort(key=lambda x: x["name"])
-        
-        return {
-            "status": "success",
-            "models": models,
-            "default": os.getenv("GEMINI_DEFAULT_MODEL", "gemini-2.5-flash")
-        }
-        
+        loop = asyncio.get_running_loop()
+        payload = await loop.run_in_executor(None, list_gpt_models)
+        return payload
     except HTTPException:
         raise
-    except requests.RequestException as e:
-        print(f"Error fetching models: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to connect to model service: {e}")
     except Exception as e:
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
 
+
+@app.post("/analysis/data-quality-check")
+@app.post("/api/analysis/data-quality-check")
+async def check_data_quality(request: AnalysisRequest):
+    """
+    Endpoint to check data quality for a specific ticker and expiration
+    without running the full analysis. Used for early guardrails.
+    """
+    try:
+        from src.services.analysis_service import check_data_quality_only
+        
+        # We need to parse the date string from the request
+        from datetime import datetime
+        try:
+            exp_date = datetime.strptime(request.expiration_date, '%Y%m%d').date()
+        except ValueError:
+            try:
+                exp_date = datetime.strptime(request.expiration_date, '%Y-%m-%d').date()
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid date format. Use YYYYMMDD or YYYY-MM-DD")
+
+        quality_assessment = await check_data_quality_only(
+            ticker=request.ticker,
+            expiration_date=exp_date
+        )
+        
+        return {"quality_assessment": quality_assessment}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        import logging
+        logging.error(f"Error checking data quality: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/analysis/stock")
 @app.post("/api/analysis/stock")  # Alias for nginx proxy compatibility
@@ -483,6 +678,33 @@ async def analyze_stock(request: AnalysisRequest):
             f"INFO: Received analysis request for ticker={request.ticker}, "
             f"expiration={request.expiration_date}, method={request.analysis_method}"
         )
+
+        quality_assessment = await analysis_service.check_data_quality_only(
+            ticker=request.ticker.upper(),
+            expiration_date=expiration_date
+        )
+
+        quality_level = quality_assessment.get("overall_level", "failed")
+        combined_score = quality_assessment.get("combined_score", quality_assessment.get("quality_score", 0.0))
+        pass_threshold = quality_assessment.get("thresholds_used", {}).get("pass_threshold", 0.6)
+        quality_failed = (
+            combined_score < pass_threshold or
+            quality_level in ["acceptable", "poor", "failed"]
+        )
+
+        if quality_failed and not request.caution_mode:
+            blocked_result = {
+                "status": "analysis_blocked",
+                "analysis_blocked": True,
+                "message": (
+                    f"Analysis blocked for {request.ticker.upper()} {request.expiration_date}. "
+                    f"Data quality did not pass (level={quality_level}, score={combined_score:.2f}, "
+                    f"threshold={pass_threshold:.2f})."
+                ),
+                "quality_assessment": quality_assessment,
+                "allow_override": True
+            }
+            return [blocked_result]
 
         analysis_result = await run_full_analysis(
             ticker=request.ticker.upper(),
@@ -519,6 +741,8 @@ async def analyze_stock(request: AnalysisRequest):
         # We also calculate and add the DTE (days to expiration) for display purposes.
         analysis_result['expiration_date'] = request.expiration_date
         analysis_result['dte'] = (expiration_date - date.today()).days
+        analysis_result['quality_assessment'] = quality_assessment
+        analysis_result['caution_mode_active'] = bool(request.caution_mode and quality_failed)
 
         payload_to_persist = {
             'ticker': request.ticker,
@@ -540,7 +764,10 @@ async def analyze_stock(request: AnalysisRequest):
 
         # Auto-save verdict history (best-effort)
         try:
-            save_verdict_document(analysis_result, None)
+            await loop.run_in_executor(
+                None,
+                lambda: save_verdict_document(analysis_result, None)
+            )
         except Exception as _e:
             # Do not fail the request if autosave fails
             print(f"WARNING: Autosave of verdict failed: {_e}")
@@ -554,6 +781,18 @@ async def analyze_stock(request: AnalysisRequest):
         if isinstance(e, HTTPException):
             raise e
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
+
+
+async def _run_analysis_in_executor(request: AnalysisRequest):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, lambda: asyncio.run(analyze_stock(request)))
+
+
+@app.post("/analysis/stock/async")
+@app.post("/api/analysis/stock/async")
+async def analyze_stock_async(request: AnalysisRequest):
+    task_id = task_manager.submit("Analysis", lambda: _run_analysis_in_executor(request))
+    return {"task_id": task_id, "status_url": f"/api/tasks/{task_id}"}
 
 
 @app.get("/analysis/history")

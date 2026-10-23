@@ -1,1 +1,1 @@
-export { YieldCurvePanel } from './YieldCurvePanel.jsx';
+export { default as RiskFreeRateHistoryChart } from './RiskFreeRateHistoryChart.jsx';

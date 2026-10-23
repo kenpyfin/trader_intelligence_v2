@@ -12,6 +12,7 @@ class AnalysisRequest(BaseModel):
     analysis_method: str = 'holistic-market-edge'
     gpt_model: str = 'gemini-2.5-flash'  # Model to use for verdict analysis
     override_price: Optional[float] = None  # Manual price override for testing/debugging
+    caution_mode: bool = False  # Manual override for quality gate
 
 
 class RiskFreeRateRequest(BaseModel):
@@ -23,6 +24,26 @@ class SaveVerdictRequest(BaseModel):
     """Payload to save an analysis verdict snapshot for later comparison."""
     verdict: Dict[str, Any]
     label: Optional[str] = None
+
+
+class ConflictResolveRequest(BaseModel):
+    """Payload to reconcile multiple saved verdicts for one ticker."""
+    ticker: str
+    verdict_ids: List[str]
+    model: str = 'gemini-2.5-flash'
+
+
+class AnalysisChatMessage(BaseModel):
+    """One turn in the analysis follow-up chat."""
+    role: str
+    content: str
+
+
+class AnalysisChatRequest(BaseModel):
+    """Follow-up chat grounded in the current analysis result."""
+    analysis: Dict[str, Any]
+    messages: List[AnalysisChatMessage]
+    model: str = 'gemini-2.5-flash'
 
 
 # Validation-related enums and models

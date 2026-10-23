@@ -24,17 +24,15 @@ from src.my_libs_py3.db import mongo
 
 async def get_option_expirations(ticker: str):
     """
-    Fetches the next 10 available option expiration dates for a given ticker.
+    Fetches all available option expiration dates for a given ticker,
+    sorted ascending as YYYYMMDD strings.
     """
     trader = await connection_manager.get_trader()
     # This will require a new method in IBTrader
     expirations = await trader.get_option_expirations(ticker)
-    
-    # The dates from IB are strings 'YYYYMMDD'. Sorting them is correct.
-    sorted_expirations = sorted(expirations)
-    
-    # Return up to the next 10 dates
-    return sorted_expirations[:10]
+
+    # Dates from the broker are strings 'YYYYMMDD'. Deduplicate and sort.
+    return sorted(set(expirations))
 
 
 # A custom JSON encoder to handle numpy types, useful for FastAPI's response model
@@ -1024,3 +1022,29 @@ async def run_full_analysis(ticker: str, expiration_date: date, r_current: float
     )
     
     return analysis_result
+
+async def check_data_quality_only(ticker: str, expiration_date: date):
+    """
+    Fetches option data and assesses data quality without running the full analysis.
+    Used for early guardrails.
+    """
+    from src.my_libs_py3.my_data import PriceDataFetcher
+    from src.analytics.data_quality_fallback_manager import DataQualityFallbackManager
+    from src.analytics.expiration_fallback_config import create_default_fallback_config
+    
+    data_fetcher = PriceDataFetcher()
+    
+    # Try to fetch using finviz first to assess quality
+    df = data_fetcher.get_option_data_finviz(
+        tic=ticker,
+        option_type='o',
+        expiration_date=expiration_date.isoformat(),
+        max_retries=1
+    )
+    
+    # Assess quality
+    config = create_default_fallback_config()
+    fallback_manager = DataQualityFallbackManager(config)
+    quality_assessment = fallback_manager._assess_data_quality(df, ticker)
+    
+    return quality_assessment

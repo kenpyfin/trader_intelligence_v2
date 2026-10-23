@@ -17,6 +17,19 @@ def _get_collection():
     return conn.db['verdicts']
 
 
+def _extract_risk_free_rate(clean: Dict[str, Any]) -> Optional[float]:
+    """Resolve the risk-free rate from a saved analysis payload."""
+    market = clean.get('market_data') or {}
+    for candidate in (clean.get('risk_free_rate'), market.get('risk_free_rate')):
+        try:
+            value = float(candidate)
+            if value == value and abs(value) != float('inf'):  # finite
+                return value
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def save_verdict_document(verdict: Dict[str, Any], label: Optional[str] = None) -> Dict[str, Any]:
     """
     Persist a verdict snapshot for later retrieval/compare.
@@ -27,6 +40,7 @@ def save_verdict_document(verdict: Dict[str, Any], label: Optional[str] = None) 
 
     # Sanitize nested data to be JSON-safe
     clean = _sanitize_for_json(verdict)
+    risk_free_rate = _extract_risk_free_rate(clean)
 
     # Build a compact overview for list displays (verdict history)
     analysis_method = clean.get('analysis_method')
@@ -34,7 +48,7 @@ def save_verdict_document(verdict: Dict[str, Any], label: Optional[str] = None) 
     iv_state = 'high' if clean.get('iv_high') else ('low' if clean.get('iv_low') else 'normal')
     if isinstance(analysis_method, str):
         if ('gpt' in analysis_method) and ('web' in analysis_method):
-            method_label = 'GPT Web Verdict'
+            method_label = 'Web Verdict'
         elif 'gpt' in analysis_method:
             method_label = 'GPT Verdict'
         else:
@@ -52,6 +66,7 @@ def save_verdict_document(verdict: Dict[str, Any], label: Optional[str] = None) 
         'S_current': clean.get('S_current'),
         'iv_state': iv_state,
         'method_label': method_label,
+        'risk_free_rate': risk_free_rate,
     }
 
     doc: Dict[str, Any] = {
@@ -60,6 +75,7 @@ def save_verdict_document(verdict: Dict[str, Any], label: Optional[str] = None) 
         'analysis_method': analysis_method,
         'gpt_model': gpt_model,
         'final_bias': clean.get('final_bias'),
+        'risk_free_rate': risk_free_rate,
         'created_at': datetime.datetime.utcnow(),
         'label': label or '',
         'overview': overview,
@@ -105,7 +121,7 @@ def list_verdicts(ticker: str, page: int = 1, page_size: int = 25) -> Dict[str, 
         analysis_method = d.get('analysis_method') or data.get('analysis_method')
         if isinstance(analysis_method, str):
             if ('gpt' in analysis_method) and ('web' in analysis_method):
-                method_label = 'GPT Web Verdict'
+                method_label = 'Web Verdict'
             elif 'gpt' in analysis_method:
                 method_label = 'GPT Verdict'
             else:
@@ -123,6 +139,7 @@ def list_verdicts(ticker: str, page: int = 1, page_size: int = 25) -> Dict[str, 
             'S_current': data.get('S_current'),
             'iv_state': iv_state,
             'method_label': method_label,
+            'risk_free_rate': d.get('risk_free_rate') or _extract_risk_free_rate(data),
         }
         items.append({
             'id': str(d.get('_id')),
@@ -132,6 +149,7 @@ def list_verdicts(ticker: str, page: int = 1, page_size: int = 25) -> Dict[str, 
             'label': d.get('label', ''),
             'analysis_method': d.get('analysis_method'),
             'gpt_model': d.get('gpt_model'),
+            'risk_free_rate': d.get('risk_free_rate') or overview.get('risk_free_rate'),
             'created_at': d.get('created_at').isoformat() if d.get('created_at') else None,
             'overview': overview,
         })

@@ -1,0 +1,17 @@
+---
+description: Require stock-selection data dictionary as source of truth
+alwaysApply: true
+---
+
+# Stock Selection Data Dictionary Rule
+
+When implementing, debugging, or documenting stock-selection and peer-modeling logic:
+
+1. Refer to `STOCK_SELECTION_DATA_TABLES.md` first for collection/field semantics.
+2. Treat its **Canonical Data Dictionary** section as the source of truth for:
+   - field names and accepted variants,
+   - required vs optional fields,
+   - feature usage mapping.
+3. If code behavior conflicts with the dictionary, update code to match the dictionary, or explicitly document and update the dictionary in the same change.
+4. Do not introduce new stock-selection fields without adding them to `STOCK_SELECTION_DATA_TABLES.md`.
+

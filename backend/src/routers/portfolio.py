@@ -4,6 +4,8 @@ import traceback
 from ..services import portfolio_service
 from ..services.order_tracking_service import list_tracked_orders, get_tracked_order, estimate_current_mtm
 from ..services.connection_manager import connection_manager
+from ..services.task_manager import task_manager
+from ..services.exit_signal_eval_service import refresh_all_open_exit_evaluations
 from ..models.portfolio_models import CloseStrategyRequest, CloseStockPositionRequest
 
 router = APIRouter(
@@ -88,6 +90,24 @@ async def get_tracked_orders(limit: int = 25, include_mtm: bool = False):
     except Exception as e:
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to fetch tracked orders: {e}")
+
+
+@router.post("/refresh-exit-evals")
+async def refresh_exit_evaluations():
+    """
+    Refresh agentic exit-condition evaluations for all open tracked option strategies.
+    Returns a task_id for polling via /api/tasks/{task_id}.
+    """
+    try:
+        task_id = task_manager.submit("ExitSignalEvalRefresh", refresh_all_open_exit_evaluations)
+        return {
+            "task_id": task_id,
+            "status_url": f"/api/tasks/{task_id}",
+            "message": "Exit signal evaluation refresh started",
+        }
+    except Exception as e:
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to start exit eval refresh: {e}")
 
 
 @router.get("/tracked-orders/{order_id}")

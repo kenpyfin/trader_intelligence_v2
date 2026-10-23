@@ -370,11 +370,139 @@ class DataQualityFallbackManager:
 
             quality_report.update(assessment_details)
 
+            # Expose transparent quality dimensions for display-only UX.
+            quality_report["display_metrics"] = self._build_display_metrics(data)
+
             return quality_report
 
         except Exception as e:
             self.logger.error(f"Quality assessment failed for {ticker}: {e}")
             return {"quality_score": 0.0, "is_empty": True, "error": str(e)}
+
+    def _build_display_metrics(self, data: pd.DataFrame) -> Dict[str, Any]:
+        """Build explicit completeness/freshness/coverage metrics for UI display."""
+        metrics: Dict[str, Any] = {
+            "completeness": {
+                "options_pricing": {"complete_count": 0, "total_count": 0, "ratio": 0.0},
+                "iv_data": {"complete_count": 0, "total_count": 0, "ratio": 0.0},
+                "greeks_data": {"complete_count": 0, "total_count": 0, "ratio": 0.0},
+            },
+            "coverage": {
+                "strikes_with_call_put": {"count": 0, "total_strikes": 0, "ratio": 0.0},
+                "strike_count": 0,
+            },
+            "freshness": {
+                "quote_timestamp_column": None,
+                "latest_timestamp": None,
+                "oldest_timestamp": None,
+                "average_age_minutes": None,
+                "option_last_trade_note": None,
+            },
+        }
+
+        if data is None or data.empty:
+            return metrics
+
+        total_rows = len(data)
+
+        # Completeness: options pricing (Bid + Ask available and valid)
+        if "Bid" in data.columns and "Ask" in data.columns:
+            bid = pd.to_numeric(data["Bid"], errors="coerce")
+            ask = pd.to_numeric(data["Ask"], errors="coerce")
+            pricing_complete = ((bid > 0) & (ask > 0)).sum()
+            metrics["completeness"]["options_pricing"] = {
+                "complete_count": int(pricing_complete),
+                "total_count": int(total_rows),
+                "ratio": float(pricing_complete / max(1, total_rows)),
+            }
+
+        # Completeness: IV column presence
+        if "IV" in data.columns:
+            iv_series = data["IV"]
+            iv_complete = iv_series.notna().sum()
+            metrics["completeness"]["iv_data"] = {
+                "complete_count": int(iv_complete),
+                "total_count": int(total_rows),
+                "ratio": float(iv_complete / max(1, total_rows)),
+            }
+
+        # Completeness: key Greeks availability
+        greek_columns = [col for col in ["Delta", "Gamma", "Theta", "Vega", "Rho"] if col in data.columns]
+        if greek_columns:
+            complete_greeks = data.dropna(subset=greek_columns).shape[0]
+            metrics["completeness"]["greeks_data"] = {
+                "complete_count": int(complete_greeks),
+                "total_count": int(total_rows),
+                "ratio": float(complete_greeks / max(1, total_rows)),
+            }
+
+        # Coverage: strikes with both call and put
+        if "Strike" in data.columns and "Type" in data.columns:
+            strike_df = data[["Strike", "Type"]].copy()
+            strike_df["Strike"] = pd.to_numeric(strike_df["Strike"], errors="coerce")
+            strike_df["Type"] = strike_df["Type"].astype(str).str.lower().str.strip()
+            strike_df = strike_df.dropna(subset=["Strike"])
+            strike_df = strike_df[strike_df["Type"].isin(["call", "put"])]
+
+            if not strike_df.empty:
+                total_strikes = strike_df["Strike"].nunique()
+                type_sets = strike_df.groupby("Strike")["Type"].agg(set)
+                both_sides_count = int(type_sets.apply(lambda s: "call" in s and "put" in s).sum())
+                metrics["coverage"]["strikes_with_call_put"] = {
+                    "count": both_sides_count,
+                    "total_strikes": int(total_strikes),
+                    "ratio": float(both_sides_count / max(1, total_strikes)),
+                }
+                metrics["coverage"]["strike_count"] = int(total_strikes)
+
+        # Freshness: prefer internal snapshot refresh timestamp when available.
+        refresh_col = "Refresh_Date" if "Refresh_Date" in data.columns else None
+        if refresh_col:
+            ts = pd.to_datetime(data[refresh_col], errors="coerce", utc=True).dropna()
+            if not ts.empty:
+                now = pd.Timestamp.utcnow()
+                age_minutes = (now - ts).dt.total_seconds() / 60.0
+                metrics["freshness"] = {
+                    "quote_timestamp_column": refresh_col,
+                    "latest_timestamp": ts.max().isoformat(),
+                    "oldest_timestamp": ts.min().isoformat(),
+                    "average_age_minutes": float(age_minutes.mean()),
+                    "option_last_trade_note": None,
+                }
+
+        # Freshness fallback: use first available quote timestamp-like column.
+        # Keep Last Trade out of freshness calculations; it is informational-only.
+        candidate_timestamp_cols = [
+            "Quote Time",
+            "QuoteTime",
+            "Timestamp",
+            "TimeStamp",
+            "Last Trade Time",
+            "LastTradeTime",
+            "UpdatedAt",
+            "updated_at",
+        ]
+        timestamp_col = next((c for c in candidate_timestamp_cols if c in data.columns), None)
+        if metrics["freshness"]["average_age_minutes"] is None and timestamp_col:
+            ts = pd.to_datetime(data[timestamp_col], errors="coerce", utc=True).dropna()
+            if not ts.empty:
+                now = pd.Timestamp.utcnow()
+                age_minutes = (now - ts).dt.total_seconds() / 60.0
+                metrics["freshness"] = {
+                    "quote_timestamp_column": timestamp_col,
+                    "latest_timestamp": ts.max().isoformat(),
+                    "oldest_timestamp": ts.min().isoformat(),
+                    "average_age_minutes": float(age_minutes.mean()),
+                    "option_last_trade_note": None,
+                }
+
+        # Option-level note: expose Last Trade as informational only.
+        if "Last Trade" in data.columns:
+            last_trade_vals = data["Last Trade"].dropna()
+            if not last_trade_vals.empty:
+                metrics["freshness"]["option_last_trade_note"] = str(last_trade_vals.iloc[0])
+
+        return metrics
 
     def get_execution_stats(self) -> Dict[str, Any]:
         """Get statistics about fallback execution performance."""

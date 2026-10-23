@@ -15,6 +15,7 @@ from alpaca.data.requests import (
     OptionLatestQuoteRequest,
     StockBarsRequest,
     StockLatestQuoteRequest,
+    StockSnapshotRequest,
 )
 from alpaca.data.timeframe import TimeFrame
 from alpaca.trading.client import TradingClient
@@ -34,6 +35,63 @@ class AccountValue:
 
 _OPTION_ASSET_CLASS_SENTINEL = object()
 _OPTION_ASSET_CLASS_CACHE: Any = _OPTION_ASSET_CLASS_SENTINEL
+
+
+def _positive_price(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        f = float(value)
+        return f if f > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _market_price_from_stock_snapshot(snapshot: Any) -> Optional[float]:
+    """Last sale / consolidated print first; then bars; then NBBO mid (Alpaca snapshot)."""
+    if snapshot is None:
+        return None
+    lt = getattr(snapshot, "latest_trade", None)
+    if lt is not None:
+        p = _positive_price(getattr(lt, "price", None))
+        if p is not None:
+            return p
+    mb = getattr(snapshot, "minute_bar", None)
+    if mb is not None:
+        p = _positive_price(getattr(mb, "close", None))
+        if p is not None:
+            return p
+    db = getattr(snapshot, "daily_bar", None)
+    if db is not None:
+        p = _positive_price(getattr(db, "close", None))
+        if p is not None:
+            return p
+    pdb = getattr(snapshot, "previous_daily_bar", None)
+    if pdb is not None:
+        p = _positive_price(getattr(pdb, "close", None))
+        if p is not None:
+            return p
+    lq = getattr(snapshot, "latest_quote", None)
+    if lq is None:
+        return None
+    for attr in ("midpoint", "price"):
+        p = _positive_price(getattr(lq, attr, None))
+        if p is not None:
+            return p
+    bid = getattr(lq, "bid_price", None)
+    ask = getattr(lq, "ask_price", None)
+    try:
+        if bid is not None and ask is not None:
+            b, a = float(bid), float(ask)
+            if b > 0 and a > 0:
+                return (b + a) / 2.0
+            if b > 0:
+                return b
+            if a > 0:
+                return a
+    except (TypeError, ValueError):
+        pass
+    return None
 
 
 class AlpacaAsyncClient(AsyncBrokerClient):
@@ -87,10 +145,18 @@ class AlpacaAsyncClient(AsyncBrokerClient):
         portfolio_value = _as_float(getattr(account, "portfolio_value", None) or getattr(account, "equity", 0))
         unrealized = _as_float(getattr(account, "unrealized_pl", 0))
         buying_power = _as_float(getattr(account, "buying_power", getattr(account, "cash", 0)))
+        available_funds = _as_float(getattr(account, "cash", getattr(account, "buying_power", 0)))
+        realized = _as_float(getattr(account, "realized_pl", 0))
+        equity = _as_float(getattr(account, "equity", None))
+        last_equity = _as_float(getattr(account, "last_equity", None))
         return [
             AccountValue(account="All", tag="NetLiquidationByCurrency", value=str(portfolio_value), currency=currency),
             AccountValue(account="All", tag="UnrealizedPnL", value=str(unrealized), currency=currency),
-            AccountValue(account="All", tag="AvailableFunds", value=str(buying_power), currency=currency),
+            AccountValue(account="All", tag="AvailableFunds", value=str(available_funds), currency=currency),
+            AccountValue(account="All", tag="BuyingPower", value=str(buying_power), currency=currency),
+            AccountValue(account="All", tag="RealizedPnL", value=str(realized), currency=currency),
+            AccountValue(account="All", tag="Equity", value=str(equity), currency=currency),
+            AccountValue(account="All", tag="PreviousEquity", value=str(last_equity), currency=currency),
         ]
 
     async def req_positions(self) -> List[Dict[str, Any]]:
@@ -146,6 +212,41 @@ class AlpacaAsyncClient(AsyncBrokerClient):
             result = await asyncio.to_thread(self._option_data.get_option_latest_quote, request)
             return result.get(option_symbol)
         raise ValueError(f"Unsupported asset_type '{asset_type}' for market data request.")
+
+    async def get_stock_market_prices(self, symbols: Sequence[str]) -> Dict[str, Optional[float]]:
+        """
+        Per-symbol consolidated market price from Alpaca stock snapshots.
+
+        Prefers latest trade (last sale), then minute/daily bar close, then NBBO mid from latest quote.
+        Keys in the returned dict are uppercase tickers.
+        """
+        self._ensure_connected()
+        if self._stock_data is None:
+            raise RuntimeError("Stock data client is not initialized.")
+        unique = sorted({str(s).strip().upper() for s in symbols if s and str(s).strip()})
+        if not unique:
+            return {}
+
+        out: Dict[str, Optional[float]] = {}
+        chunk_size = 50
+        for i in range(0, len(unique), chunk_size):
+            chunk = unique[i : i + chunk_size]
+            request = StockSnapshotRequest(symbol_or_symbols=chunk)
+            try:
+                result = await asyncio.to_thread(self._stock_data.get_stock_snapshot, request)
+            except Exception as exc:
+                print(f"WARN: get_stock_snapshot failed for symbols {chunk}: {exc}")
+                for sym in chunk:
+                    out[sym] = None
+                continue
+            if not isinstance(result, dict):
+                for sym in chunk:
+                    out[sym] = None
+                continue
+            for sym in chunk:
+                snap = result.get(sym)
+                out[sym] = _market_price_from_stock_snapshot(snap)
+        return out
 
     async def cancel_mkt_data(self, contract: Any):
         del contract  # No streaming subscriptions to cancel in the HTTP API.
